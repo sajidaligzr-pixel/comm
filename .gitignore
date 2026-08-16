@@ -1,0 +1,37 @@
+.claude/
+node_modules/
+# Every dotenv variant (.env, .env.local, .env.production, .env.*.local, …) — the
+# narrower list this used to be (.env / .env.local / .env.*.local only) would have
+# silently let something like .env.production through. .env.example is the one
+# real secret-free file in this family, so it's explicitly un-ignored below.
+.env*
+!.env.example
+# Stray private keys/certs — nothing in this repo is supposed to contain one, but
+# infrastructure/scripts/ + the deployment runbook have you generating SSH keypairs
+# during ops work; this only matters if one is ever generated *inside* the repo
+# directory by mistake instead of ~/.ssh/.
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.DS_Store
+dist/
+build/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+.turbo/
+npm-debug.log*
+packages/database/generated/
+# Local-filesystem object storage adapter's dev-only backing store
+# (packages/storage/src/local-fs-storage.ts) — never used in production, where
+# OBJECT_STORAGE_* env vars select the real S3 adapter instead.
+/.data/
+
+# infrastructure/scripts/backup-db.sh's own config (DATABASE_URL, Spaces bucket/region,
+# AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY) and its local working copies of each
+# pg_dump — real secrets and real (if temporary) plaintext-adjacent data, same rule as
+# apps/web/.env / apps/worker/.env above.
+/.backup-env
+/.backups/
