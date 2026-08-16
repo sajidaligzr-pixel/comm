@@ -98,7 +98,19 @@ export async function enableBiometricUnlock(
         authenticatorSelection: {
           authenticatorAttachment: 'platform', // Touch ID/Face ID/Windows Hello, never a roaming USB key
           userVerification: 'required', // must actually gate on biometric/PIN, not just "a key is present"
-          residentKey: 'preferred',
+          // 'discouraged', not 'preferred' — found live: 'preferred' nudges the OS
+          // toward a *discoverable* credential, which on Android specifically shows
+          // up as "create a passkey" and is the class of credential that gets backed
+          // up/synced to Google Password Manager across a user's other signed-in
+          // devices. That directly contradicts this module's own docstring ("the
+          // same secret bytes... only on this device") — a synced passkey's PRF
+          // output would evaluate the same on any device it synced to, not just this
+          // one. This app already stores the credential id locally
+          // (CREDENTIAL_ID_KEY) and always passes it via `allowCredentials` in
+          // `evaluatePrf`, so a discoverable/usernameless credential was never
+          // actually needed — 'discouraged' is the correct, tighter choice, not a
+          // weaker fallback.
+          residentKey: 'discouraged',
         },
         extensions: { prf: {} } as AuthenticationExtensionsClientInputs,
       },
