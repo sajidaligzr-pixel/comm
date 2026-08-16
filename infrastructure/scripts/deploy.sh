@@ -52,7 +52,16 @@ echo "==> Building"
 # server's real apps/web/.env — i.e. the actual production Postgres — which is exactly
 # the kind of thing the integration tests' real-row-creating design is fine with in a
 # throwaway CI database and not fine with here.
-npm run build
+#
+# --force is load-bearing, found live: this script reuses the same persistent
+# checkout (and the same .turbo/ cache) on every deploy, unlike CI's throwaway
+# runner — turbo's incremental cache saw `git reset --hard` land genuinely new
+# source and still replayed a stale cached build ("cache hit... 36ms >>> FULL
+# TURBO"), so PM2 kept serving old code while every fix looked like it silently
+# "didn't work." A production deploy should never be faster because it skipped
+# actually building the thing it's about to serve — --force costs a few real
+# seconds of compile time and removes that whole failure mode.
+npm run build -- --force
 
 echo "==> Running database migrations"
 npm run db:migrate:deploy
