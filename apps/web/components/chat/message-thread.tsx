@@ -648,7 +648,7 @@ export function MessageThread({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-muted/20">
-      <div ref={scrollRef} className="min-h-0 flex-1 space-y-0.5 overflow-y-auto px-2 py-3 sm:px-6">
+      <div ref={scrollRef} className="min-h-0 flex-1 space-y-0.5 overflow-y-auto py-3 pl-2 pr-3 sm:px-6">
         {!ready && <p className="text-center text-sm text-muted-foreground">Loading…</p>}
         {ready && nextCursor && (
           <div className="flex justify-center pb-2">
@@ -688,7 +688,7 @@ export function MessageThread({
                 </div>
               )}
               <div className={cn('group flex', m.isOwn ? 'justify-end' : 'justify-start', grouped ? 'mt-0.5' : 'mt-2.5')}>
-                <div className={cn('flex min-w-0 max-w-[85%] items-end gap-1 sm:max-w-[70%]', m.isOwn && 'flex-row-reverse')}>
+                <div className={cn('flex min-w-0 max-w-[80%] items-end gap-1 sm:max-w-[70%]', m.isOwn && 'flex-row-reverse')}>
                   <div
                     className={cn(
                       // min-w-0 here is the real fix: without it, this bubble's

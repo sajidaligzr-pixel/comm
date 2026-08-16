@@ -46,9 +46,6 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                 <Link href="/chats" className="hover:text-foreground">
                   Chats
                 </Link>
-                <Link href="/devices" className="hover:text-foreground">
-                  Devices
-                </Link>
                 {admin && (
                   <Link href="/admin" className="hover:text-foreground">
                     Admin
@@ -57,20 +54,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
               </nav>
             </div>
             <div className="flex items-center gap-1">
-              {/* Compact nav on narrow screens, where the wordmark + text links above
-                  would crowd the header — same destinations, just smaller.
-                  /devices was genuinely unreachable from here before (no link
-                  anywhere in either nav, desktop or mobile) — the only way in was
-                  typing the URL directly, which is how the linked-devices list and
-                  the biometric-unlock toggle both ended up effectively hidden
-                  features. Found live, from a real "where is that setting" report. */}
+              {/* Icon-only nav on narrow screens, where the wordmark + text links above
+                  would crowd the header — same destinations, just compact. */}
               <nav className="flex items-center gap-1 sm:hidden">
-                <Link
-                  href="/devices"
-                  className="flex h-9 items-center rounded-lg px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
-                >
-                  Devices
-                </Link>
                 {admin && (
                   <Link
                     href="/admin"
