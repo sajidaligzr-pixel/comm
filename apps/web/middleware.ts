@@ -53,8 +53,17 @@ function buildContentSecurityPolicy(nonce: string): string {
   const directives = [
     "default-src 'self'",
     // 'unsafe-eval' only in dev: Next's dev-mode HMR/Fast Refresh client needs it;
-    // the production build does not, and does not get it.
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ''}`,
+    // the production build does not, and does not get it. 'wasm-unsafe-eval' is a
+    // separate, narrower CSP Level 3 keyword — it permits WebAssembly.compile()/
+    // instantiate() specifically, without permitting JS eval() the way 'unsafe-eval'
+    // does — and it's needed unconditionally, not just in dev: packages/crypto's
+    // primary implementation (vodozemac) compiles a WASM module, and without this the
+    // browser throws "violates ... because 'unsafe-eval' is not an allowed source"
+    // the moment any crypto operation runs, in production specifically, since dev's
+    // blanket 'unsafe-eval' was masking the gap. Caught live-testing an actual
+    // deploy, not by typecheck/lint/build — same class of gap the file's own
+    // docstring already flags for CSP in general.
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' 'wasm-unsafe-eval'${isDev ? " 'unsafe-eval'" : ''}`,
     // The one documented, narrow exception in this whole policy: React's
     // `style={{...}}` prop (a handful of per-render values — avatar.tsx's per-user
     // color, bubbles.tsx's voice-note progress bar, group-message-thread.tsx's
