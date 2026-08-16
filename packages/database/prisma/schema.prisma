@@ -1,0 +1,605 @@
+// Prisma schema — the executable form of docs/02-database-schema.md. Keep them in sync;
+// if they drift, docs/02 is the design intent and this file is what shipped, so a
+// mismatch is a bug in one of the two, not a normal state to leave standing.
+//
+// This file currently covers Phase 2 only (auth/users/devices/sessions/admin/audit,
+// plus the privacy/notification-preference tables Phase 2's invite-redemption flow
+// seeds defaults into). Conversations/messages/groups/calls/etc. from docs/02 are
+// deliberately NOT modeled yet — per docs/13-roadmap.md's incremental-phases rule,
+// each phase adds its own tables via its own migration when that phase's code lands,
+// rather than laying down a large unreviewed schema for features that don't exist yet.
+
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../generated/client"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider          = "postgresql"
+  url               = env("DATABASE_URL")
+  // Dev-only: `prisma migrate dev` needs a throwaway "shadow" database to detect
+  // drift, and creating a database requires CREATEDB — a privilege the app's own
+  // runtime role deliberately does NOT have (docs/36-database-security.md's
+  // least-privilege rule). Rather than grant CREATEDB to the app role just for this,
+  // migrations run under a separate, more-privileged role via this env var; the app
+  // itself always connects as the unprivileged role above. Unset in production,
+  // where `prisma migrate deploy` (no shadow DB involved) is used instead — see
+  // docs/11-deployment-architecture.md.
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+  extensions        = [citext]
+}
+
+// ── Identity & accounts ──────────────────────────────────────────────────────
+
+model User {
+  id                 String     @id @default(uuid()) @db.Uuid
+  username           String     @unique @db.Citext
+  displayName        String     @map("display_name")
+  about              String?
+  avatarObjectKey    String?    @map("avatar_object_key")
+  passwordHash       String?    @map("password_hash")
+  // True whenever the current password was set by someone/something other than the
+  // user themselves acting deliberately (the bootstrap-admin script; a future
+  // admin-initiated reset) — see docs/07-auth-architecture.md's account-recovery
+  // section. Normal invite redemption never sets this, because the invitee chooses
+  // their own password at that point already.
+  mustChangePassword Boolean    @default(false) @map("must_change_password")
+  status             UserStatus @default(pending_invite)
+  createdByAdminId   String?    @map("created_by_admin_id") @db.Uuid
+  createdAt          DateTime   @default(now()) @map("created_at")
+  updatedAt          DateTime   @updatedAt @map("updated_at")
+
+  createdByAdmin          Admin?                  @relation("AdminProvisionedUsers", fields: [createdByAdminId], references: [id], onDelete: SetNull)
+  adminRole               Admin?                  @relation("AdminSelf")
+  invites                 Invite[]
+  devices                 Device[]
+  sessions                Session[]
+  securityEvents          SecurityEvent[]
+  privacySettings         UserPrivacySetting?
+  notificationPrefs       NotificationPreference?
+  conversationMemberships ConversationMember[]
+  sentMessages            Message[]
+  messageReactions        MessageReaction[]
+  groupMemberships        GroupMember[]
+
+  @@map("users")
+}
+
+enum UserStatus {
+  pending_invite
+  active
+  suspended
+  deleted
+}
+
+model Admin {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @unique @map("user_id") @db.Uuid
+  role      AdminRole
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user             User     @relation("AdminSelf", fields: [userId], references: [id], onDelete: Cascade)
+  provisionedUsers User[]   @relation("AdminProvisionedUsers")
+  issuedInvites    Invite[]
+
+  @@map("admins")
+}
+
+enum AdminRole {
+  superadmin
+  support
+}
+
+model Invite {
+  id              String    @id @default(uuid()) @db.Uuid
+  userId          String    @map("user_id") @db.Uuid
+  tokenHash       String    @unique @map("token_hash")
+  issuedByAdminId String    @map("issued_by_admin_id") @db.Uuid
+  expiresAt       DateTime  @map("expires_at")
+  redeemedAt      DateTime? @map("redeemed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  user          User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  issuedByAdmin Admin @relation(fields: [issuedByAdminId], references: [id], onDelete: Restrict)
+
+  // Partial unique index (one live invite per pending user) is added in the raw SQL
+  // migration — Prisma's schema DSL can't express a partial index directly.
+  @@map("invites")
+}
+
+// ── Devices & keys ───────────────────────────────────────────────────────────
+
+model Device {
+  id            String         @id @default(uuid()) @db.Uuid
+  userId        String         @map("user_id") @db.Uuid
+  name          String
+  deviceType    DeviceType     @map("device_type")
+  status        DeviceStatus   @default(active)
+  linkedAt      DateTime       @default(now()) @map("linked_at")
+  lastActiveAt  DateTime       @default(now()) @map("last_active_at")
+  revokedAt     DateTime?      @map("revoked_at")
+  revokedReason RevokedReason? @map("revoked_reason")
+
+  user                   User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  identityKey            IdentityKey?
+  signedPreKeys          SignedPreKey[]
+  oneTimePreKeys         OneTimePreKey[]
+  sessions               Session[]
+  securityEvents         SecurityEvent[]
+  sentMessages           Message[]
+  messageRecipient       MessageRecipient[]
+  pushSubscription       PushSubscription?
+  groupKeySharesSent     GroupKeyShare[]    @relation("GroupKeyShareFrom")
+  groupKeySharesReceived GroupKeyShare[]    @relation("GroupKeyShareTo")
+
+  @@index([userId])
+  @@map("devices")
+}
+
+enum DeviceType {
+  web
+  android
+  desktop
+}
+
+enum DeviceStatus {
+  active
+  revoked
+}
+
+enum RevokedReason {
+  user
+  admin
+  security_event
+}
+
+model IdentityKey {
+  deviceId           String   @id @map("device_id") @db.Uuid
+  // Two public keys per identity, not one — see docs/05-crypto-architecture.md's
+  // identity/keys.ts note on why signing (Ed25519) and DH agreement (X25519) use
+  // distinct key pairs rather than one XEdDSA-converted Curve25519 key.
+  signingPublicKey   Bytes    @map("signing_public_key")
+  agreementPublicKey Bytes    @map("agreement_public_key")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("identity_keys")
+}
+
+model SignedPreKey {
+  id        String    @id @default(uuid()) @db.Uuid
+  deviceId  String    @map("device_id") @db.Uuid
+  keyId     Int       @map("key_id")
+  publicKey Bytes     @map("public_key")
+  signature Bytes
+  createdAt DateTime  @default(now()) @map("created_at")
+  rotatedAt DateTime? @map("rotated_at")
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, keyId])
+  @@map("signed_pre_keys")
+}
+
+model OneTimePreKey {
+  id        String    @id @default(uuid()) @db.Uuid
+  deviceId  String    @map("device_id") @db.Uuid
+  keyId     Int       @map("key_id")
+  publicKey Bytes     @map("public_key")
+  claimedAt DateTime? @map("claimed_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, keyId])
+  @@index([deviceId, claimedAt])
+  @@map("one_time_pre_keys")
+}
+
+// ── Auth sessions ─────────────────────────────────────────────────────────────
+
+model Session {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  deviceId          String    @map("device_id") @db.Uuid
+  refreshTokenHash  String    @unique @map("refresh_token_hash")
+  accessTokenFamily String    @map("access_token_family") @db.Uuid
+  createdAt         DateTime  @default(now()) @map("created_at")
+  lastUsedAt        DateTime  @default(now()) @map("last_used_at")
+  expiresAt         DateTime  @map("expires_at")
+  revokedAt         DateTime? @map("revoked_at")
+  ipHash            String?   @map("ip_hash")
+  userAgent         String?   @map("user_agent")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([accessTokenFamily])
+  @@map("sessions")
+}
+
+// ── Security & audit ──────────────────────────────────────────────────────────
+
+model SecurityEvent {
+  id        String            @id @default(uuid()) @db.Uuid
+  userId    String            @map("user_id") @db.Uuid
+  eventType SecurityEventType @map("event_type")
+  deviceId  String?           @map("device_id") @db.Uuid
+  ipHash    String?           @map("ip_hash")
+  metadata  Json?
+  createdAt DateTime          @default(now()) @map("created_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("security_events")
+}
+
+enum SecurityEventType {
+  login_success
+  login_failed
+  new_device_linked
+  device_revoked
+  password_changed
+  identity_key_changed
+  session_revoked
+  suspicious_login
+  account_provisioned
+  account_suspended
+}
+
+// ── Privacy & notifications (schema laid down now; Phase 2 seeds sane defaults on
+//    invite redemption; full CRUD ships with the /privacy module, see 13-roadmap.md) ──
+
+model UserPrivacySetting {
+  userId           String           @id @map("user_id") @db.Uuid
+  lastSeen         VisibilityLevel  @default(contacts) @map("last_seen")
+  onlineStatus     OnlineStatusMode @default(same_as_last_seen) @map("online_status")
+  profilePhoto     VisibilityLevel  @default(contacts) @map("profile_photo")
+  about            VisibilityLevel  @default(contacts)
+  readReceipts     Boolean          @default(true) @map("read_receipts")
+  typingIndicators Boolean          @default(true) @map("typing_indicators")
+  calls            VisibilityLevel  @default(contacts)
+  groupsAddMe      GroupsAddMeMode  @default(contacts) @map("groups_add_me")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_privacy_settings")
+}
+
+enum VisibilityLevel {
+  everyone
+  contacts
+  nobody
+}
+
+enum OnlineStatusMode {
+  everyone
+  same_as_last_seen
+}
+
+enum GroupsAddMeMode {
+  everyone
+  contacts
+}
+
+model NotificationPreference {
+  userId               String                  @id @map("user_id") @db.Uuid
+  conversationsDefault NotificationDefaultMode @default(all) @map("conversations_default")
+  showPreview          Boolean                 @default(false) @map("show_preview")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("notification_preferences")
+}
+
+enum NotificationDefaultMode {
+  all
+  mentions_only
+  none
+}
+
+// One row per device (docs/13's "Push notifications" pass, shipped ahead of the rest
+// of Phase 7) — `deviceId` is the primary key rather than a separate `id` column
+// since a device only ever has one live Web Push subscription; re-subscribing
+// (browser-rotated subscription, re-enabling after disabling) just upserts over the
+// old row. `subscriptionCiphertext` covers the whole `{endpoint, keys}` object, not
+// only the endpoint — both are meaningless without the other for actually sending a
+// push, so encrypting just one would be a half-measure. Decrypted only in
+// `apps/worker` at dispatch time (`packages/security`'s `decryptAtRest`), a
+// server-held key, never the user's KEK (the worker has no way to obtain that).
+model PushSubscription {
+  deviceId               String       @id @map("device_id") @db.Uuid
+  provider               PushProvider @default(web_push)
+  subscriptionCiphertext Bytes        @map("subscription_ciphertext")
+  createdAt              DateTime     @default(now()) @map("created_at")
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("push_subscriptions")
+}
+
+enum PushProvider {
+  web_push
+  fcm
+}
+
+// ── Conversations & messages (direct: Phase 3; group: docs/13-roadmap.md's group
+// chat pass, ahead of the original Phase 5 slot) ─────────────────────────────────
+
+model Conversation {
+  id                String            @id @default(uuid()) @db.Uuid
+  type              ConversationType  @default(direct)
+  // Null for `direct` conversations. Set once, at creation, for `group` ones — a
+  // conversation never changes type after creation.
+  groupId           String?           @unique @map("group_id") @db.Uuid
+  disappearingTimer DisappearingTimer @default(off) @map("disappearing_timer")
+  createdAt         DateTime          @default(now()) @map("created_at")
+
+  group    Group?               @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  members  ConversationMember[]
+  messages Message[]
+
+  @@map("conversations")
+}
+
+enum ConversationType {
+  direct
+  group
+}
+
+enum DisappearingTimer {
+  off
+  h24
+  d7
+  d30
+}
+
+model ConversationMember {
+  conversationId    String    @map("conversation_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  joinedAt          DateTime  @default(now()) @map("joined_at")
+  mutedUntil        DateTime? @map("muted_until")
+  archived          Boolean   @default(false)
+  lastReadMessageId String?   @map("last_read_message_id") @db.Uuid
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([conversationId, userId])
+  @@index([userId])
+  @@map("conversation_members")
+}
+
+model Message {
+  // Client-generated (UUIDv7) — doubles as the idempotency key for the WS/REST
+  // ingest path (docs/02-database-schema.md#message-ids): INSERT ... ON CONFLICT
+  // (id) DO NOTHING, so a retried send from a flaky connection never duplicates.
+  id               String              @id @db.Uuid
+  conversationId   String              @map("conversation_id") @db.Uuid
+  senderUserId     String              @map("sender_user_id") @db.Uuid
+  senderDeviceId   String              @map("sender_device_id") @db.Uuid
+  envelopeType     MessageEnvelopeType @map("envelope_type")
+  // The Double Ratchet header (sender ratchet pubkey + PN + N — 40 raw bytes,
+  // ratchet/double-ratchet.ts's `encodeHeader`) travels separately from the AEAD
+  // ciphertext: it's routing/ratchet-bookkeeping metadata the *server* never needs
+  // to parse, but the *recipient's* ratchet needs both pieces to decrypt
+  // (docs/05-crypto-architecture.md). Both null after tombstoning.
+  envelopeHeader   Bytes?              @map("envelope_header")
+  ciphertext       Bytes?
+  // Present only on the first message of a brand-new X3DH session — see
+  // packages/crypto's `OutboundSessionResult.x3dhInit`. Stored as opaque JSON
+  // (base64 fields), never parsed server-side beyond routing it to the recipient.
+  x3dhInit         Json?               @map("x3dh_init")
+  contentTypeHint  MessageContentType  @map("content_type_hint")
+  replyToMessageId String?             @map("reply_to_message_id") @db.Uuid
+  sentAt           DateTime            @map("sent_at")
+  serverReceivedAt DateTime            @default(now()) @map("server_received_at")
+  editedAt         DateTime?           @map("edited_at")
+  deletedAt        DateTime?           @map("deleted_at")
+  // Which of the three tombstone paths produced this deletion — null until
+  // `deletedAt` is set. Purely a UI hint (server/modules/messages/service.ts's
+  // `deleteMessage`, apps/worker/src/jobs/cleanup.ts's two sweeps): all three paths
+  // tombstone identically (ciphertext/envelopeHeader/x3dhInit nulled), this just
+  // lets the client show "deleted" vs "disappeared" vs "expired" instead of one
+  // generic message for all three (docs/10-privacy-data-retention.md's media
+  // retention pass).
+  deletionReason   MessageDeletionReason? @map("deletion_reason")
+
+  conversation Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User               @relation(fields: [senderUserId], references: [id], onDelete: Restrict)
+  senderDevice Device             @relation(fields: [senderDeviceId], references: [id], onDelete: Restrict)
+  recipients   MessageRecipient[]
+  reactions    MessageReaction[]
+  attachment   MessageAttachment?
+
+  @@index([conversationId, serverReceivedAt])
+  @@index([senderUserId])
+  @@map("messages")
+}
+
+// docs/10-privacy-data-retention.md's media retention pass — which of the three
+// tombstone paths deleted a message, see `Message.deletionReason` above.
+enum MessageDeletionReason {
+  // DELETE /api/messages/:id — the sender chose to delete it.
+  manual
+  // apps/worker's disappearing-message sweep — the conversation's shared timer
+  // (docs/02-database-schema.md's `conversations.disappearing_timer`) expired it.
+  disappearing_timer
+  // apps/worker's media retention sweep — image/voice/file content is erased 24h
+  // after sending regardless of the disappearing-timer setting, a storage-bounding
+  // default rather than a privacy feature. Text messages are never touched by this
+  // path.
+  media_retention
+}
+
+enum MessageEnvelopeType {
+  // X3DH + Double Ratchet — see docs/05-crypto-architecture.md#library-decision.
+  // Named for the protocol, not a specific library, since (unlike the Phase 1
+  // draft's assumption) this isn't backed by Olm.
+  x3dh_ratchet_1to1
+  // Megolm-style group ratchet — docs/05-crypto-architecture.md#group-encryption,
+  // docs/13-roadmap.md's group chat pass. Header stored in the same
+  // `envelope_header` column as the 1:1 case (16-byte session id + 4-byte
+  // counter, packages/crypto/src/group), not a schema change.
+  megolm_group
+}
+
+enum MessageContentType {
+  text
+  image
+  media
+  voice
+  location
+  contact
+  reaction
+  system
+}
+
+model MessageRecipient {
+  messageId         String    @map("message_id") @db.Uuid
+  recipientDeviceId String    @map("recipient_device_id") @db.Uuid
+  deliveredAt       DateTime? @map("delivered_at")
+  readAt            DateTime? @map("read_at")
+
+  message         Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  recipientDevice Device  @relation(fields: [recipientDeviceId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, recipientDeviceId])
+  @@map("message_recipients")
+}
+
+model MessageReaction {
+  messageId String   @map("message_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  emoji     String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, userId, emoji])
+  @@map("message_reactions")
+}
+
+// ── Media attachments (docs/13-roadmap.md's file-attachment pass) ────────────────
+//
+// Trimmed from docs/02-database-schema.md's fuller sketch: `mimeTypeCiphertext` and
+// `blurhashCiphertext` are dropped here because the server never needs them — the
+// attachment descriptor (objectKey/key/nonce/mimeType/fileName/sizeBytes) travels
+// fully end-to-end inside the message ciphertext itself (apps/web/lib/crypto's
+// attachment-crypto.ts), and no thumbnailing service exists in this pass. This
+// table exists purely so `GET /media/:objectKey/download-url` can authorize a
+// download (join to the parent message's conversation membership) without the
+// server ever decrypting anything.
+model MessageAttachment {
+  id                 String   @id @default(uuid()) @db.Uuid
+  messageId          String   @unique @map("message_id") @db.Uuid
+  objectKey          String   @unique @map("object_key")
+  encryptedSizeBytes BigInt   @map("encrypted_size_bytes")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@map("message_attachments")
+}
+
+// ── Groups (docs/13-roadmap.md's group chat pass, ahead of the original Phase 5
+// slot) — real Megolm-style group ratchet, docs/05-crypto-architecture.md#group-encryption.
+//
+// Trimmed from docs/02-database-schema.md's fuller sketch: no `avatarObjectKey`
+// (group avatars aren't built this pass) and no `group_invite_links` table at all
+// (join-by-link is out of scope — members are added directly by an existing member,
+// admin-only for removal) — both dropped for the same "don't lay down schema for
+// code that doesn't exist yet" reason this file's header comment already states.
+
+model Group {
+  id                   String   @id @default(uuid()) @db.Uuid
+  name                 String
+  description          String?
+  onlyAdminsCanMessage Boolean  @default(false) @map("only_admins_can_message")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  conversation Conversation?
+  members      GroupMember[]
+  sessions     GroupSession[]
+  keyShares    GroupKeyShare[]
+
+  @@map("groups")
+}
+
+model GroupMember {
+  groupId   String    @map("group_id") @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  role      GroupRole @default(member)
+  joinedAt  DateTime  @default(now()) @map("joined_at")
+  // Kept (not hard-deleted) on removal — needed to know which Megolm epoch a
+  // removed member should be excluded from going forward, see
+  // docs/05-crypto-architecture.md#group-encryption. `ConversationMember` (the
+  // actual message-visibility gate) IS hard-deleted on removal, unlike this row.
+  removedAt DateTime? @map("removed_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@map("group_members")
+}
+
+enum GroupRole {
+  member
+  admin
+}
+
+// Bookkeeping only — the actual Megolm outbound/inbound ratchet state lives
+// entirely client-side (docs/05-crypto-architecture.md#group-encryption); this row
+// just records that an epoch rotation happened and when, for observability. Bumped
+// on every member removal.
+model GroupSession {
+  id           String    @id @default(uuid()) @db.Uuid
+  groupId      String    @map("group_id") @db.Uuid
+  epoch        Int
+  createdAt    DateTime  @default(now()) @map("created_at")
+  supersededAt DateTime? @map("superseded_at")
+
+  group Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([groupId, epoch])
+  @@map("group_sessions")
+}
+
+// A durable, device-to-device outbox for group session key material (docs/13-roadmap.md's
+// design note: docs/05-crypto-architecture.md says key distribution rides each
+// member's existing 1:1 Double Ratchet session but doesn't specify a transport — this
+// table is that transport). Each row is one member's outbound group-session key,
+// end-to-end encrypted via the EXISTING pairwise session between `fromDeviceId` and
+// `toDeviceId` (apps/web/lib/crypto/conversation-crypto.ts's `encryptForDevice`,
+// unchanged) — the server relays this as blindly as it relays a 1:1 message; it
+// never sees the actual group key. Delivered live over WS (`group.key-share`,
+// docs/04-websocket-realtime.md) when the target device is connected, PLUS fetchable
+// via `GET /groups/:id/key-shares` on reconnect/thread-open — the REST half is what
+// makes this durable rather than a WS-only event a briefly-offline member would
+// permanently miss.
+model GroupKeyShare {
+  id             String    @id @default(uuid()) @db.Uuid
+  groupId        String    @map("group_id") @db.Uuid
+  epoch          Int
+  fromDeviceId   String    @map("from_device_id") @db.Uuid
+  toDeviceId     String    @map("to_device_id") @db.Uuid
+  envelopeHeader Bytes     @map("envelope_header")
+  ciphertext     Bytes
+  x3dhInit       Json?     @map("x3dh_init")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  consumedAt     DateTime? @map("consumed_at")
+
+  group      Group  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  fromDevice Device @relation("GroupKeyShareFrom", fields: [fromDeviceId], references: [id], onDelete: Cascade)
+  toDevice   Device @relation("GroupKeyShareTo", fields: [toDeviceId], references: [id], onDelete: Cascade)
+
+  @@index([toDeviceId, consumedAt])
+  @@map("group_key_shares")
+}

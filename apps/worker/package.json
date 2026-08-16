@@ -1,0 +1,29 @@
+{
+  "name": "@comm/worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Background jobs — see docs/01-folder-structure.md. Phase 2 only needs periodic cleanup (no queue producers exist yet); BullMQ is adopted starting Phase 4 when media processing actually enqueues jobs, not before.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@comm/database": "*",
+    "@comm/security": "*",
+    "@comm/storage": "*",
+    "@comm/types": "*",
+    "dotenv": "^16.4.5",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@comm/config": "*",
+    "@types/node": "^22.7.5",
+    "@types/web-push": "^3.6.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3"
+  }
+}

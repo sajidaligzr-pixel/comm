@@ -1,0 +1,11 @@
+-- Partial unique index: at most one *unredeemed* invite per user. Expressed as raw
+-- SQL because Prisma's schema DSL (as of the version pinned in package.json) can't
+-- declare a partial index directly — see the comment on the Invite model in
+-- prisma/schema.prisma and docs/02-database-schema.md's invites table.
+--
+-- This is a real integrity guarantee enforced by Postgres itself, not just
+-- application-level discipline: even a bug in the app-layer "invalidate the old
+-- invite first" logic (see server/modules/admin/service.ts's issueRecoveryInvite)
+-- cannot result in two live invites for the same pending account, because the
+-- second concurrent INSERT would simply fail the constraint.
+CREATE UNIQUE INDEX "invites_one_live_per_user" ON "invites" ("user_id") WHERE "redeemed_at" IS NULL;

@@ -1,0 +1,104 @@
+name: CI & Deploy
+
+# Every push/PR against main runs the full gate (ci job). Only a push that lands on
+# main — i.e. something actually merged — goes on to the deploy job, which SSHes into
+# the Droplet and runs infrastructure/scripts/deploy.sh. Matches
+# docs/11-deployment-architecture.md's CI/CD section: "Production deploy requires all
+# of the above green" — deploy is gated on ci, never runs standalone.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Ephemeral, CI-only values — never real secrets, never touch anything outside this
+# job's throwaway Postgres/Redis started below. Deliberately native installs on the
+# runner (systemctl/apt-get), not GitHub Actions "services:" containers — those run on
+# Docker under the hood, which docs/11 rules out even for CI, not just production.
+env:
+  NODE_ENV: test
+  PORT: '3000'
+  WEB_ORIGIN: 'http://localhost:3000'
+  NEXT_PUBLIC_API_URL: 'http://localhost:3000'
+  NEXT_PUBLIC_WS_URL: 'ws://localhost:3000'
+  DATABASE_URL: 'postgresql://comm_app:comm_app_ci@localhost:5432/comm_ci'
+  REDIS_URL: 'redis://localhost:6379'
+  JWT_ACCESS_SECRET: 'ck7eh9tGgSEsO7gdCTWNi/XaSY5FPLC2F1IEO0CIjd4E3Z7Ey3aGxcrdaNnKXdTW'
+  JWT_ACCESS_TTL: '15m'
+  REFRESH_TOKEN_TTL_DAYS: '30'
+  INVITE_TOKEN_TTL_HOURS: '72'
+  CSRF_SECRET: 'T7RtHaDfqh4e3bIJ5ewPuYA3ZanZr30dk4bYc5cjEmM='
+  ARGON2_MEMORY_KIB: '65536'
+  ARGON2_ITERATIONS: '3'
+  ARGON2_PARALLELISM: '1'
+  PUSH_SUBSCRIPTION_ENC_KEY: 'PgQDLIL8jXBTdBrGqQZSC2IbNbYNLRAR5m3IUDX99Oc='
+  MEDIA_MAX_UPLOAD_BYTES: '26214400'
+  MEDIA_ACCOUNT_QUOTA_BYTES: '524288000'
+  # OBJECT_STORAGE_*, TURN_*, VAPID_* deliberately left unset — CI exercises the same
+  # "unconfigured -> dev-safe fallback" paths local dev already does (local-fs media
+  # storage, empty ICE list, push silently disabled). Real values only ever exist in
+  # apps/web/.env / apps/worker/.env on the actual server.
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start PostgreSQL
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql -c "CREATE ROLE comm_app LOGIN PASSWORD 'comm_app_ci';"
+          sudo -u postgres psql -c "CREATE DATABASE comm_ci OWNER comm_app;"
+
+      - name: Install and start Redis
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y redis-server
+          sudo systemctl enable --now redis-server
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: Apply database migrations
+        run: npm run db:migrate:deploy
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=critical
+
+      - name: Build
+        run: npm run build
+
+  deploy:
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run deploy.sh on the Droplet
+        run: |
+          ssh -i ~/.ssh/deploy_key "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "bash ${{ secrets.DEPLOY_PATH }}/infrastructure/scripts/deploy.sh"

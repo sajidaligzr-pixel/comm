@@ -1,0 +1,48 @@
+{
+  "name": "@comm/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Comm application: UI, API (Route Handlers), and WebSocket realtime — one Next.js app, see docs/00-overview.md.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch server.ts",
+    "build": "next build",
+    "start": "NODE_ENV=production tsx server.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:security": "vitest run server/__tests__/security"
+  },
+  "dependencies": {
+    "@comm/crypto": "*",
+    "@comm/database": "*",
+    "@comm/security": "*",
+    "@comm/storage": "*",
+    "@comm/types": "*",
+    "clsx": "^2.1.1",
+    "cookie": "^1.0.1",
+    "ioredis": "^5.4.1",
+    "jose": "^5.9.6",
+    "next": "^16.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.5.4",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@comm/config": "*",
+    "@types/node": "^22.7.5",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.5.12",
+    "autoprefixer": "^10.4.20",
+    "dotenv": "^16.4.5",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.3",
+    "vite-tsconfig-paths": "^5.0.1",
+    "vitest": "^3.2.7"
+  }
+}

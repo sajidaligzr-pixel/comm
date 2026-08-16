@@ -1,0 +1,25 @@
+{
+  "name": "@comm/crypto",
+  "version": "0.0.0",
+  "private": true,
+  "description": "End-to-end message encryption — X3DH + Double Ratchet on audited @noble/* primitives (docs/05-crypto-architecture.md). The ONLY place cryptographic session/ratchet operations happen — see docs/01-folder-structure.md. Runs entirely client-side; apps/web/server never imports this package's session/ratchet modules.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@noble/curves": "^2.3.0",
+    "@noble/hashes": "^2.3.0",
+    "@noble/ciphers": "^2.3.0",
+    "hash-wasm": "^4.12.0"
+  },
+  "devDependencies": {
+    "@comm/config": "*",
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.7"
+  }
+}

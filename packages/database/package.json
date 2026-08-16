@@ -1,0 +1,30 @@
+{
+  "name": "@comm/database",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Prisma schema + generated client — the only package allowed to speak SQL (docs/01-folder-structure.md).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "generate": "prisma generate",
+    "migrate:dev": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "studio": "prisma studio",
+    "bootstrap-admin": "tsx scripts/bootstrap-admin.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@prisma/client": "^5.21.1"
+  },
+  "devDependencies": {
+    "@comm/config": "*",
+    "@comm/security": "*",
+    "@comm/types": "*",
+    "prisma": "^5.21.1",
+    "typescript": "^5.6.3",
+    "tsx": "^4.19.1",
+    "dotenv": "^16.4.5"
+  }
+}
