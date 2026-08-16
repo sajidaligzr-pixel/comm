@@ -688,10 +688,17 @@ export function MessageThread({
                 </div>
               )}
               <div className={cn('group flex', m.isOwn ? 'justify-end' : 'justify-start', grouped ? 'mt-0.5' : 'mt-2.5')}>
-                <div className={cn('flex max-w-[85%] items-end gap-1 sm:max-w-[70%]', m.isOwn && 'flex-row-reverse')}>
+                <div className={cn('flex min-w-0 max-w-[85%] items-end gap-1 sm:max-w-[70%]', m.isOwn && 'flex-row-reverse')}>
                   <div
                     className={cn(
-                      'relative rounded-2xl px-3 py-2 text-sm shadow-sm',
+                      // min-w-0 here is the real fix: without it, this bubble's
+                      // automatic minimum width defaults to its content's intrinsic
+                      // size — for a voice note (min-w-[10rem]) or file attachment
+                      // (min-w-[12rem]), that's wide enough to blow past the row's
+                      // own max-w-[85%] cap on a narrow phone, pushing the bubble
+                      // off the right edge of the screen entirely. Same root cause,
+                      // same fix shape as the message-input min-w-0 fix above.
+                      'relative min-w-0 rounded-2xl px-3 py-2 text-sm shadow-sm',
                       m.isOwn ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground',
                       m.isOwn ? (grouped ? 'rounded-tr-md' : 'rounded-tr-sm') : grouped ? 'rounded-tl-md' : 'rounded-tl-sm',
                     )}

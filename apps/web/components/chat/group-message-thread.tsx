@@ -571,10 +571,13 @@ export function GroupMessageThread({
                 {!m.isOwn && (
                   <div className="w-7 flex-shrink-0">{!grouped && <Avatar name={nameFor(m.senderUserId)} size="sm" />}</div>
                 )}
-                <div className={cn('flex max-w-[85%] items-end gap-1 sm:max-w-[70%]', m.isOwn && 'flex-row-reverse')}>
+                <div className={cn('flex min-w-0 max-w-[85%] items-end gap-1 sm:max-w-[70%]', m.isOwn && 'flex-row-reverse')}>
                   <div
                     className={cn(
-                      'relative rounded-2xl px-3 py-2 text-sm shadow-sm',
+                      // See message-thread.tsx's identical fix — min-w-0 lets this
+                      // shrink below a voice/file bubble's own intrinsic min-width,
+                      // which otherwise pushes it off narrow phone screens.
+                      'relative min-w-0 rounded-2xl px-3 py-2 text-sm shadow-sm',
                       m.isOwn ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground',
                       m.isOwn ? (grouped ? 'rounded-tr-md' : 'rounded-tr-sm') : grouped ? 'rounded-tl-md' : 'rounded-tl-sm',
                     )}

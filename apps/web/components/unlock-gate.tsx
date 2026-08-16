@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { getCurrentKek, setUnlockedIdentity } from '@/lib/crypto/kek-holder';
 import { unlockLocalIdentity } from '@/lib/crypto/identity';
 import { isBiometricUnlockEnabled, isPlatformAuthenticatorAvailable, unlockWithBiometrics } from '@/lib/crypto/biometric-unlock';
+import { BiometricEnrollPrompt } from './biometric-enroll-prompt';
 import { Button } from './ui/button';
 import { Input, Label, FieldError } from './ui/input';
 import { Card } from './ui/card';
@@ -66,7 +67,13 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
     })();
   }, []);
 
-  if (unlocked) return <>{children}</>;
+  if (unlocked)
+    return (
+      <>
+        {children}
+        <BiometricEnrollPrompt />
+      </>
+    );
 
   async function handleBiometricUnlock() {
     setError(undefined);
