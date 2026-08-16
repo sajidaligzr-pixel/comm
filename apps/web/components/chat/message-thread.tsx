@@ -889,7 +889,16 @@ export function MessageThread({
               placeholder="Message"
               aria-label="Message"
               autoComplete="off"
-              className="h-10 flex-1 rounded-full border border-border bg-background px-4 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              // min-w-0 is load-bearing, not decoration — a text <input> in a flex row
+              // has a browser-default automatic minimum width (its intrinsic content
+              // size), unlike a plain <div>; without overriding that to 0, this input
+              // refuses to shrink below it once the row's total content (4 icon
+              // buttons + input + send button) exceeds a narrow phone's viewport
+              // width, pushing the send/mic button off the right edge of the screen
+              // entirely — the exact horizontal counterpart of the min-h-0 fix
+              // message-thread.tsx's scroll container already needed for the same
+              // "flex item won't shrink below its default minimum size" reason.
+              className="h-10 min-w-0 flex-1 rounded-full border border-border bg-background px-4 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
             />
             {text.trim() ? (
               <button

@@ -75,6 +75,20 @@ export function ChatsShell({
     openIdRef.current = openId;
   }, [openId]);
 
+  // Real bug found live: conversation-list.tsx's badge zeroes itself only *while*
+  // this conversation is the open route (`isOpen ? 0 : c.unreadCount`) — nothing
+  // ever reset the underlying `unreadCount` field in `conversations` state itself,
+  // so the moment you navigated back to the list after reading a thread, the stale
+  // pre-read count reappeared. The "new"-event handler below only ever increments
+  // it; this is the corresponding decrement, run whenever the route settles on a
+  // conversation that still has one.
+  useEffect(() => {
+    if (!openId) return;
+    setConversations((prev) =>
+      prev.map((c) => (c.id === openId && c.unreadCount > 0 ? { ...c, unreadCount: 0 } : c)),
+    );
+  }, [openId]);
+
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);

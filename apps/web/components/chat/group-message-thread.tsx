@@ -688,7 +688,10 @@ export function GroupMessageThread({
               placeholder="Message"
               aria-label="Message"
               autoComplete="off"
-              className="h-10 flex-1 rounded-full border border-border bg-background px-4 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+              // See message-thread.tsx's identical fix — min-w-0 overrides a text
+              // <input>'s browser-default minimum width, which otherwise refuses to
+              // shrink and pushes the send button off narrow phone screens.
+              className="h-10 min-w-0 flex-1 rounded-full border border-border bg-background px-4 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
             />
             {text.trim() ? (
               <button
