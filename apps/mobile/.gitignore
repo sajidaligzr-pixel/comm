@@ -1,0 +1,18 @@
+# Standard Flutter ignores
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+build/
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Never a real secret in this repo (matches the root .gitignore's rule) — build
+# defines/local run configs may carry an API host during development.
+*.env
+android/local.properties
+ios/Flutter/Generated.xcconfig
+ios/Runner/GeneratedPluginRegistrant.*

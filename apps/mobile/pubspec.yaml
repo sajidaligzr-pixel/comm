@@ -1,0 +1,63 @@
+name: comm_mobile
+description: "Comm — native Flutter client for the existing Comm backend (apps/web, apps/worker). See apps/mobile/README.md for architecture and how this maps to the TypeScript client it replaces."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.10.7
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # --- State management / navigation -----------------------------------------
+  flutter_riverpod: ^2.6.1
+  go_router: ^15.1.2
+
+  # --- Networking (mirrors apps/web/lib/api-client.ts + realtime-client.ts) --
+  dio: ^5.7.0
+  web_socket_channel: ^3.0.1
+
+  # --- Crypto (mirrors packages/crypto — see lib/crypto/README.md) -----------
+  # Pure-Dart X25519/Ed25519/ChaCha20-Poly1305/HKDF/HMAC/Argon2id — no native
+  # bridging needed for correctness; cryptography_flutter below is an optional
+  # drop-in performance backend for AES/ChaCha on top of the same API.
+  cryptography: ^2.7.0
+  cryptography_flutter: ^2.3.4
+
+  # --- Local storage (mirrors apps/web/lib/crypto/db.ts + message-cache.ts) --
+  # drift: structured, queryable local message cache. flutter_secure_storage: the
+  # small sensitive blobs (identity bundle, KEK salt, biometric wrap) — the direct
+  # analog of db.ts's IndexedDB "wrapped-blobs" store, backed by Keychain/Keystore.
+  drift: ^2.22.1
+  sqlite3_flutter_libs: ^0.5.28
+  path_provider: ^2.1.5
+  flutter_secure_storage: ^9.2.4
+
+  # --- Calling (mirrors components/call/call-provider.tsx's signaling) -------
+  flutter_webrtc: ^0.14.1
+
+  # --- Biometric unlock (mirrors lib/crypto/biometric-unlock.ts) -------------
+  local_auth: ^2.3.0
+
+  # --- Models (mirrors packages/types's zod schemas) --------------------------
+  freezed_annotation: ^2.4.4
+  json_annotation: ^4.9.0
+
+  # --- Misc -------------------------------------------------------------------
+  intl: ^0.19.0
+  permission_handler: ^11.3.1
+  uuid: ^4.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  build_runner: ^2.4.13
+  freezed: ^2.5.7
+  json_serializable: ^6.9.0
+  drift_dev: ^2.22.1
+
+flutter:
+  uses-material-design: true
