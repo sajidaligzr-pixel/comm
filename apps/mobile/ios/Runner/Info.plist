@@ -50,5 +50,9 @@
 	     the photo library is actually accessed, not just denies the permission. -->
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Comm needs access to your photos so you can send them in a chat.</string>
+	<!-- Required by flutter_webrtc's getUserMedia (features/calls/) — same
+	     crash-not-just-deny behavior as the photo library key above. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Comm needs access to your microphone to make and receive voice calls.</string>
 </dict>
 </plist>

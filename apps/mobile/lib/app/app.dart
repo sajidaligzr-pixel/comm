@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../features/calls/call_overlay.dart';
 import 'router.dart';
 
 class CommApp extends ConsumerWidget {
@@ -17,6 +18,10 @@ class CommApp extends ConsumerWidget {
       theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: seed), useMaterial3: true),
       darkTheme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: seed, brightness: Brightness.dark), useMaterial3: true),
       routerConfig: router,
+      // Mounted once, above every route, exactly like CallProvider's placement in
+      // apps/web's (app)/layout.tsx — an incoming call has to ring no matter which
+      // screen is open, not just while a specific chat thread is on screen.
+      builder: (context, child) => Stack(children: [if (child != null) child, const CallOverlay()]),
     );
   }
 }

@@ -6,6 +6,14 @@
          network access at all without it declared here too. -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <!-- Voice calling (features/calls/) — flutter_webrtc's getUserMedia needs mic
+         access; MODIFY_AUDIO_SETTINGS backs Helper.setSpeakerphoneOn's earpiece/
+         speaker toggle. Requested at runtime too (permission_handler, in
+         CallController._ensureMicPermission) — the manifest entry alone only
+         declares intent, Android still prompts the user the first time. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
     <application
         android:label="comm_mobile"
         android:name="${applicationName}"

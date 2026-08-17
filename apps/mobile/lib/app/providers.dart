@@ -15,6 +15,7 @@ import '../api/conversations_api.dart';
 import '../api/messages_api.dart';
 import '../api/devices_api.dart';
 import '../api/media_api.dart';
+import '../api/calls_api.dart';
 import '../realtime/ws_client.dart';
 
 /// Set once in main.dart after `ApiClient.initialize()` resolves — every other
@@ -30,6 +31,7 @@ final conversationsApiProvider = Provider<ConversationsApi>((ref) => Conversatio
 final messagesApiProvider = Provider<MessagesApi>((ref) => MessagesApi(ref.watch(apiClientProvider)));
 final devicesApiProvider = Provider<DevicesApi>((ref) => DevicesApi(ref.watch(apiClientProvider)));
 final mediaApiProvider = Provider<MediaApi>((ref) => MediaApi(ref.watch(apiClientProvider)));
+final callsApiProvider = Provider<CallsApi>((ref) => CallsApi(ref.watch(apiClientProvider)));
 
 final realtimeClientProvider = Provider<RealtimeClient>((ref) {
   final client = RealtimeClient(ref.watch(apiClientProvider).cookieJar);

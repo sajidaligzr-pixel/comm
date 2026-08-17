@@ -33,6 +33,7 @@ import '../../crypto/message_cache.dart';
 import '../../crypto/session/session.dart' show MessageEnvelope;
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
+import '../calls/call_controller.dart';
 
 const _uuid = Uuid();
 
@@ -316,8 +317,21 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final conversation = _conversation;
     return Scaffold(
-      appBar: AppBar(title: Text(_conversation?.displayTitle() ?? 'Chat')),
+      appBar: AppBar(
+        title: Text(conversation?.displayTitle() ?? 'Chat'),
+        actions: [
+          if (conversation != null && conversation.type == 'direct' && conversation.otherUserId != null)
+            IconButton(
+              icon: const Icon(Icons.call),
+              tooltip: 'Call',
+              onPressed: () => ref
+                  .read(callControllerProvider.notifier)
+                  .startCall(widget.conversationId, conversation.otherUserId!, conversation.displayTitle()),
+            ),
+        ],
+      ),
       body: SafeArea(child: _buildBody()),
     );
   }
