@@ -17,6 +17,13 @@ dependencies:
 
   # --- Networking (mirrors apps/web/lib/api-client.ts + realtime-client.ts) --
   dio: ^5.7.0
+  # The backend is a cookie-session API (HttpOnly access/refresh cookies + a
+  # double-submit CSRF cookie — apps/web/server/common/cookies.ts), not bearer-token
+  # auth, since it was built for a browser client first. cookie_jar persists cookies
+  # to disk across app restarts (the mobile equivalent of the browser's own jar);
+  # dio_cookie_manager wires it into every request automatically.
+  cookie_jar: ^4.0.8
+  dio_cookie_manager: ^3.1.1
   web_socket_channel: ^3.0.1
 
   # --- Crypto (mirrors packages/crypto — see lib/crypto/README.md) -----------
