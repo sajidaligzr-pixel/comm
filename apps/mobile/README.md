@@ -103,6 +103,66 @@ debug/profile builds (a release build would've had zero network access),
 scaffold's default `FlutterActivity` — biometric unlock would have built cleanly and
 then crashed at the exact moment a user tapped "Unlock with biometrics."
 
+## Build size & performance
+
+Passed a dedicated optimization pass — asked for directly ("make sure the app is
+well optimized... apk need to be small and not laggy... no loose ends"), not left to
+whatever the scaffold happened to default to:
+
+- **Dropped four unused dependencies**: `drift` + `sqlite3_flutter_libs` (a
+  structured on-device database was the original scaffold's plan, but
+  `message_cache.dart` ended up small enough to live on `flutter_secure_storage`
+  like everything else — nothing ever imported them; `sqlite3_flutter_libs` alone
+  was shipping a full native SQLite binary per ABI for zero use), `freezed_annotation`
+  /`json_annotation`/`intl` (models are hand-written, not codegen'd — see
+  `api/dtos.dart`'s own docstring). `build_runner`/`freezed`/`json_serializable`
+  /`drift_dev` dropped from `dev_dependencies` for the same reason.
+- **Release builds now minify + shrink** (`android/app/build.gradle.kts`:
+  `isMinifyEnabled`/`isShrinkResources`, off by default in the scaffold). Backed by
+  `android/app/proguard-rules.pro` with keep rules for the plugins actually in this
+  app that are known to break under R8 — in particular `local_auth`, which has a
+  **confirmed, documented crash** (`IllegalAccessError`, flutter/flutter#65381)
+  without an explicit keep rule; found and fixed before it ever shipped, not after.
+- **Native crypto acceleration was already active** — `cryptography_flutter` wires
+  itself in automatically via Flutter's plugin registration (verified in the
+  generated registrant), no `enable()` call needed. Every AES-GCM/ChaCha20-Poly1305/
+  X25519/Ed25519 operation (the ratchet, X3DH, attachment encryption) already runs
+  through the OS-native implementation, not the pure-Dart fallback.
+- **Checked, not assumed, for UI-thread jank**: the one genuinely CPU-heavy
+  synchronous operation in the app (Argon2id KEK derivation on every login/unlock)
+  was benchmarked directly rather than guessed about — ~250ms wall time on this
+  machine, with a concurrent timer confirming the isolate keeps servicing other work
+  throughout rather than freezing solid. Not worth an `Isolate`/`compute()` offload;
+  the existing Argon2id params (`key_derivation.dart`) were already deliberately
+  tuned for this. Message lists use `ListView.builder` (lazy, not building
+  off-screen rows), the local message cache is capped at 500/conversation, and
+  decrypt results are memoized by message id — all pre-existing, checked rather
+  than re-done.
+- **Result** (this machine, arm64-v8a — the architecture real modern phones use):
+
+  | Build | Size |
+  |---|---|
+  | Debug (unoptimized, all ABIs, JIT) | 211 MB — not representative, debug builds are never installed by real users |
+  | `flutter build apk --release` (no split, all 3 ABIs in one file) | 85 MB |
+  | `flutter build apk --release --split-per-abi` (arm64-v8a) | **31 MB** |
+
+  For distribution, `flutter build appbundle --release` (Android App Bundle, the
+  Play Store's required upload format) is the actual recommended command — Play
+  Store's own Dynamic Delivery does the per-device split automatically, so
+  `--split-per-abi` is mainly useful for direct/sideload distribution outside the
+  Play Store.
+
+**Honest limit on this pass**: no Android device or emulator is available in this
+environment (`flutter devices` only lists macOS desktop/Chrome), so the release
+build was verified by `flutter analyze` + `flutter test` (36/36) + the release build
+itself succeeding with minification on (which does catch R8 build-time errors, e.g.
+a genuinely missing class) — but NOT by installing the minified release build and
+clicking through it on a real device, which is the only way to catch a *runtime*
+R8 issue like the `local_auth` one above that doesn't fail the build itself. Before
+shipping this to real users, do one real install-and-test pass of a release build
+specifically exercising: login, unlock, the biometric toggle, sending a message and
+a file attachment, and placing a voice call.
+
 ## Not built yet
 
 Push notifications (needs the FCM/APNs backend addition above), group voice/video

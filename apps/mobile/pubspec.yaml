@@ -34,11 +34,15 @@ dependencies:
   cryptography_flutter: ^2.3.4
 
   # --- Local storage (mirrors apps/web/lib/crypto/db.ts + message-cache.ts) --
-  # drift: structured, queryable local message cache. flutter_secure_storage: the
-  # small sensitive blobs (identity bundle, KEK salt, biometric wrap) — the direct
-  # analog of db.ts's IndexedDB "wrapped-blobs" store, backed by Keychain/Keystore.
-  drift: ^2.22.1
-  sqlite3_flutter_libs: ^0.5.28
+  # flutter_secure_storage: every blob this app stores locally (identity bundle,
+  # KEK salt, biometric wrap, cached decrypted messages) — the direct analog of
+  # db.ts's IndexedDB "wrapped-blobs" store, backed by Keychain/Keystore. A
+  # structured on-device database (drift/sqlite3_flutter_libs — the original
+  # scaffold's plan) was never actually wired to anything: message_cache.dart ended
+  # up small enough to live directly on flutter_secure_storage like everything
+  # else, so drift/sqlite3_flutter_libs were dropped — sqlite3_flutter_libs alone
+  # was shipping a full native SQLite binary per ABI (~4.5MB combined) for a
+  # dependency nothing imported.
   path_provider: ^2.1.5
   flutter_secure_storage: ^9.2.4
 
@@ -48,12 +52,10 @@ dependencies:
   # --- Biometric unlock (mirrors lib/crypto/biometric-unlock.ts) -------------
   local_auth: ^2.3.0
 
-  # --- Models (mirrors packages/types's zod schemas) --------------------------
-  freezed_annotation: ^2.4.4
-  json_annotation: ^4.9.0
-
   # --- Misc -------------------------------------------------------------------
-  intl: ^0.19.0
+  # Models (api/dtos.dart) are hand-written, not codegen'd (see that file's own
+  # docstring) — freezed_annotation/json_annotation/intl were scaffold defaults
+  # that never ended up used by any file and are dropped here accordingly.
   permission_handler: ^11.3.1
   uuid: ^4.5.1
   # File/photo picking for the media-attachment pipeline (mirrors the web client's
@@ -66,10 +68,9 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-  build_runner: ^2.4.13
-  freezed: ^2.5.7
-  json_serializable: ^6.9.0
-  drift_dev: ^2.22.1
+  # build_runner/freezed/json_serializable/drift_dev dropped — nothing in this app
+  # is codegen'd (see the `dependencies` block above), so there was never a build
+  # step that used them.
 
 flutter:
   uses-material-design: true
