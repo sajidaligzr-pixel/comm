@@ -21,6 +21,7 @@ import '../features/chats/thread_screen.dart';
 import '../features/devices/devices_screen.dart';
 import '../features/groups/new_group_screen.dart';
 import '../features/groups/group_info_screen.dart';
+import '../features/admin/admin_screen.dart';
 
 /// Pure redirect logic, factored out of the `GoRouter` construction below purely so
 /// it's unit-testable without spinning up navigation/platform-channel machinery
@@ -59,6 +60,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(path: '/change-password', builder: (context, state) => const ChangePasswordScreen()),
       GoRoute(path: '/chats', builder: (context, state) => const ChatsListScreen()),
       GoRoute(path: '/devices', builder: (context, state) => const DevicesScreen()),
+      GoRoute(path: '/admin', builder: (context, state) => const AdminScreen()),
       GoRoute(path: '/new-group', builder: (context, state) => const NewGroupScreen()),
       GoRoute(
         path: '/groups/:groupId/info',

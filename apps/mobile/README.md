@@ -51,6 +51,7 @@ not written once up front and left stale.)
 | Call signaling + WebRTC | `components/call/call-provider.tsx` | `lib/features/calls/*.dart` (`flutter_webrtc`) |
 | Group CRUD + membership UI | group settings pages | `lib/features/groups/*.dart` |
 | Biometric unlock | `lib/crypto/biometric-unlock.ts` (WebAuthn PRF) | `lib/features/auth/biometric_unlock.dart` (`local_auth` + wrapped-KEK — see its docstring for how the mechanism differs from the web's PRF approach) |
+| Admin panel (account provisioning/suspension) | `(app)/admin/page.tsx` + `provision-user-form.tsx` | `lib/features/admin/admin_screen.dart` |
 
 **One backend gap, not yet closed:** push notifications on `apps/web` run on Web
 Push/VAPID (`apps/worker/src/realtime/push-dispatch.ts`), which only works for
@@ -87,6 +88,11 @@ installable binary:
   docstring for exactly how this differs from the web client's WebAuthn-PRF-based
   approach (`local_auth` has no equivalent primitive to build the same mechanism on
   mobile) and what that trade-off means.
+- Admin panel: create accounts (username/display name only — the invitee sets their
+  own password via the invite link), view all accounts, suspend an account. The nav
+  entry is gated on a successful `GET /api/admin/users` call (a UI convenience only,
+  same non-security-boundary caveat the web client's own `isAdmin()` carries —
+  every admin route re-derives the role server-side via `requireAdmin` regardless).
 
 Three real production bugs were found and fixed while verifying this, not just
 theorized about: the Android manifest only declared `INTERNET` permission in
@@ -99,10 +105,10 @@ then crashed at the exact moment a user tapped "Unlock with biometrics."
 
 ## Not built yet
 
-Push notifications (needs the FCM/APNs backend addition above), admin panel, group
-voice/video calling (calling remains 1:1 only, matching the web client),
-read-receipt "seen by" UI for groups (per-recipient rows are recorded server-side,
-just not surfaced in this client yet).
+Push notifications (needs the FCM/APNs backend addition above), group voice/video
+calling (calling remains 1:1 only, matching the web client), read-receipt "seen by"
+UI for groups (per-recipient rows are recorded server-side, just not surfaced in
+this client yet).
 
 ## Running
 

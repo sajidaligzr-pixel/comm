@@ -17,6 +17,7 @@ import '../api/devices_api.dart';
 import '../api/media_api.dart';
 import '../api/calls_api.dart';
 import '../api/groups_api.dart';
+import '../api/admin_api.dart';
 import '../features/groups/group_session_controller.dart';
 import '../realtime/ws_client.dart';
 
@@ -35,6 +36,7 @@ final devicesApiProvider = Provider<DevicesApi>((ref) => DevicesApi(ref.watch(ap
 final mediaApiProvider = Provider<MediaApi>((ref) => MediaApi(ref.watch(apiClientProvider)));
 final callsApiProvider = Provider<CallsApi>((ref) => CallsApi(ref.watch(apiClientProvider)));
 final groupsApiProvider = Provider<GroupsApi>((ref) => GroupsApi(ref.watch(apiClientProvider)));
+final adminApiProvider = Provider<AdminApi>((ref) => AdminApi(ref.watch(apiClientProvider)));
 
 /// Mounted once for the app's lifetime (a plain `Provider`, not tied to any one
 /// screen) — mirrors `GroupSessionProvider`'s app-shell-level placement in

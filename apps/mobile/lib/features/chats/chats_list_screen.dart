@@ -18,6 +18,7 @@ class ChatsListScreen extends ConsumerStatefulWidget {
 class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
   List<ConversationSummary>? _conversations;
   String? _error;
+  bool _isAdmin = false;
 
   @override
   void initState() {
@@ -30,6 +31,21 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
     final authState = ref.read(authControllerProvider);
     if (authState is AuthSignedIn) {
       ref.read(groupSessionControllerProvider).setCurrentUserId(authState.profile.id);
+    }
+    _checkAdmin();
+  }
+
+  /// Success alone implies admin — see admin_api.dart's docstring on why this is
+  /// safe to use as a UI-only convenience: the real gate is server-side
+  /// `requireAdmin` on every `/api/admin/*` route regardless of whether this nav
+  /// entry is shown.
+  Future<void> _checkAdmin() async {
+    try {
+      await ref.read(adminApiProvider).listUsers();
+      if (mounted) setState(() => _isAdmin = true);
+    } on ApiException {
+      // Not an admin (FORBIDDEN) or a transient network error either way — just
+      // leave the nav entry hidden, same fail-closed rule as biometric_unlock.dart.
     }
   }
 
@@ -92,6 +108,12 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
       appBar: AppBar(
         title: Text(profile != null ? 'Chats — @${profile.username}' : 'Chats'),
         actions: [
+          if (_isAdmin)
+            IconButton(
+              icon: const Icon(Icons.admin_panel_settings_outlined),
+              tooltip: 'Admin',
+              onPressed: () => context.push('/admin'),
+            ),
           IconButton(
             icon: const Icon(Icons.devices_other),
             tooltip: 'Devices',

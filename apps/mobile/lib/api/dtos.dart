@@ -553,3 +553,41 @@ class CursorPage<T> {
         nextCursor: json['nextCursor'] as String?,
       );
 }
+
+// --- Admin (mirrors packages/types/src/admin.ts) ---------------------------------
+
+class ProvisionedUserSummary {
+  final String id;
+  final String username;
+  final String displayName;
+  final String status;
+  final String createdAt;
+  const ProvisionedUserSummary({
+    required this.id,
+    required this.username,
+    required this.displayName,
+    required this.status,
+    required this.createdAt,
+  });
+  static ProvisionedUserSummary fromJson(Map<String, dynamic> json) => ProvisionedUserSummary(
+    id: json['id'] as String,
+    username: json['username'] as String,
+    displayName: json['displayName'] as String,
+    status: json['status'] as String,
+    createdAt: json['createdAt'] as String,
+  );
+}
+
+class ProvisionUserResult {
+  final String userId;
+  final String username;
+  final String inviteUrl;
+  final String expiresAt;
+  const ProvisionUserResult({required this.userId, required this.username, required this.inviteUrl, required this.expiresAt});
+  static ProvisionUserResult fromJson(Map<String, dynamic> json) => ProvisionUserResult(
+    userId: json['userId'] as String,
+    username: json['username'] as String,
+    inviteUrl: json['inviteUrl'] as String,
+    expiresAt: json['expiresAt'] as String,
+  );
+}
