@@ -7,10 +7,15 @@ import { Input, Label, FieldError } from './ui/input';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity } from '@/lib/crypto/identity';
 import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
+import { setActiveAccount } from '@/lib/crypto/active-account';
 
-const DEVICE_ID_STORAGE_KEY = 'comm_device_id';
+// Scoped by username — see login-form.tsx's identical helper and active-account.ts's
+// docstring for why.
+function deviceIdStorageKey(username: string): string {
+  return `comm_device_id__${username.trim().toLowerCase()}`;
+}
 
-export function LinkDeviceCompleteForm({ token }: { token: string }): React.JSX.Element {
+export function LinkDeviceCompleteForm({ token, username }: { token: string; username: string }): React.JSX.Element {
   const router = useRouter();
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
@@ -27,6 +32,9 @@ export function LinkDeviceCompleteForm({ token }: { token: string }): React.JSX.
       // (docs/05-crypto-architecture.md#local-key-storage), so the account password
       // is asked for here too rather than skipped. Never sent anywhere: it's used
       // client-side only, to wrap this device's own freshly-generated keys.
+      // Must run before createLocalIdentity's IndexedDB writes below — see
+      // active-account.ts.
+      setActiveAccount(username);
       const { keyBundle, kek, identity } = await createLocalIdentity(password);
 
       const result = await apiFetch<{ userId: string; deviceId: string }>('/api/devices/link/complete', {
@@ -35,7 +43,7 @@ export function LinkDeviceCompleteForm({ token }: { token: string }): React.JSX.
           device: { name: name || 'New device', deviceType: 'web' as const, keyBundle },
         },
       });
-      localStorage.setItem(DEVICE_ID_STORAGE_KEY, result.deviceId);
+      localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
       setUnlockedIdentity(kek, identity);
       router.push('/chats');
       router.refresh();

@@ -8,13 +8,22 @@
  * way to make sense of the bytes it's holding. See docs/05-crypto-architecture.md's
  * local key storage section for what those blobs actually are.
  */
-const DB_NAME = 'comm-crypto';
+import { getActiveAccount } from './active-account';
+
 const DB_VERSION = 1;
 const STORE_NAME = 'wrapped-blobs';
 
+/** One database PER ACCOUNT, not one shared database for the whole browser — see
+ * active-account.ts's docstring for the real bug this closes. Every function below
+ * calls this fresh on each open rather than caching a name, so it always reflects
+ * whichever account is currently active in this tab. */
+function dbName(): string {
+  return `comm-crypto__${getActiveAccount()}`;
+}
+
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    const request = indexedDB.open(dbName(), DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -60,12 +69,16 @@ export async function deleteBlob(key: string): Promise<void> {
   db.close();
 }
 
-/** Wipes every locally-stored key/session — called on logout/device revoke.
- * Deliberately deletes the whole database rather than iterating keys: cheaper, and
- * leaves nothing partially cleaned up if it's interrupted mid-way. */
+/** Wipes every locally-stored key/session for the CURRENTLY ACTIVE account only —
+ * called on logout/device revoke. Deliberately deletes the whole database rather than
+ * iterating keys: cheaper, and leaves nothing partially cleaned up if it's interrupted
+ * mid-way. Now that each account has its own database (see `dbName`), this is also
+ * what makes that safe to call at all on a browser shared by more than one account —
+ * it was never able to reach any other account's data even before, but now that's
+ * true by construction (a different database entirely), not just by convention. */
 export async function wipeCryptoDb(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const request = indexedDB.deleteDatabase(DB_NAME);
+    const request = indexedDB.deleteDatabase(dbName());
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
     request.onblocked = () => resolve(); // another tab has it open — best effort

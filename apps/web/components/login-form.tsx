@@ -7,8 +7,17 @@ import { Input, Label, FieldError } from './ui/input';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity, unlockLocalIdentity, hasLocalIdentity } from '@/lib/crypto/identity';
 import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
+import { setActiveAccount } from '@/lib/crypto/active-account';
 
-const DEVICE_ID_STORAGE_KEY = 'comm_device_id';
+// Scoped by username, not a single fixed key — a browser signed into more than one
+// account (two tabs, two people testing on one machine) must not have the SECOND
+// account's login read/overwrite the FIRST account's remembered device id. See
+// active-account.ts's docstring for the real bug this (together with that module)
+// closes: this alone stops the wrong device id from ever being sent; active-account.ts
+// is what stops the wrong IndexedDB identity from being read/overwritten.
+function deviceIdStorageKey(username: string): string {
+  return `comm_device_id__${username.trim().toLowerCase()}`;
+}
 // A username is an identifier, not a secret (it's already public — anyone can see it
 // on a profile/@mention), so remembering it locally carries none of the risk storing
 // a password or key material would; see docs/32-local-data-storage.md's actual rule,
@@ -43,7 +52,10 @@ export function LoginForm(): React.JSX.Element {
     setError(undefined);
     setSubmitting(true);
     try {
-      const knownDeviceId = localStorage.getItem(DEVICE_ID_STORAGE_KEY) ?? undefined;
+      // Must run before ANY local identity/device-id storage is touched below — see
+      // active-account.ts.
+      setActiveAccount(username);
+      const knownDeviceId = localStorage.getItem(deviceIdStorageKey(username)) ?? undefined;
       // Local identity persists in IndexedDB independently of the localStorage
       // device-id hint — if the browser still has both, this is a normal return
       // login; if IndexedDB was cleared (private browsing, storage eviction) but the
@@ -69,7 +81,7 @@ export function LoginForm(): React.JSX.Element {
         '/api/auth/login',
         { body },
       );
-      localStorage.setItem(DEVICE_ID_STORAGE_KEY, result.deviceId);
+      localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
       localStorage.setItem(REMEMBERED_USERNAME_KEY, username);
 
       // Unlock (or, for a device just created above, reuse what createLocalIdentity
@@ -104,7 +116,7 @@ export function LoginForm(): React.JSX.Element {
         if (err.code === 'DEVICE_REVOKED') {
           // The remembered device id is no longer valid (revoked elsewhere) — drop
           // it and let the next attempt register a fresh device instead of looping.
-          localStorage.removeItem(DEVICE_ID_STORAGE_KEY);
+          localStorage.removeItem(deviceIdStorageKey(username));
         }
         setError(err.message);
       } else if (err instanceof Error) {

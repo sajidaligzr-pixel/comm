@@ -87,6 +87,7 @@ export const RATE_LIMIT_RULES = {
   inviteLookup: { namespace: 'auth:invite:lookup', windowSeconds: 60, max: 10 } satisfies RateLimitRule,
   inviteRedeem: { namespace: 'auth:invite:redeem', windowSeconds: 60 * 60, max: 5 } satisfies RateLimitRule,
   deviceLinkComplete: { namespace: 'devices:link:complete', windowSeconds: 60 * 60, max: 10 } satisfies RateLimitRule,
+  deviceLinkLookup: { namespace: 'devices:link:lookup', windowSeconds: 60, max: 10 } satisfies RateLimitRule,
   refresh: { namespace: 'auth:refresh', windowSeconds: 60, max: 30 } satisfies RateLimitRule,
   usernameLookup: { namespace: 'users:lookup', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
   deviceRevoke: { namespace: 'devices:revoke', windowSeconds: 60, max: 20 } satisfies RateLimitRule,

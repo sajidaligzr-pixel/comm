@@ -1,8 +1,10 @@
 'use client';
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { apiFetch } from '@/lib/api-client';
 import { getCurrentKek, setUnlockedIdentity } from '@/lib/crypto/kek-holder';
 import { unlockLocalIdentity } from '@/lib/crypto/identity';
+import { setActiveAccount } from '@/lib/crypto/active-account';
 import { isBiometricUnlockEnabled, isPlatformAuthenticatorAvailable, unlockWithBiometrics } from '@/lib/crypto/biometric-unlock';
 import { BiometricEnrollPrompt } from './biometric-enroll-prompt';
 import { Button } from './ui/button';
@@ -48,15 +50,35 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
   const [biometricAvailable, setBiometricAvailable] = useState(false);
   const [biometricBusy, setBiometricBusy] = useState(false);
 
+  // Which account's local IndexedDB (identity, sessions, biometric wrap) this tab
+  // should be reading/writing — unlike login-form.tsx, this component never has a
+  // username typed into it (the server session already knows who's signed in), so it
+  // has to ask. Cached as a shared in-flight promise so the mount effect and the two
+  // submit handlers below all resolve to the exact same account no matter which
+  // order/timing they run in, and so a fast click right after mount still waits for
+  // the real answer instead of racing ahead un-scoped. See active-account.ts for why
+  // this has to happen before ANY of identity.ts/biometric-unlock.ts's calls below.
+  const accountReadyRef = useRef<Promise<void> | null>(null);
+  function ensureAccountScoped(): Promise<void> {
+    if (!accountReadyRef.current) {
+      accountReadyRef.current = apiFetch<{ username: string }>('/api/users/me').then((profile) => {
+        setActiveAccount(profile.username);
+      });
+    }
+    return accountReadyRef.current;
+  }
+
   useEffect(() => {
     if (getCurrentKek()) {
       setUnlocked(true);
       return;
     }
-    // Both checks are local/cheap (no OS prompt fires until the button is actually
-    // tapped — see handleBiometricUnlock) — safe to run unconditionally on mount.
     void (async () => {
       try {
+        await ensureAccountScoped();
+        // Both checks are local/cheap (no OS prompt fires until the button is
+        // actually tapped — see handleBiometricUnlock) — safe to run unconditionally
+        // on mount, now that the right account's storage is in scope.
         const [enabled, platformAvailable] = await Promise.all([isBiometricUnlockEnabled(), isPlatformAuthenticatorAvailable()]);
         setBiometricAvailable(enabled && platformAvailable);
       } catch (err) {
@@ -79,6 +101,7 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
     setError(undefined);
     setBiometricBusy(true);
     try {
+      await ensureAccountScoped();
       const result = await unlockWithBiometrics();
       if (!result) {
         // Never a thrown error (see biometric-unlock.ts) — could be a cancelled OS
@@ -100,6 +123,7 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
     setError(undefined);
     setSubmitting(true);
     try {
+      await ensureAccountScoped();
       const result = await unlockLocalIdentity(password);
       if (!result) {
         // Either a wrong password, or this browser has no local identity to unlock

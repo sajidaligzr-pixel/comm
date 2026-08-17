@@ -25,7 +25,7 @@ export default async function InvitePage({ params }: { params: Promise<{ token: 
               Comm. Choose a password to finish creating your account.
             </p>
             <div className="mt-6">
-              <InviteRedeemForm token={token} />
+              <InviteRedeemForm token={token} username={invite.username} />
             </div>
           </>
         ) : (

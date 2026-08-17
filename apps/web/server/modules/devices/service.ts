@@ -152,6 +152,30 @@ export async function startDeviceLink(userId: string, primaryDeviceId: string): 
 }
 
 /**
+ * Non-destructive peek at who a linking token belongs to — `redis.get`, never
+ * `redis.del`, so this can be called freely (e.g. to render "Linking device for
+ * @username" on the new device's own screen before it submits anything) without
+ * consuming the token; only `completeDeviceLink` below ever deletes it. Mirrors
+ * `getInviteInfo`'s identical-error-for-"no such token"-and-"expired" reasoning —
+ * distinguishing them would let an attacker learn whether a guessed/expired token
+ * ever existed.
+ *
+ * Exists so the new device's local crypto storage can be scoped to the right account
+ * (see apps/web/lib/crypto/active-account.ts) BEFORE `createLocalIdentity` runs —
+ * without this, a browser that already has a different account signed in would have
+ * no way to know, ahead of submitting, whose identity it's about to read/overwrite.
+ */
+export async function getDeviceLinkInfo(linkingToken: string): Promise<{ username: string; displayName: string }> {
+  const raw = await getRedisClient().get(`device-link:${linkingToken}`);
+  if (!raw) {
+    throw new AppError('INVITE_INVALID_OR_EXPIRED', 'This linking code has expired. Generate a new one.');
+  }
+  const { userId } = JSON.parse(raw) as { userId: string; primaryDeviceId: string };
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+  return { username: user.username, displayName: user.displayName };
+}
+
+/**
  * Step 2: the new device submits the token (scanned from the primary device's QR
  * code) plus its own freshly generated key bundle. The token is single-use (deleted
  * on first successful redemption) and only usable while the primary device that

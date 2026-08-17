@@ -7,10 +7,17 @@ import { Input, Label, FieldError } from './ui/input';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity } from '@/lib/crypto/identity';
 import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
+import { setActiveAccount } from '@/lib/crypto/active-account';
 
-const DEVICE_ID_STORAGE_KEY = 'comm_device_id';
+// Scoped by username — see login-form.tsx's identical helper and active-account.ts's
+// docstring for why: a browser that already has a different account's identity
+// stored (this same machine, a different tab) must never read or overwrite it while
+// setting up this new account.
+function deviceIdStorageKey(username: string): string {
+  return `comm_device_id__${username.trim().toLowerCase()}`;
+}
 
-export function InviteRedeemForm({ token }: { token: string }): React.JSX.Element {
+export function InviteRedeemForm({ token, username }: { token: string; username: string }): React.JSX.Element {
   const router = useRouter();
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -32,6 +39,9 @@ export function InviteRedeemForm({ token }: { token: string }): React.JSX.Elemen
 
     setSubmitting(true);
     try {
+      // Must run before createLocalIdentity's IndexedDB writes below — see
+      // active-account.ts.
+      setActiveAccount(username);
       const { keyBundle, kek, identity } = await createLocalIdentity(password);
       const result = await apiFetch<{ userId: string; deviceId: string }>('/api/auth/invite/redeem', {
         body: {
@@ -40,7 +50,7 @@ export function InviteRedeemForm({ token }: { token: string }): React.JSX.Elemen
           device: { name: 'This device', deviceType: 'web' as const, keyBundle },
         },
       });
-      localStorage.setItem(DEVICE_ID_STORAGE_KEY, result.deviceId);
+      localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
       setUnlockedIdentity(kek, identity);
       router.push('/chats');
       router.refresh();
