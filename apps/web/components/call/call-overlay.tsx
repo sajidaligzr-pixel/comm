@@ -2,13 +2,19 @@
 
 import { Avatar } from '@/components/chat/avatar';
 import { formatRecordingTime } from '@/lib/format';
-import { IconPhone, IconPhoneOff, IconMic, IconMicOff, IconX } from '@/components/icons';
+import { IconPhone, IconPhoneOff, IconMic, IconMicOff, IconVolume, IconVolumeOff, IconX } from '@/components/icons';
 import type { ActiveCall, CallPhase } from './call-provider';
 
 interface CallOverlayProps {
   phase: CallPhase;
   call: ActiveCall;
   muted: boolean;
+  /** Best-effort label, not a real hardware query — see call-provider.tsx's
+   * `speakerOn` state comment. */
+  speakerOn: boolean;
+  /** Hides the button entirely on browsers with no way to act on it (e.g. Safari) —
+   * see call-provider.tsx's SPEAKER_TOGGLE_SUPPORTED docstring. */
+  speakerSupported: boolean;
   durationSec: number;
   statusText: string;
   micError: string | null;
@@ -16,6 +22,7 @@ interface CallOverlayProps {
   onDecline: () => void;
   onHangUp: () => void;
   onToggleMute: () => void;
+  onToggleSpeaker: () => void;
   onDismissMicError: () => void;
 }
 
@@ -30,6 +37,8 @@ export function CallOverlay({
   phase,
   call,
   muted,
+  speakerOn,
+  speakerSupported,
   durationSec,
   statusText,
   micError,
@@ -37,6 +46,7 @@ export function CallOverlay({
   onDecline,
   onHangUp,
   onToggleMute,
+  onToggleSpeaker,
   onDismissMicError,
 }: CallOverlayProps): React.JSX.Element {
   const ringing = phase === 'incoming' || phase === 'outgoing';
@@ -99,6 +109,19 @@ export function CallOverlay({
                 }`}
               >
                 {muted ? <IconMicOff className="h-5 w-5" /> : <IconMic className="h-5 w-5" />}
+              </button>
+            )}
+            {phase === 'connected' && speakerSupported && (
+              <button
+                type="button"
+                onClick={onToggleSpeaker}
+                aria-label={speakerOn ? 'Switch to earpiece' : 'Switch to speaker'}
+                aria-pressed={speakerOn}
+                className={`flex h-14 w-14 items-center justify-center rounded-full shadow transition-colors ${
+                  speakerOn ? 'bg-foreground text-background' : 'bg-muted text-foreground hover:bg-border'
+                }`}
+              >
+                {speakerOn ? <IconVolume className="h-5 w-5" /> : <IconVolumeOff className="h-5 w-5" />}
               </button>
             )}
             <button

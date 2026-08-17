@@ -267,3 +267,23 @@ export function IconFingerprint({ className }: IconProps): React.JSX.Element {
     </svg>
   );
 }
+
+// Speaker-on/off pair for the in-call output toggle (call-overlay.tsx) — same
+// two-icon-for-two-states pattern as IconMic/IconMicOff above.
+export function IconVolume({ className }: IconProps): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M4 9.5v5h3.5L12 18V6L7.5 9.5H4Z" />
+      <path d="M16 9.5a4 4 0 0 1 0 5" />
+    </svg>
+  );
+}
+
+export function IconVolumeOff({ className }: IconProps): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M4 9.5v5h3.5L12 18V6L7.5 9.5H4Z" />
+      <path d="M3 3l18 18" />
+    </svg>
+  );
+}

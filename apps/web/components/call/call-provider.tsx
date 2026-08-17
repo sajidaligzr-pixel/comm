@@ -45,6 +45,25 @@ export function useCall(): CallContextValue {
 const RING_TIMEOUT_MS = 45_000;
 
 /**
+ * Whether this browser can even attempt to choose an audio OUTPUT device at all.
+ * Found live from a real report ("the voice is coming from the speaker when
+ * calling") — a plain `<audio>` element playing a WebRTC stream has no notion of
+ * "this is a phone call, use the earpiece": that's a native-app-only concept
+ * (AudioManager/AVAudioSession), and browsers route it as ordinary media audio,
+ * which Android defaults to the loudspeaker. There is no way to fix the *default*
+ * from here — `setSinkId` (the one relevant Web API) can only select a DIFFERENT
+ * already-enumerated output device, checked once at module scope since it's a
+ * fixed browser capability, not something that changes per call. Support is
+ * genuinely inconsistent (Safari doesn't implement it at all as of this writing) —
+ * every caller below fails closed to "toggle button doesn't render" rather than
+ * offering a control that silently does nothing, the same "no PRF support, no
+ * button" shape lib/crypto/biometric-unlock.ts already uses for the identical
+ * "OS-level capability, not guaranteed" situation.
+ */
+const SPEAKER_TOGGLE_SUPPORTED =
+  typeof window !== 'undefined' && typeof HTMLMediaElement !== 'undefined' && 'setSinkId' in HTMLMediaElement.prototype;
+
+/**
  * Explicit audio constraints for both legs of a call (startCall's outgoing capture
  * and acceptCall's answering capture) — asked for directly ("make sure the audio
  * quality is good"). Plain `audio: true` already gets browser-default echo
@@ -98,6 +117,15 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
   const [phase, setPhase] = useState<CallPhase>('idle');
   const [call, setCall] = useState<ActiveCall | null>(null);
   const [muted, setMuted] = useState(false);
+  // Directly asked for ("by default it should not be on speaker") — a call now
+  // actively routes to the earpiece the moment audio starts (see `routeCallAudio` in
+  // `createPeerConnection`'s `ontrack`) instead of just offering a manual toggle
+  // starting on whatever the browser's own default happened to be. This flag is
+  // still only a best-effort LABEL, not a query of the real hardware route (no Web
+  // API exposes that) — it starts `false` to match what `routeCallAudio` is about to
+  // attempt, and only flips to `true` if that attempt genuinely fails (see
+  // `routeCallAudio`'s own comment on why that fallback exists).
+  const [speakerOn, setSpeakerOn] = useState(false);
   const [durationSec, setDurationSec] = useState(0);
   const [statusText, setStatusText] = useState('');
   const [micError, setMicError] = useState<string | null>(null);
@@ -139,6 +167,7 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
     setPhase('ended');
     setDurationSec(0);
     setMuted(false);
+    setSpeakerOn(false); // matches what the next call will attempt by default — see its useState's own comment
 
     // Left up briefly so the user sees why the call stopped, rather than the UI just
     // vanishing. Guarded on both reads below in case a NEW call (an incoming ring)
@@ -155,6 +184,30 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
     }, 2500);
   }, []);
 
+  /**
+   * Attempts to point the remote audio element at a specific labeled output device —
+   * shared by the automatic earpiece-on-connect routing below and the manual
+   * speaker-toggle button. Returns whether a labeled match was actually found and
+   * applied; the two call sites deliberately handle a "no match" result
+   * differently (see each one's own comment), so this stays a plain yes/no rather
+   * than picking a fallback on their behalf.
+   */
+  const selectAudioOutput = useCallback(async (wantSpeaker: boolean): Promise<boolean> => {
+    const audioEl = remoteAudioRef.current as (HTMLAudioElement & { setSinkId(id: string): Promise<void> }) | null;
+    if (!SPEAKER_TOGGLE_SUPPORTED || !audioEl) return false;
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const match = devices.find(
+        (d) => d.kind === 'audiooutput' && (wantSpeaker ? /speaker/i.test(d.label) : /earpiece|receiver/i.test(d.label)),
+      );
+      if (!match) return false;
+      await audioEl.setSinkId(match.deviceId);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
   const createPeerConnection = useCallback(
     (iceServers: IceServer[], conversationId: string, callId: string): RTCPeerConnection => {
       const pc = new RTCPeerConnection({ iceServers });
@@ -169,6 +222,13 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = e.streams[0] ?? null;
           void remoteAudioRef.current.play().catch(() => {});
+          // "By default it should not be on speaker" — actively route to the
+          // earpiece the instant call audio starts, rather than leaving it wherever
+          // the browser's own default lands (the loudspeaker, on the platform this
+          // was reported from — see SPEAKER_TOGGLE_SUPPORTED's docstring). Only
+          // flips the speakerOn LABEL to true if this genuinely couldn't be
+          // confirmed, so the button's label stays honest either way.
+          void selectAudioOutput(false).then((applied) => setSpeakerOn(!applied));
         }
       };
 
@@ -192,7 +252,7 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
 
       return pc;
     },
-    [teardown],
+    [teardown, selectAudioOutput],
   );
 
   const fetchIceServers = useCallback(async (): Promise<IceServer[]> => {
@@ -329,6 +389,21 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
     });
   }, []);
 
+  /**
+   * Manual override for the automatic earpiece routing in `ontrack` above — someone
+   * deliberately wants speakerphone (or wants to go back to the earpiece after
+   * turning it on). Unlike the automatic call-start attempt, this always honors the
+   * tap and flips the label regardless of whether a labeled match was actually
+   * found — a button that sometimes visibly does nothing when pressed is worse UX
+   * than an occasionally-optimistic label, and `selectAudioOutput` already tried its
+   * best either way.
+   */
+  const toggleSpeaker = useCallback(() => {
+    if (!SPEAKER_TOGGLE_SUPPORTED) return;
+    const next = !speakerOn;
+    void selectAudioOutput(next).finally(() => setSpeakerOn(next));
+  }, [speakerOn, selectAudioOutput]);
+
   useEffect(() => {
     const offRing = onRealtimeEvent('call.ring', (payload) => {
       const p = payload as unknown as {
@@ -426,6 +501,8 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
           phase={phase}
           call={call}
           muted={muted}
+          speakerOn={speakerOn}
+          speakerSupported={SPEAKER_TOGGLE_SUPPORTED}
           durationSec={durationSec}
           statusText={statusText}
           micError={micError}
@@ -433,6 +510,7 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
           onDecline={() => rejectCall('declined')}
           onHangUp={hangUp}
           onToggleMute={toggleMute}
+          onToggleSpeaker={toggleSpeaker}
           onDismissMicError={() => setMicError(null)}
         />
       )}
