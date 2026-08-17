@@ -7,6 +7,7 @@ import '../../api/dtos.dart';
 import '../../app/providers.dart';
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
+import '../auth/biometric_enroll_prompt.dart';
 
 class ChatsListScreen extends ConsumerStatefulWidget {
   const ChatsListScreen({super.key});
@@ -103,7 +104,12 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
           ),
         ],
       ),
-      body: _buildBody(),
+      body: Stack(
+        children: [
+          _buildBody(),
+          if (profile != null) BiometricEnrollPrompt(username: profile.username),
+        ],
+      ),
       floatingActionButton: Row(
         mainAxisSize: MainAxisSize.min,
         children: [

@@ -33,3 +33,20 @@ const _rememberedUsernameKey = 'comm_username';
 Future<void> setRememberedUsername(String username) => _storage.write(key: _rememberedUsernameKey, value: username);
 
 Future<String?> getRememberedUsername() => _storage.read(key: _rememberedUsernameKey);
+
+/// Snooze state for the one-time "turn on biometric unlock?" prompt (see
+/// features/auth/biometric_enroll_prompt.dart) — mirrors the
+/// `comm-biometric-dismissed-at` `localStorage` key `biometric-enroll-prompt.tsx`
+/// uses. Scoped by username, same reasoning as the device-id key above: dismissing
+/// this on one account shouldn't silently suppress it for a different account later
+/// signed into on the same phone.
+String _biometricDismissedKey(String username) => 'comm_biometric_dismissed__${username.trim().toLowerCase()}';
+
+Future<void> setBiometricPromptDismissedNow(String username) =>
+    _storage.write(key: _biometricDismissedKey(username), value: DateTime.now().toUtc().toIso8601String());
+
+Future<DateTime?> getBiometricPromptDismissedAt(String username) async {
+  final raw = await _storage.read(key: _biometricDismissedKey(username));
+  if (raw == null) return null;
+  return DateTime.tryParse(raw);
+}

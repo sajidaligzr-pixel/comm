@@ -11,7 +11,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../api/api_client.dart';
 import '../../api/dtos.dart';
 import '../../app/providers.dart';
+import '../../crypto/kek_holder.dart';
 import '../auth/auth_controller.dart';
+import '../auth/biometric_unlock.dart' as biometric;
 
 class DevicesScreen extends ConsumerStatefulWidget {
   const DevicesScreen({super.key});
@@ -23,10 +25,65 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   List<DeviceSummary>? _devices;
   String? _error;
 
+  bool _biometricChecked = false;
+  bool _biometricSupported = false;
+  bool _biometricEnabled = false;
+  bool _biometricBusy = false;
+  String? _biometricError;
+
   @override
   void initState() {
     super.initState();
     _load();
+    _loadBiometricState();
+  }
+
+  Future<void> _loadBiometricState() async {
+    try {
+      final supported = await biometric.isBiometricAvailable();
+      final enabled = supported && await biometric.isBiometricUnlockEnabled();
+      if (mounted) {
+        setState(() {
+          _biometricSupported = supported;
+          _biometricEnabled = enabled;
+        });
+      }
+    } catch (_) {
+      // Fail closed, mirroring biometric_unlock.dart — worst case the card stays
+      // hidden, never a crash on this screen.
+    } finally {
+      if (mounted) setState(() => _biometricChecked = true);
+    }
+  }
+
+  Future<void> _toggleBiometric() async {
+    setState(() {
+      _biometricError = null;
+      _biometricBusy = true;
+    });
+    try {
+      if (_biometricEnabled) {
+        await biometric.disableBiometricUnlock();
+        if (mounted) setState(() => _biometricEnabled = false);
+        return;
+      }
+      final kek = getCurrentKek();
+      if (kek == null) {
+        // Can't happen from a normal navigation (reaching this screen requires an
+        // already-unlocked device), but this handler makes no assumption about how
+        // it was reached, so it checks rather than assumes.
+        setState(() => _biometricError = 'Unlock this device with your password first, then try again.');
+        return;
+      }
+      final ok = await biometric.enableBiometricUnlock(kek);
+      if (!ok) {
+        setState(() => _biometricError = "This device couldn't confirm biometrics — nothing was changed.");
+        return;
+      }
+      if (mounted) setState(() => _biometricEnabled = true);
+    } finally {
+      if (mounted) setState(() => _biometricBusy = false);
+    }
   }
 
   Future<void> _load() async {
@@ -80,33 +137,93 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
     );
   }
 
+  /// The enrollment half of biometric unlock — unlock_screen.dart is the *use*
+  /// half. Lives here specifically because it's a per-device setting: the wrap key
+  /// and wrapped KEK this creates only ever exist in this one phone's Keychain/
+  /// Keystore (see features/auth/biometric_unlock.dart) — there's no server-side
+  /// toggle, nothing to reflect on the other rows in this same list. Renders
+  /// nothing at all (not a disabled control — an absent one) until the capability
+  /// check confirms this device can actually do this.
+  Widget? _buildBiometricCard(BuildContext context) {
+    if (!_biometricChecked || !_biometricSupported) return null;
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                  child: Icon(Icons.fingerprint, color: Theme.of(context).colorScheme.primary),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Biometric unlock', style: TextStyle(fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Use Face ID, Touch ID, or fingerprint instead of your password to unlock Comm on this '
+                        'device. Your account password is never replaced — it\'s still needed on a new device or '
+                        'if this stops working.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton.tonal(
+                  onPressed: _biometricBusy ? null : _toggleBiometric,
+                  child: _biometricBusy
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : Text(_biometricEnabled ? 'Turn off' : 'Turn on'),
+                ),
+              ],
+            ),
+            if (_biometricError != null) ...[
+              const SizedBox(height: 8),
+              Text(_biometricError!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildBody() {
     if (_error != null) return Center(child: Text(_error!));
     final devices = _devices;
     if (devices == null) return const Center(child: CircularProgressIndicator());
 
+    final biometricCard = _buildBiometricCard(context);
+
     return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView.separated(
-        itemCount: devices.length,
-        separatorBuilder: (_, _) => const Divider(height: 1),
-        itemBuilder: (context, index) {
-          final d = devices[index];
-          return ListTile(
-            leading: Icon(d.deviceType == 'android' ? Icons.phone_android : Icons.devices),
-            title: Row(
-              children: [
-                Flexible(child: Text(d.name, overflow: TextOverflow.ellipsis)),
-                if (d.isCurrentDevice) ...[
-                  const SizedBox(width: 8),
-                  Chip(label: const Text('This device', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
+      onRefresh: () => Future.wait([_load(), _loadBiometricState()]),
+      child: ListView(
+        children: [
+          if (biometricCard != null) ...[biometricCard, const SizedBox(height: 8)],
+          for (var i = 0; i < devices.length; i++) ...[
+            if (i > 0) const Divider(height: 1),
+            ListTile(
+              leading: Icon(devices[i].deviceType == 'android' ? Icons.phone_android : Icons.devices),
+              title: Row(
+                children: [
+                  Flexible(child: Text(devices[i].name, overflow: TextOverflow.ellipsis)),
+                  if (devices[i].isCurrentDevice) ...[
+                    const SizedBox(width: 8),
+                    Chip(label: const Text('This device', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
+                  ],
                 ],
-              ],
+              ),
+              subtitle: Text('Last active ${_relativeTime(devices[i].lastActiveAt)}'),
+              trailing: IconButton(icon: const Icon(Icons.logout), onPressed: () => _revoke(devices[i])),
             ),
-            subtitle: Text('Last active ${_relativeTime(d.lastActiveAt)}'),
-            trailing: IconButton(icon: const Icon(Icons.logout), onPressed: () => _revoke(d)),
-          );
-        },
+          ],
+        ],
       ),
     );
   }

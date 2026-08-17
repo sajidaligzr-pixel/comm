@@ -20,6 +20,7 @@ import '../../storage/active_account.dart';
 import '../../storage/blob_store.dart' show wipeCryptoDb;
 import '../../storage/prefs.dart';
 import 'auth_state.dart';
+import 'biometric_unlock.dart' as biometric;
 
 String _guessDeviceName() {
   if (Platform.isAndroid) return 'Android device';
@@ -64,6 +65,22 @@ class AuthController extends StateNotifier<AuthState> {
     }
     setUnlockedIdentity(unlocked.kek, unlocked.identity);
     state = AuthSignedIn(current.profile, mustChangePassword: false);
+  }
+
+  /// Same effect as `unlock(password)` but sourced from a successful biometric
+  /// prompt instead of a typed password — see features/auth/biometric_unlock.dart.
+  /// Returns `false` (never throws) on anything short of success, so the unlock
+  /// screen can silently fall back to showing the password field.
+  Future<bool> unlockWithBiometrics() async {
+    final current = state;
+    if (current is! AuthNeedsUnlock) return false;
+
+    final unlocked = await biometric.unlockWithBiometrics();
+    if (unlocked == null) return false;
+
+    setUnlockedIdentity(unlocked.kek, unlocked.identity);
+    state = AuthSignedIn(current.profile, mustChangePassword: false);
+    return true;
   }
 
   /// Full username+password login — handles both a returning device (this phone has

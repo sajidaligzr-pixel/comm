@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../api/api_client.dart';
 import '../../app/providers.dart';
 import 'auth_controller.dart';
+import 'biometric_unlock.dart' as biometric;
 
 class ChangePasswordScreen extends ConsumerStatefulWidget {
   const ChangePasswordScreen({super.key});
@@ -35,6 +36,12 @@ class _ChangePasswordScreenState extends ConsumerState<ChangePasswordScreen> {
     });
     try {
       await ref.read(authApiProvider).changePassword(currentPassword: _currentController.text, newPassword: _newController.text);
+      // A biometric enrollment (biometric_unlock.dart) wraps the KEK derived from
+      // the *old* password — it goes stale the moment the password changes.
+      // Cleared here rather than left as a button that's now silently guaranteed
+      // to fail; re-enabling it from the Devices screen takes a few seconds.
+      // Mirrors apps/web/components/change-password-form.tsx exactly.
+      await biometric.disableBiometricUnlock();
       await ref.read(authControllerProvider.notifier).markPasswordChanged();
     } on ApiException catch (e) {
       setState(() => _error = e.message);

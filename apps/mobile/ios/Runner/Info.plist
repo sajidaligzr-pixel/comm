@@ -54,5 +54,11 @@
 	     crash-not-just-deny behavior as the photo library key above. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Comm needs access to your microphone to make and receive voice calls.</string>
+	<!-- Required by local_auth (features/auth/biometric_unlock.dart) for Face ID
+	     specifically — Touch ID needs no key, but without this one iOS shows a
+	     dialog saying the app hasn't been updated to support Face ID instead of
+	     the actual prompt. -->
+	<key>NSFaceIDUsageDescription</key>
+	<string>Comm can use Face ID to unlock the app instead of your password.</string>
 </dict>
 </plist>

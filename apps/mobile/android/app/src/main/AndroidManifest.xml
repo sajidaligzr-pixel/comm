@@ -14,6 +14,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <!-- Biometric unlock (features/auth/biometric_unlock.dart) — local_auth's
+         BiometricPrompt integration needs this declared or the prompt silently
+         refuses to show on API 28+. -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
     <application
         android:label="comm_mobile"
         android:name="${applicationName}"

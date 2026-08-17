@@ -1,7 +1,10 @@
-/// Password-only unlock for now (`AuthNeedsUnlock` — a still-valid server session
-/// whose local KEK just needs re-deriving). Biometric unlock (local_auth, mirroring
-/// apps/web/lib/crypto/biometric-unlock.ts) is tracked as a follow-up milestone, not
-/// wired in this pass — see apps/mobile/README.md.
+/// `AuthNeedsUnlock` — a still-valid server session whose local KEK just needs
+/// re-deriving. Password is always the fallback; when biometric unlock has been
+/// enrolled on this device (Devices screen) and the hardware is available, this
+/// also offers a biometric prompt — auto-triggered once on entry (matches the
+/// common native pattern, e.g. WhatsApp/Signal desktop) plus a manual retry button,
+/// mirroring apps/web/components/unlock-gate.tsx's own "try biometrics first, real
+/// password field always still right there" layout.
 library;
 
 import 'package:flutter/material.dart';
@@ -10,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../api/api_client.dart';
 import 'auth_controller.dart';
 import 'auth_state.dart';
+import 'biometric_unlock.dart' as biometric;
 
 class UnlockScreen extends ConsumerStatefulWidget {
   const UnlockScreen({super.key});
@@ -21,6 +25,46 @@ class _UnlockScreenState extends ConsumerState<UnlockScreen> {
   final _passwordController = TextEditingController();
   String? _error;
   bool _submitting = false;
+  bool _biometricOffered = false;
+  bool _biometricAttempting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkBiometricAndMaybeAutoPrompt();
+  }
+
+  Future<void> _checkBiometricAndMaybeAutoPrompt() async {
+    try {
+      final available = await biometric.isBiometricAvailable();
+      final enabled = available && await biometric.isBiometricUnlockEnabled();
+      if (!mounted) return;
+      setState(() => _biometricOffered = enabled);
+      if (enabled) await _tryBiometricUnlock(auto: true);
+    } catch (_) {
+      // Fail closed, matching biometric_unlock.dart itself — worst case the button
+      // just never offers itself, never a crash on this screen.
+    }
+  }
+
+  Future<void> _tryBiometricUnlock({bool auto = false}) async {
+    if (_biometricAttempting || _submitting) return;
+    setState(() {
+      _biometricAttempting = true;
+      _error = null;
+    });
+    try {
+      final ok = await ref.read(authControllerProvider.notifier).unlockWithBiometrics();
+      // A failed *auto* attempt (e.g. the user just didn't want to scan right now)
+      // shouldn't plant an error message before they've even looked at the screen —
+      // only a failure from an explicit tap gets surfaced.
+      if (!ok && !auto && mounted) {
+        setState(() => _error = "Couldn't unlock with biometrics — try your password instead.");
+      }
+    } finally {
+      if (mounted) setState(() => _biometricAttempting = false);
+    }
+  }
 
   @override
   void dispose() {
@@ -70,16 +114,38 @@ class _UnlockScreenState extends ConsumerState<UnlockScreen> {
                   Text('Welcome back, @$username', style: Theme.of(context).textTheme.titleLarge, textAlign: TextAlign.center),
                   const SizedBox(height: 8),
                   Text(
-                    'Enter your password to unlock this device.',
+                    _biometricOffered ? 'Unlock this device to continue.' : 'Enter your password to unlock this device.',
                     style: Theme.of(context).textTheme.bodyMedium,
                     textAlign: TextAlign.center,
                   ),
-                  const SizedBox(height: 24),
+                  if (_biometricOffered) ...[
+                    const SizedBox(height: 20),
+                    OutlinedButton.icon(
+                      onPressed: _biometricAttempting || _submitting ? null : () => _tryBiometricUnlock(),
+                      icon: _biometricAttempting
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.fingerprint),
+                      label: const Text('Unlock with biometrics'),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const Expanded(child: Divider()),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          child: Text('or', style: Theme.of(context).textTheme.bodySmall),
+                        ),
+                        const Expanded(child: Divider()),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                  ] else
+                    const SizedBox(height: 24),
                   TextField(
                     controller: _passwordController,
                     decoration: const InputDecoration(labelText: 'Password'),
                     obscureText: true,
-                    autofocus: true,
+                    autofocus: !_biometricOffered,
                     enabled: !_submitting,
                     onSubmitted: (_) => _submit(),
                   ),

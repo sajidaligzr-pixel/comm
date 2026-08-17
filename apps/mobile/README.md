@@ -50,6 +50,7 @@ not written once up front and left stale.)
 | Device management | devices settings page | `lib/features/devices/devices_screen.dart` |
 | Call signaling + WebRTC | `components/call/call-provider.tsx` | `lib/features/calls/*.dart` (`flutter_webrtc`) |
 | Group CRUD + membership UI | group settings pages | `lib/features/groups/*.dart` |
+| Biometric unlock | `lib/crypto/biometric-unlock.ts` (WebAuthn PRF) | `lib/features/auth/biometric_unlock.dart` (`local_auth` + wrapped-KEK — see its docstring for how the mechanism differs from the web's PRF approach) |
 
 **One backend gap, not yet closed:** push notifications on `apps/web` run on Web
 Push/VAPID (`apps/worker/src/realtime/push-dispatch.ts`), which only works for
@@ -79,20 +80,29 @@ installable binary:
   client (interoperates with it unchanged) — native audio routing means the
   browser's speaker-by-default bug doesn't exist here.
 - Device management: list linked devices, revoke any of them.
+- Biometric unlock: opt-in (one-time dismissible prompt on first sign-in, or toggle
+  any time from the Devices screen), auto-attempted on the unlock screen with the
+  password field always available as a fallback, automatically disabled if the
+  account password changes elsewhere. See `lib/features/auth/biometric_unlock.dart`'s
+  docstring for exactly how this differs from the web client's WebAuthn-PRF-based
+  approach (`local_auth` has no equivalent primitive to build the same mechanism on
+  mobile) and what that trade-off means.
 
-Two real production bugs were found and fixed while verifying this, not just
+Three real production bugs were found and fixed while verifying this, not just
 theorized about: the Android manifest only declared `INTERNET` permission in
-debug/profile builds (a release build would've had zero network access), and
+debug/profile builds (a release build would've had zero network access),
 `image_picker`/`flutter_webrtc` need iOS usage-description keys that weren't present
-(missing them crashes the app on first access, not just denies the permission).
+(missing them crashes the app on first access, not just denies the permission), and
+`local_auth` requires the host Activity to extend `FlutterFragmentActivity`, not the
+scaffold's default `FlutterActivity` — biometric unlock would have built cleanly and
+then crashed at the exact moment a user tapped "Unlock with biometrics."
 
 ## Not built yet
 
-Push notifications (needs the FCM/APNs backend addition above), biometric unlock
-(`local_auth` is a dependency, not wired), admin panel, group voice/video calling
-(calling remains 1:1 only, matching the web client), read-receipt "seen by" UI for
-groups (per-recipient rows are recorded server-side, just not surfaced in this
-client yet).
+Push notifications (needs the FCM/APNs backend addition above), admin panel, group
+voice/video calling (calling remains 1:1 only, matching the web client),
+read-receipt "seen by" UI for groups (per-recipient rows are recorded server-side,
+just not surfaced in this client yet).
 
 ## Running
 
