@@ -87,6 +87,11 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
         title: Text(profile != null ? 'Chats — @${profile.username}' : 'Chats'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.devices_other),
+            tooltip: 'Devices',
+            onPressed: () => context.push('/devices'),
+          ),
+          IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Sign out',
             onPressed: () => ref.read(authControllerProvider.notifier).logout(),

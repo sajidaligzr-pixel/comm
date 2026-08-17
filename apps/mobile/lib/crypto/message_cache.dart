@@ -18,6 +18,7 @@ library;
 
 import 'dart:convert';
 import 'dart:typed_data';
+import '../api/dtos.dart' show AttachmentDescriptor;
 import 'encoding.dart';
 import 'storage/wrap.dart';
 import '../storage/blob_store.dart';
@@ -31,6 +32,11 @@ class CachedMessage {
   final String text;
   final String sentAt;
   final String? replyToMessageId;
+  /// Present when `contentTypeHint == 'media'` — the decrypted descriptor for a
+  /// generic file attachment (see crypto/attachment_crypto.dart, api/media_api.dart).
+  /// The actual bytes are fetched + decrypted on demand when the user taps
+  /// Download, not eagerly.
+  final AttachmentDescriptor? attachment;
 
   const CachedMessage({
     required this.id,
@@ -41,6 +47,7 @@ class CachedMessage {
     required this.text,
     required this.sentAt,
     required this.replyToMessageId,
+    this.attachment,
   });
 
   Map<String, dynamic> toJson() => {
@@ -52,6 +59,7 @@ class CachedMessage {
     'text': text,
     'sentAt': sentAt,
     'replyToMessageId': replyToMessageId,
+    if (attachment != null) 'attachment': attachment!.toJson(),
   };
 
   static CachedMessage fromJson(Map<String, dynamic> json) => CachedMessage(
@@ -63,6 +71,7 @@ class CachedMessage {
     text: json['text'] as String,
     sentAt: json['sentAt'] as String,
     replyToMessageId: json['replyToMessageId'] as String?,
+    attachment: json['attachment'] != null ? AttachmentDescriptor.fromJson(json['attachment'] as Map<String, dynamic>) : null,
   );
 }
 

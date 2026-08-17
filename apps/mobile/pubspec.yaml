@@ -56,6 +56,11 @@ dependencies:
   intl: ^0.19.0
   permission_handler: ^11.3.1
   uuid: ^4.5.1
+  # File/photo picking for the media-attachment pipeline (mirrors the web client's
+  # <input type="file">) — image_picker for the camera-roll/photo shortcut,
+  # file_picker for arbitrary documents.
+  image_picker: ^1.1.2
+  file_picker: ^8.1.6
 
 dev_dependencies:
   flutter_test:

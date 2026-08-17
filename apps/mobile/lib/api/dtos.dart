@@ -388,6 +388,73 @@ class MessageDto {
   );
 }
 
+// ── Media (packages/types/src/media.ts) ────────────────────────────────────────────
+
+/// Advisory client-side pre-check only — matches the server's own default
+/// (apps/web/server/modules/media/service.ts); the server's own cap is authoritative.
+const mediaClientSoftCapBytes = 25 * 1024 * 1024;
+
+class UploadTarget {
+  final String method; // 'PUT' | 'POST'
+  final String url;
+  final Map<String, String>? fields; // present only for POST (presigned-POST form fields)
+  const UploadTarget({required this.method, required this.url, this.fields});
+
+  static UploadTarget fromJson(Map<String, dynamic> json) => UploadTarget(
+    method: json['method'] as String,
+    url: json['url'] as String,
+    fields: (json['fields'] as Map<String, dynamic>?)?.map((k, v) => MapEntry(k, v as String)),
+  );
+}
+
+class CreateUploadUrlResponse {
+  final String objectKey;
+  final UploadTarget target;
+  const CreateUploadUrlResponse({required this.objectKey, required this.target});
+  static CreateUploadUrlResponse fromJson(Map<String, dynamic> json) => CreateUploadUrlResponse(
+    objectKey: json['objectKey'] as String,
+    target: UploadTarget.fromJson(json['target'] as Map<String, dynamic>),
+  );
+}
+
+/// This is the actual "plaintext" of a `contentTypeHint: 'media'` message: a small
+/// JSON blob naming an object-storage key + the AES-256-GCM key/nonce needed to
+/// decrypt it — never the file bytes themselves (those live in object storage,
+/// encrypted, fetched on demand).
+class AttachmentDescriptor {
+  final String objectKey;
+  final String key; // base64
+  final String nonce; // base64
+  final String mimeType;
+  final String fileName;
+  final int sizeBytes;
+  const AttachmentDescriptor({
+    required this.objectKey,
+    required this.key,
+    required this.nonce,
+    required this.mimeType,
+    required this.fileName,
+    required this.sizeBytes,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'objectKey': objectKey,
+    'key': key,
+    'nonce': nonce,
+    'mimeType': mimeType,
+    'fileName': fileName,
+    'sizeBytes': sizeBytes,
+  };
+  static AttachmentDescriptor fromJson(Map<String, dynamic> json) => AttachmentDescriptor(
+    objectKey: json['objectKey'] as String,
+    key: json['key'] as String,
+    nonce: json['nonce'] as String,
+    mimeType: json['mimeType'] as String,
+    fileName: json['fileName'] as String,
+    sizeBytes: json['sizeBytes'] as int,
+  );
+}
+
 class CursorPage<T> {
   final List<T> items;
   final String? nextCursor;

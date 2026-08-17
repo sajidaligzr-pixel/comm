@@ -1,4 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Required for every network call this app makes (API, media upload/download,
+         realtime WebSocket) — Flutter's tooling auto-adds this for debug/profile
+         builds only (see src/debug and src/profile's own manifests, which exist
+         purely for hot-reload's own connection), so a release build silently has NO
+         network access at all without it declared here too. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <application
         android:label="comm_mobile"
         android:name="${applicationName}"

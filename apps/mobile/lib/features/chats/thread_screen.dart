@@ -12,13 +12,20 @@
 /// rather than silently pretending to send.
 library;
 
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../api/api_client.dart';
 import '../../api/dtos.dart';
 import '../../app/providers.dart';
+import '../../crypto/attachment_crypto.dart' as attach_crypto;
 import '../../crypto/conversation_crypto.dart' as convo;
 import '../../crypto/encoding.dart';
 import '../../crypto/kek_holder.dart';
@@ -119,14 +126,23 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     if (kek == null) return;
 
     final isOwn = dto.senderUserId == _myUserId;
-    String text;
+    String text = '';
+    AttachmentDescriptor? attachment;
     if (isOwn && alreadyMine) {
       text = '[Sent from another device — not available on this one]';
     } else {
       try {
         final envelope = MessageEnvelope(header: dto.envelope.header, ciphertext: dto.envelope.ciphertext);
         final plaintext = await convo.decryptFromDeviceOnce(dto.id, dto.senderDeviceId, envelope, dto.x3dhInit);
-        text = bytesToUtf8(plaintext);
+        if (dto.contentTypeHint == 'media') {
+          try {
+            attachment = AttachmentDescriptor.fromJson(jsonDecode(bytesToUtf8(plaintext)) as Map<String, dynamic>);
+          } catch (_) {
+            text = '[Malformed attachment]';
+          }
+        } else {
+          text = bytesToUtf8(plaintext);
+        }
       } catch (e) {
         text = '[Could not decrypt this message]';
       }
@@ -141,6 +157,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       text: text,
       sentAt: dto.sentAt,
       replyToMessageId: dto.replyToMessageId,
+      attachment: attachment,
     );
     await appendCachedMessage(kek, cached);
     if (mounted) {
@@ -169,35 +186,73 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
 
   Future<void> _send() async {
     final text = _textController.text.trim();
-    final conversation = _conversation;
-    if (text.isEmpty || conversation == null || conversation.type != 'direct') return;
+    if (text.isEmpty) return;
+    _textController.clear();
+    await _sendEnvelope(contentTypeHint: 'text', plaintext: utf8ToBytes(text), cacheText: text);
+  }
 
+  Future<void> _sendFile(Uint8List bytes, String fileName, String mimeType) async {
+    setState(() => _sending = true);
+    try {
+      final encrypted = await attach_crypto.encryptAttachment(bytes);
+      final uploaded = await ref.read(mediaApiProvider).uploadAttachmentCiphertext(encrypted.ciphertext);
+      final descriptor = AttachmentDescriptor(
+        objectKey: uploaded.objectKey,
+        key: bytesToBase64(encrypted.key),
+        nonce: bytesToBase64(encrypted.nonce),
+        mimeType: mimeType,
+        fileName: fileName,
+        sizeBytes: bytes.length,
+      );
+      await _sendEnvelope(
+        contentTypeHint: 'media',
+        plaintext: utf8ToBytes(jsonEncode(descriptor.toJson())),
+        cacheText: '',
+        cacheAttachment: descriptor,
+        attachmentRef: MessageAttachmentRef(objectKey: uploaded.objectKey, encryptedSizeBytes: uploaded.encryptedSizeBytes),
+      );
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not send that file: $e')));
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  /// Shared by `_send`/`_sendFile` — resolves the recipient device, runs the real
+  /// X3DH/Double Ratchet encrypt, sends via REST, and echoes the result into the
+  /// local cache immediately (this device already has the plaintext; no need to
+  /// wait for a round trip through decrypt to display it).
+  Future<void> _sendEnvelope({
+    required String contentTypeHint,
+    required Uint8List plaintext,
+    required String cacheText,
+    AttachmentDescriptor? cacheAttachment,
+    MessageAttachmentRef? attachmentRef,
+  }) async {
+    final conversation = _conversation;
+    if (conversation == null || conversation.type != 'direct') return;
     final kek = getCurrentKek();
     if (kek == null) return;
 
     setState(() => _sending = true);
-    _textController.clear();
     try {
       final target = await ref.read(conversationsApiProvider).recipientDevice(widget.conversationId);
       if (target == null) throw StateError('The other person has no reachable device right now.');
 
-      final outgoing = await convo.encryptForDevice(
-        ref.read(keysApiProvider),
-        target.userId,
-        target.deviceId,
-        utf8ToBytes(text),
-      );
+      final outgoing = await convo.encryptForDevice(ref.read(keysApiProvider), target.userId, target.deviceId, plaintext);
 
-      final messageId = _uuid.v4();
       final req = SendMessageRequest(
-        messageId: messageId,
+        messageId: _uuid.v4(),
         recipientDeviceId: target.deviceId,
         envelopeType: 'x3dh_ratchet_1to1',
         envelope: MessageEnvelopeUpload(header: outgoing.envelope.header, ciphertext: outgoing.envelope.ciphertext),
         x3dhInit: outgoing.x3dhInit,
-        contentTypeHint: 'text',
+        contentTypeHint: contentTypeHint,
         replyToMessageId: null,
         sentAt: DateTime.now().toUtc().toIso8601String(),
+        attachment: attachmentRef,
       );
       final sent = await ref.read(messagesApiProvider).send(widget.conversationId, req);
 
@@ -206,10 +261,11 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         conversationId: widget.conversationId,
         senderUserId: _myUserId,
         isOwn: true,
-        contentTypeHint: 'text',
-        text: text,
+        contentTypeHint: contentTypeHint,
+        text: cacheText,
         sentAt: sent.sentAt,
         replyToMessageId: null,
+        attachment: cacheAttachment,
       );
       await appendCachedMessage(kek, cached);
       if (mounted) {
@@ -222,6 +278,39 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not send: $e')));
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  Future<void> _pickAndSendPhoto() async {
+    final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 90);
+    if (picked == null) return;
+    final bytes = await picked.readAsBytes();
+    await _sendFile(bytes, picked.name, picked.mimeType ?? 'image/jpeg');
+  }
+
+  Future<void> _pickAndSendFile() async {
+    final result = await FilePicker.platform.pickFiles(withData: true);
+    final picked = result?.files.single;
+    if (picked?.bytes == null) return;
+    await _sendFile(picked!.bytes!, picked.name, 'application/octet-stream');
+  }
+
+  Future<void> _downloadAttachment(AttachmentDescriptor descriptor) async {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Downloading ${descriptor.fileName}…')));
+    try {
+      final ciphertext = await ref.read(mediaApiProvider).downloadAttachmentCiphertext(descriptor.objectKey);
+      final plaintext = await attach_crypto.decryptAttachment(ciphertext, base64ToBytes(descriptor.key), base64ToBytes(descriptor.nonce));
+
+      final dir = await getApplicationDocumentsDirectory();
+      final savedDir = Directory('${dir.path}/comm-downloads')..createSync(recursive: true);
+      final file = File('${savedDir.path}/${descriptor.fileName}');
+      await file.writeAsBytes(plaintext);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved ${descriptor.fileName} to app storage')));
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not download: $e')));
     }
   }
 
@@ -260,7 +349,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                   controller: _scrollController,
                   padding: const EdgeInsets.all(12),
                   itemCount: _messages.length,
-                  itemBuilder: (context, index) => _MessageBubble(message: _messages[index]),
+                  itemBuilder: (context, index) =>
+                      _MessageBubble(message: _messages[index], onDownload: _downloadAttachment),
                 ),
         ),
         SafeArea(
@@ -269,6 +359,15 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             child: Row(
               children: [
+                PopupMenuButton<String>(
+                  enabled: !_sending,
+                  icon: const Icon(Icons.add_circle_outline),
+                  onSelected: (choice) => choice == 'photo' ? _pickAndSendPhoto() : _pickAndSendFile(),
+                  itemBuilder: (context) => const [
+                    PopupMenuItem(value: 'photo', child: ListTile(leading: Icon(Icons.photo), title: Text('Photo'))),
+                    PopupMenuItem(value: 'file', child: ListTile(leading: Icon(Icons.attach_file), title: Text('File'))),
+                  ],
+                ),
                 Expanded(
                   child: TextField(
                     controller: _textController,
@@ -296,12 +395,16 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
 }
 
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message});
+  const _MessageBubble({required this.message, required this.onDownload});
   final CachedMessage message;
+  final void Function(AttachmentDescriptor) onDownload;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final fgColor = message.isOwn ? scheme.onPrimary : scheme.onSurface;
+    final attachment = message.attachment;
+
     return Align(
       alignment: message.isOwn ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -312,8 +415,37 @@ class _MessageBubble extends StatelessWidget {
           color: message.isOwn ? scheme.primary : scheme.surfaceContainerHighest,
           borderRadius: BorderRadius.circular(16),
         ),
-        child: Text(message.text, style: TextStyle(color: message.isOwn ? scheme.onPrimary : scheme.onSurface)),
+        child: attachment != null
+            ? InkWell(
+                onTap: () => onDownload(attachment),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.insert_drive_file, color: fgColor),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(attachment.fileName, style: TextStyle(color: fgColor), overflow: TextOverflow.ellipsis),
+                          Text(_formatBytes(attachment.sizeBytes), style: TextStyle(color: fgColor.withValues(alpha: 0.75), fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Icon(Icons.download, color: fgColor, size: 18),
+                  ],
+                ),
+              )
+            : Text(message.text, style: TextStyle(color: fgColor)),
       ),
     );
   }
+}
+
+String _formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+  return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
 }

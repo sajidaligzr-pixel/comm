@@ -18,6 +18,7 @@ import '../features/auth/invite_redeem_screen.dart';
 import '../features/auth/change_password_screen.dart';
 import '../features/chats/chats_list_screen.dart';
 import '../features/chats/thread_screen.dart';
+import '../features/devices/devices_screen.dart';
 
 /// Pure redirect logic, factored out of the `GoRouter` construction below purely so
 /// it's unit-testable without spinning up navigation/platform-channel machinery
@@ -55,6 +56,7 @@ final routerProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(path: '/change-password', builder: (context, state) => const ChangePasswordScreen()),
       GoRoute(path: '/chats', builder: (context, state) => const ChatsListScreen()),
+      GoRoute(path: '/devices', builder: (context, state) => const DevicesScreen()),
       GoRoute(
         path: '/chats/:id',
         builder: (context, state) => ThreadScreen(conversationId: state.pathParameters['id']!),

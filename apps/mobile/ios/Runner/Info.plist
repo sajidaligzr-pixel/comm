@@ -45,5 +45,10 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- Required by image_picker (features/chats/thread_screen.dart's "Photo" attach
+	     option) — iOS crashes the app outright if this key is missing at the moment
+	     the photo library is actually accessed, not just denies the permission. -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Comm needs access to your photos so you can send them in a chat.</string>
 </dict>
 </plist>
