@@ -25,6 +25,11 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
     final realtime = ref.read(realtimeClientProvider);
     realtime.connect();
     realtime.on('new', _onRealtimeMessage);
+
+    final authState = ref.read(authControllerProvider);
+    if (authState is AuthSignedIn) {
+      ref.read(groupSessionControllerProvider).setCurrentUserId(authState.profile.id);
+    }
   }
 
   @override
@@ -99,7 +104,19 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
         ],
       ),
       body: _buildBody(),
-      floatingActionButton: FloatingActionButton(onPressed: _startNewChat, child: const Icon(Icons.add_comment)),
+      floatingActionButton: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FloatingActionButton.small(
+            heroTag: 'new-group',
+            onPressed: () => context.push('/new-group'),
+            tooltip: 'New group',
+            child: const Icon(Icons.group_add),
+          ),
+          const SizedBox(width: 12),
+          FloatingActionButton(heroTag: 'new-chat', onPressed: _startNewChat, tooltip: 'New chat', child: const Icon(Icons.add_comment)),
+        ],
+      ),
     );
   }
 

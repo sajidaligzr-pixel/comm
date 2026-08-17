@@ -16,6 +16,8 @@ import '../api/messages_api.dart';
 import '../api/devices_api.dart';
 import '../api/media_api.dart';
 import '../api/calls_api.dart';
+import '../api/groups_api.dart';
+import '../features/groups/group_session_controller.dart';
 import '../realtime/ws_client.dart';
 
 /// Set once in main.dart after `ApiClient.initialize()` resolves — every other
@@ -32,6 +34,23 @@ final messagesApiProvider = Provider<MessagesApi>((ref) => MessagesApi(ref.watch
 final devicesApiProvider = Provider<DevicesApi>((ref) => DevicesApi(ref.watch(apiClientProvider)));
 final mediaApiProvider = Provider<MediaApi>((ref) => MediaApi(ref.watch(apiClientProvider)));
 final callsApiProvider = Provider<CallsApi>((ref) => CallsApi(ref.watch(apiClientProvider)));
+final groupsApiProvider = Provider<GroupsApi>((ref) => GroupsApi(ref.watch(apiClientProvider)));
+
+/// Mounted once for the app's lifetime (a plain `Provider`, not tied to any one
+/// screen) — mirrors `GroupSessionProvider`'s app-shell-level placement in
+/// apps/web's layout, since a `group.key-share`/`group.members-changed` event has to
+/// be handled no matter which screen is open, not just while a group thread happens
+/// to be mounted.
+final groupSessionControllerProvider = Provider<GroupSessionController>((ref) {
+  final controller = GroupSessionController(
+    groupsApi: ref.watch(groupsApiProvider),
+    keysApi: ref.watch(keysApiProvider),
+    realtime: ref.watch(realtimeClientProvider),
+  );
+  controller.start();
+  ref.onDispose(controller.dispose);
+  return controller;
+});
 
 final realtimeClientProvider = Provider<RealtimeClient>((ref) {
   final client = RealtimeClient(ref.watch(apiClientProvider).cookieJar);

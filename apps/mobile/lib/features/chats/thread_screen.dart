@@ -1,15 +1,13 @@
 /// The core "does end-to-end encryption actually work" screen: loads history,
-/// decrypts every incoming ciphertext via the real X3DH/Double Ratchet session
-/// machinery (crypto/conversation_crypto.dart), sends new messages the same way the
-/// web client does (REST, not WS — see messages_api.dart's docstring), and reacts to
-/// live `new` events over the realtime socket.
+/// decrypts every incoming ciphertext (via crypto/conversation_crypto.dart for
+/// direct conversations, features/groups/group_session_controller.dart for group
+/// ones — branched on the message's own `envelopeType`, not the conversation type,
+/// since that's the actual authoritative signal per message), sends new messages the
+/// same way the web client does (REST, not WS — see messages_api.dart's docstring),
+/// and reacts to live `new` events over the realtime socket.
 ///
-/// Group conversations are intentionally NOT wired to real encryption here yet — the
-/// group ratchet primitives exist and are tested (crypto/group/), but the session
-/// distribution/state-machine layer (the mobile equivalent of
-/// apps/web/components/group/group-session-provider.tsx) is a separate, larger
-/// follow-up milestone. Opening a group conversation here shows a clear placeholder
-/// rather than silently pretending to send.
+/// Group voice calling remains out of scope (same as the web client — calling is
+/// still 1:1 only), so the call button only ever appears for direct conversations.
 library;
 
 import 'dart:convert';
@@ -18,6 +16,7 @@ import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -34,8 +33,26 @@ import '../../crypto/session/session.dart' show MessageEnvelope;
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 import '../calls/call_controller.dart';
+import '../groups/group_session_controller.dart';
 
 const _uuid = Uuid();
+
+class _DecodedContent {
+  final String text;
+  final AttachmentDescriptor? attachment;
+  const _DecodedContent({required this.text, this.attachment});
+}
+
+_DecodedContent _decodeContent(String contentTypeHint, Uint8List plaintext) {
+  if (contentTypeHint == 'media') {
+    try {
+      return _DecodedContent(text: '', attachment: AttachmentDescriptor.fromJson(jsonDecode(bytesToUtf8(plaintext)) as Map<String, dynamic>));
+    } catch (_) {
+      return const _DecodedContent(text: '[Malformed attachment]');
+    }
+  }
+  return _DecodedContent(text: bytesToUtf8(plaintext));
+}
 
 class ThreadScreen extends ConsumerStatefulWidget {
   const ThreadScreen({super.key, required this.conversationId});
@@ -98,15 +115,19 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         });
       }
 
-      if (conversation.type == 'direct') {
-        final page = await ref.read(messagesApiProvider).list(widget.conversationId, limit: 100);
-        final cachedIds = cached.map((m) => m.id).toSet();
-        for (final dto in page.items) {
-          if (cachedIds.contains(dto.id)) continue;
-          await _ingestIncoming(dto, alreadyMine: dto.senderUserId == _myUserId);
-        }
-        await ref.read(conversationsApiProvider).markRead(widget.conversationId, page.items.isNotEmpty ? page.items.last.id : '');
+      if (conversation.type == 'group' && conversation.groupId != null) {
+        final groupController = ref.read(groupSessionControllerProvider);
+        await groupController.registerGroupMembership(conversation.groupId!);
+        await groupController.ensureGroupKeysUpToDate(conversation.groupId!);
       }
+
+      final page = await ref.read(messagesApiProvider).list(widget.conversationId, limit: 100);
+      final cachedIds = cached.map((m) => m.id).toSet();
+      for (final dto in page.items) {
+        if (cachedIds.contains(dto.id)) continue;
+        await _ingestIncoming(dto, alreadyMine: dto.senderUserId == _myUserId);
+      }
+      await ref.read(conversationsApiProvider).markRead(widget.conversationId, page.items.isNotEmpty ? page.items.last.id : '');
       _scrollToBottom();
     } on ApiException catch (e) {
       setState(() => _error = e.message);
@@ -122,7 +143,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// device) — those ciphertexts can never be decrypted (a sending chain is
   /// one-directional), so they're shown as a placeholder rather than silently
   /// dropped or crashing the load.
-  Future<void> _ingestIncoming(MessageDto dto, {bool alreadyMine = false}) async {
+  Future<void> _ingestIncoming(MessageDto dto, {bool alreadyMine = false, bool retriedAfterKeySync = false}) async {
     final kek = getCurrentKek();
     if (kek == null) return;
 
@@ -131,19 +152,38 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     AttachmentDescriptor? attachment;
     if (isOwn && alreadyMine) {
       text = '[Sent from another device — not available on this one]';
+    } else if (dto.envelopeType == 'megolm_group') {
+      final conversation = _conversation;
+      final groupId = conversation?.groupId;
+      if (groupId == null) {
+        text = '[Could not decrypt this message]';
+      } else {
+        try {
+          final envelope = EncryptedGroupEnvelope(header: dto.envelope.header, ciphertext: dto.envelope.ciphertext);
+          final plaintext =
+              await ref.read(groupSessionControllerProvider).decryptGroupMessageOnce(dto.id, groupId, dto.senderUserId, envelope);
+          final decoded = _decodeContent(dto.contentTypeHint, plaintext);
+          text = decoded.text;
+          attachment = decoded.attachment;
+        } catch (e) {
+          if (!retriedAfterKeySync) {
+            // This device may simply not have the sender's group session yet (a
+            // key-share that hasn't landed) — sync once and retry before giving up,
+            // mirroring the TS provider's documented "try ensureGroupKeysUpToDate
+            // and retry once" contract.
+            await ref.read(groupSessionControllerProvider).ensureGroupKeysUpToDate(groupId);
+            return _ingestIncoming(dto, alreadyMine: alreadyMine, retriedAfterKeySync: true);
+          }
+          text = '[Could not decrypt this message]';
+        }
+      }
     } else {
       try {
         final envelope = MessageEnvelope(header: dto.envelope.header, ciphertext: dto.envelope.ciphertext);
         final plaintext = await convo.decryptFromDeviceOnce(dto.id, dto.senderDeviceId, envelope, dto.x3dhInit);
-        if (dto.contentTypeHint == 'media') {
-          try {
-            attachment = AttachmentDescriptor.fromJson(jsonDecode(bytesToUtf8(plaintext)) as Map<String, dynamic>);
-          } catch (_) {
-            text = '[Malformed attachment]';
-          }
-        } else {
-          text = bytesToUtf8(plaintext);
-        }
+        final decoded = _decodeContent(dto.contentTypeHint, plaintext);
+        text = decoded.text;
+        attachment = decoded.attachment;
       } catch (e) {
         text = '[Could not decrypt this message]';
       }
@@ -221,10 +261,11 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
   }
 
-  /// Shared by `_send`/`_sendFile` — resolves the recipient device, runs the real
-  /// X3DH/Double Ratchet encrypt, sends via REST, and echoes the result into the
-  /// local cache immediately (this device already has the plaintext; no need to
-  /// wait for a round trip through decrypt to display it).
+  /// Shared by `_send`/`_sendFile` — resolves the recipient(s), runs the real
+  /// encrypt (X3DH/Double Ratchet for a direct conversation, the group ratchet via
+  /// `GroupSessionController` for a group one), sends via REST, and echoes the
+  /// result into the local cache immediately (this device already has the
+  /// plaintext; no need to wait for a round trip through decrypt to display it).
   Future<void> _sendEnvelope({
     required String contentTypeHint,
     required Uint8List plaintext,
@@ -233,28 +274,45 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     MessageAttachmentRef? attachmentRef,
   }) async {
     final conversation = _conversation;
-    if (conversation == null || conversation.type != 'direct') return;
+    if (conversation == null) return;
     final kek = getCurrentKek();
     if (kek == null) return;
 
     setState(() => _sending = true);
     try {
-      final target = await ref.read(conversationsApiProvider).recipientDevice(widget.conversationId);
-      if (target == null) throw StateError('The other person has no reachable device right now.');
+      final SendMessageRequest req;
+      if (conversation.type == 'group') {
+        final groupId = conversation.groupId;
+        if (groupId == null) throw StateError('Missing group id.');
+        final encrypted = await ref.read(groupSessionControllerProvider).encryptForGroup(groupId, _myUserId, plaintext);
+        req = SendMessageRequest(
+          messageId: _uuid.v4(),
+          recipientDeviceId: null, // the server resolves every current member's primary device itself
+          envelopeType: 'megolm_group',
+          envelope: MessageEnvelopeUpload(header: encrypted.header, ciphertext: encrypted.ciphertext),
+          x3dhInit: null, // group key material moves via the separate key-share channel, not per-message
+          contentTypeHint: contentTypeHint,
+          replyToMessageId: null,
+          sentAt: DateTime.now().toUtc().toIso8601String(),
+          attachment: attachmentRef,
+        );
+      } else {
+        final target = await ref.read(conversationsApiProvider).recipientDevice(widget.conversationId);
+        if (target == null) throw StateError('The other person has no reachable device right now.');
 
-      final outgoing = await convo.encryptForDevice(ref.read(keysApiProvider), target.userId, target.deviceId, plaintext);
-
-      final req = SendMessageRequest(
-        messageId: _uuid.v4(),
-        recipientDeviceId: target.deviceId,
-        envelopeType: 'x3dh_ratchet_1to1',
-        envelope: MessageEnvelopeUpload(header: outgoing.envelope.header, ciphertext: outgoing.envelope.ciphertext),
-        x3dhInit: outgoing.x3dhInit,
-        contentTypeHint: contentTypeHint,
-        replyToMessageId: null,
-        sentAt: DateTime.now().toUtc().toIso8601String(),
-        attachment: attachmentRef,
-      );
+        final outgoing = await convo.encryptForDevice(ref.read(keysApiProvider), target.userId, target.deviceId, plaintext);
+        req = SendMessageRequest(
+          messageId: _uuid.v4(),
+          recipientDeviceId: target.deviceId,
+          envelopeType: 'x3dh_ratchet_1to1',
+          envelope: MessageEnvelopeUpload(header: outgoing.envelope.header, ciphertext: outgoing.envelope.ciphertext),
+          x3dhInit: outgoing.x3dhInit,
+          contentTypeHint: contentTypeHint,
+          replyToMessageId: null,
+          sentAt: DateTime.now().toUtc().toIso8601String(),
+          attachment: attachmentRef,
+        );
+      }
       final sent = await ref.read(messagesApiProvider).send(widget.conversationId, req);
 
       final cached = CachedMessage(
@@ -318,9 +376,13 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   @override
   Widget build(BuildContext context) {
     final conversation = _conversation;
+    final isGroup = conversation != null && conversation.type == 'group' && conversation.groupId != null;
     return Scaffold(
       appBar: AppBar(
-        title: Text(conversation?.displayTitle() ?? 'Chat'),
+        title: InkWell(
+          onTap: isGroup ? () => context.push('/groups/${conversation.groupId}/info') : null,
+          child: Text(conversation?.displayTitle() ?? 'Chat'),
+        ),
         actions: [
           if (conversation != null && conversation.type == 'direct' && conversation.otherUserId != null)
             IconButton(
@@ -330,6 +392,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                   .read(callControllerProvider.notifier)
                   .startCall(widget.conversationId, conversation.otherUserId!, conversation.displayTitle()),
             ),
+          if (isGroup)
+            IconButton(icon: const Icon(Icons.info_outline), tooltip: 'Group info', onPressed: () => context.push('/groups/${conversation.groupId}/info')),
         ],
       ),
       body: SafeArea(child: _buildBody()),
@@ -339,20 +403,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   Widget _buildBody() {
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_error != null) return Center(child: Text(_error!));
-
-    final conversation = _conversation;
-    if (conversation != null && conversation.type == 'group') {
-      return const Center(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Text(
-            'Group messaging isn\'t wired up in the app yet — the encryption is built and tested, '
-            'but the group session UI is a follow-up milestone.',
-            textAlign: TextAlign.center,
-          ),
-        ),
-      );
-    }
 
     return Column(
       children: [

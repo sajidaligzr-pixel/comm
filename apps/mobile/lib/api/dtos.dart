@@ -388,6 +388,94 @@ class MessageDto {
   );
 }
 
+// ── Groups (packages/types/src/groups.ts) ──────────────────────────────────────────
+
+class GroupMemberDto {
+  final String userId;
+  final String username;
+  final String displayName;
+  final String role; // 'member' | 'admin'
+  final String joinedAt;
+  const GroupMemberDto({required this.userId, required this.username, required this.displayName, required this.role, required this.joinedAt});
+  static GroupMemberDto fromJson(Map<String, dynamic> json) => GroupMemberDto(
+    userId: json['userId'] as String,
+    username: json['username'] as String,
+    displayName: json['displayName'] as String,
+    role: json['role'] as String,
+    joinedAt: json['joinedAt'] as String,
+  );
+}
+
+class GroupSummary {
+  final String id;
+  final String conversationId;
+  final String name;
+  final String? description;
+  final bool onlyAdminsCanMessage;
+  final String callerRole;
+  final List<GroupMemberDto> members;
+  final String createdAt;
+  const GroupSummary({
+    required this.id,
+    required this.conversationId,
+    required this.name,
+    required this.description,
+    required this.onlyAdminsCanMessage,
+    required this.callerRole,
+    required this.members,
+    required this.createdAt,
+  });
+  static GroupSummary fromJson(Map<String, dynamic> json) => GroupSummary(
+    id: json['id'] as String,
+    conversationId: json['conversationId'] as String,
+    name: json['name'] as String,
+    description: json['description'] as String?,
+    onlyAdminsCanMessage: json['onlyAdminsCanMessage'] as bool,
+    callerRole: json['callerRole'] as String,
+    members: (json['members'] as List).map((e) => GroupMemberDto.fromJson(e as Map<String, dynamic>)).toList(),
+    createdAt: json['createdAt'] as String,
+  );
+}
+
+class GroupMemberTarget {
+  final String userId;
+  final String deviceId;
+  const GroupMemberTarget({required this.userId, required this.deviceId});
+  static GroupMemberTarget fromJson(Map<String, dynamic> json) =>
+      GroupMemberTarget(userId: json['userId'] as String, deviceId: json['deviceId'] as String);
+}
+
+class GroupKeyShareDto {
+  final String id;
+  final String groupId;
+  final int epoch;
+  final String fromDeviceId;
+  final String fromUserId;
+  final MessageEnvelopeUpload envelope;
+  final X3dhInitPayload? x3dhInit;
+  final String createdAt;
+  const GroupKeyShareDto({
+    required this.id,
+    required this.groupId,
+    required this.epoch,
+    required this.fromDeviceId,
+    required this.fromUserId,
+    required this.envelope,
+    required this.x3dhInit,
+    required this.createdAt,
+  });
+  static GroupKeyShareDto fromJson(Map<String, dynamic> json) => GroupKeyShareDto(
+    id: json['id'] as String,
+    groupId: json['groupId'] as String,
+    epoch: json['epoch'] as int,
+    fromDeviceId: json['fromDeviceId'] as String,
+    fromUserId: json['fromUserId'] as String,
+    envelope: MessageEnvelopeUpload.fromJson(json['envelope'] as Map<String, dynamic>),
+    x3dhInit: json['x3dhInit'] != null ? X3dhInitPayload.fromJson(json['x3dhInit'] as Map<String, dynamic>) : null,
+    createdAt: json['createdAt'] as String,
+  );
+}
+
 // ── Media (packages/types/src/media.ts) ────────────────────────────────────────────
 
 /// Advisory client-side pre-check only — matches the server's own default
