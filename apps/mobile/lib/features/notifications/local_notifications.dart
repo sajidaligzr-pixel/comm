@@ -24,29 +24,53 @@ final FlutterLocalNotificationsPlugin _plugin =
 const _acceptActionId = 'accept';
 const _declineActionId = 'decline';
 
-const _channelId = 'comm_messages';
+// "_v2" on both ids: an Android notification channel's sound/importance/etc. are
+// locked in by the OS the first time it's created — a later change to this file
+// (like the custom `sound:` below, added after both channels already existed on
+// test devices from earlier builds) never takes effect on an install that already
+// has the old channel, no matter how the app is updated. Bumping the id is what
+// actually forces Android to create a fresh channel with the new settings; an
+// already-installed device without a fresh reinstall would otherwise silently keep
+// ringing/chiming with the old (default) sound forever. Any future change to either
+// channel's config needs the same bump.
+const _channelId = 'comm_messages_v2';
 const _channelName = 'Messages';
 const _androidChannel = AndroidNotificationChannel(
   _channelId,
   _channelName,
   description: 'New message notifications',
   importance: Importance.high,
+  sound: RawResourceAndroidNotificationSound('message'),
 );
 
 // A separate, higher-urgency channel from messages — same reasoning WhatsApp's own
 // two channels have: a call is time-sensitive in a way a text message isn't, and a
 // user muting/downgrading message notifications shouldn't silently also downgrade
-// "someone is calling you right now." No custom ringtone (Importance.max + default
-// sound is already louder/more insistent than the message channel by itself);
-// actual ringing while the call screen is open is handled elsewhere, this is only
-// the "wake up and notice" half for when it isn't.
-const _callChannelId = 'comm_calls';
+// "someone is calling you right now." `sound`/`audioAttributesUsage` here are what
+// make the tray notification itself actually ring — previously this channel had no
+// custom sound at all (just the OS's generic one-shot "ding," same as any other
+// notification), which is exactly what was reported ("ringtone only rings when the
+// app is opened, not from the notification"): the real looping ringtone
+// (call_controller.dart's `_ringtonePlayer`) only ever runs once Dart/CallController
+// is actually alive and in the incoming-call state, which a bare tray notification
+// alone never triggers. This can't loop indefinitely the way a real phone dialer
+// does — Android's notification sound API is one-shot per post, full continuous
+// ringing needs registering as a system-level calling app (ConnectionService), a
+// much larger undertaking — but it now plays the actual ringtone audio, routed to
+// the ring volume stream via `notificationRingtone` (matching a real call's audio
+// behavior), the instant the notification posts. Combined with `fullScreenIntent`
+// (below) actually launching the app over a locked/off screen, THAT case — the one
+// that matters most — gets the real, fully-looping in-app ringtone too, same as
+// tapping the notification by hand always did.
+const _callChannelId = 'comm_calls_v2';
 const _callChannelName = 'Calls';
 const _androidCallChannel = AndroidNotificationChannel(
   _callChannelId,
   _callChannelName,
   description: 'Incoming call notifications',
   importance: Importance.max,
+  sound: RawResourceAndroidNotificationSound('ringtone'),
+  audioAttributesUsage: AudioAttributesUsage.notificationRingtone,
 );
 
 /// A tapped notification's payload, decoded — `isCall` is the whole reason this
@@ -180,6 +204,11 @@ Future<void> initLocalNotifications({
   // Android 13+ (API 33) requires this to be requested at runtime, same as any
   // other dangerous permission — silently no-ops on older Android/other platforms.
   await androidImpl?.requestNotificationsPermission();
+  // Android 14+ (API 34) separately gates `fullScreenIntent` (showIncomingCallNotification
+  // below) behind this — declaring USE_FULL_SCREEN_INTENT in the manifest is no longer
+  // enough by itself. On older Android this is granted automatically at install time and
+  // this call is a no-op; no-ops on non-Android platforms too.
+  await androidImpl?.requestFullScreenIntentPermission();
 
   final iosImpl = _plugin
       .resolvePlatformSpecificImplementation<
@@ -250,6 +279,15 @@ int _callNotificationIdFor(String callId) =>
 /// above); Accept (`showsUserInterface: true`) opens the app straight into
 /// `CallController.acceptPendingCall` (main.dart's `onTap` handling), answering
 /// immediately rather than just showing the incoming-call screen for a second tap.
+///
+/// `fullScreenIntent: true` is what actually wakes a sleeping/locked phone for this
+/// one notification specifically (every other notification in this app leaves the
+/// screen alone) — combined with MainActivity's `showWhenLocked`/`turnScreenOn`
+/// manifest flags and the `USE_FULL_SCREEN_INTENT` permission (AndroidManifest.xml),
+/// Android turns the screen on and launches the app directly over the lock screen,
+/// same as a real incoming call. Without this, a call notification while the screen
+/// is off just sits there unseen until the phone is unlocked some other way — exactly
+/// the reported "phone doesn't turn on/show the call" gap.
 Future<void> showIncomingCallNotification({
   required String callId,
   required String conversationId,
@@ -261,7 +299,7 @@ Future<void> showIncomingCallNotification({
     importance: Importance.max,
     priority: Priority.max,
     category: AndroidNotificationCategory.call,
-    fullScreenIntent: false,
+    fullScreenIntent: true,
     actions: [
       AndroidNotificationAction(
         _declineActionId,
