@@ -71,6 +71,23 @@ dev_dependencies:
   # build_runner/freezed/json_serializable/drift_dev dropped — nothing in this app
   # is codegen'd (see the `dependencies` block above), so there was never a build
   # step that used them.
+  # Dev-only generator, not shipped in the app — see assets/icon/ + the
+  # flutter_launcher_icons: block below for what it generates from.
+  flutter_launcher_icons: ^0.14.3
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon/
+
+# Generates every platform's real launcher icon (Android mipmap-*/adaptive-icon,
+# iOS AppIcon.appiconset) from Comm's actual brand mark — the same
+# apps/web/public/icon-*.png assets the web app/PWA already use, not a new design.
+# Run `dart run flutter_launcher_icons` after changing anything below.
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/icon/icon-512.png
+  adaptive_icon_background: "#4F46E5"
+  adaptive_icon_foreground: assets/icon/foreground.png
+  remove_alpha_ios: true
