@@ -44,3 +44,9 @@
 -keep class * implements com.google.gson.JsonDeserializer
 -keep,allowobfuscation,allowshrinking class com.google.gson.reflect.TypeToken
 -keep,allowobfuscation,allowshrinking class * extends com.google.gson.reflect.TypeToken
+
+# - flutter_callkit_incoming (features/calls/call_kit.dart) — its own README
+#   explicitly calls out this exact rule for R8/minified builds, to avoid its
+#   json_annotation-generated CallKitParams/AndroidParams/etc. (de)serializers
+#   losing fields to obfuscation.
+-keep class com.hiennv.flutter_callkit_incoming.** { *; }

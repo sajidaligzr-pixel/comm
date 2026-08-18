@@ -164,10 +164,10 @@ class CallsApi {
   }
 
   /// REST counterpart to the in-app Decline button's WS `call.reject` send — used
-  /// specifically by the call notification's "Decline" action button
-  /// (local_notifications.dart's `_declineFromBackground`), which fires from a
-  /// background isolate with no live socket to send a WS frame over at all. Not
-  /// used by the normal in-app decline path (call_controller.dart), which still
+  /// specifically by the native incoming-call UI's "Decline" action
+  /// (features/calls/call_kit.dart's `_declineFromEvent`), which can fire with no
+  /// live socket (or even a running CallController) to send a WS frame over at all.
+  /// Not used by the normal in-app decline path (call_controller.dart), which still
   /// sends over WS as before.
   Future<void> decline(String conversationId, String callId, String reason) =>
       _client.requestVoid(

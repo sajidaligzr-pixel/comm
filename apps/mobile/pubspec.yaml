@@ -60,6 +60,15 @@ dependencies:
   # conversation that isn't the one currently open, so the user isn't only finding
   # out about a message by reopening the app.
   flutter_local_notifications: ^18.0.1
+  # A plain notification (flutter_local_notifications above) can't ring continuously
+  # while the app is fully closed and the screen is already on/unlocked — Android's
+  # notification API only ever plays a sound once per post. Genuine phone-call-style
+  # ringing needs the app registered as a system-level calling app (Telecom
+  # ConnectionService on Android, CallKit on iOS) — this plugin wraps both rather
+  # than hand-rolling the ConnectionService/PhoneAccount plumbing directly (a
+  # notoriously fragile, poorly-documented native API). Used only for the incoming-
+  # call UI/ringing itself; the message notification path is untouched.
+  flutter_callkit_incoming: ^2.5.4
 
   # --- Misc -------------------------------------------------------------------
   # Models (api/dtos.dart) are hand-written, not codegen'd (see that file's own

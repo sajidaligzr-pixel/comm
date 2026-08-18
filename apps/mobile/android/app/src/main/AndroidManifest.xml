@@ -23,21 +23,18 @@
          local_notifications.dart's initLocalNotifications; this declaration alone
          only states intent, same as RECORD_AUDIO above. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
-    <!-- Incoming-call notification (local_notifications.dart's showIncomingCallNotification,
-         fullScreenIntent: true) — lets that notification actually turn the screen on and
-         launch MainActivity over the lock screen, matching WhatsApp's own incoming-call
-         behavior, instead of just sitting silently in the tray until the phone is unlocked.
-         Android 14+ (API 34) additionally gates this at runtime — requested explicitly via
-         requestFullScreenIntentPermission() in initLocalNotifications. -->
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
     <application
         android:label="Comm"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
+        <!-- launchMode singleInstance (was singleTop) — required by flutter_callkit_incoming
+             (features/calls/call_kit.dart): its own incoming-call Activity is declared
+             singleInstance in the plugin's manifest, and the plugin's install docs call
+             out this exact change to MainActivity as required alongside it. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleInstance"
             android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
@@ -63,18 +60,18 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
-        <!-- Required for flutter_local_notifications' notification ACTION BUTTONS
-             (Accept/Decline on the incoming-call notification) to work at all — without
-             this declared, the plugin's PendingIntent.getBroadcast(..., ActionBroadcastReceiver)
-             targets an undeclared component and Android silently drops the broadcast: the
-             button visibly does nothing, no Dart callback ever runs, the notification doesn't
-             even dismiss. This is exactly the reported "nothing happens when clicking Decline"
-             bug — found by reading flutter_local_notifications' own Android source
-             (ActionBroadcastReceiver.java + its example app's manifest), not present anywhere
-             in this file until now because nothing before the Accept/Decline buttons ever used
-             a notification action. -->
-        <receiver android:exported="false"
-            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />
+        <!-- flutter_callkit_incoming (features/calls/call_kit.dart) declares its own
+             Activity/Service/ConnectionService/receiver in its own AndroidManifest.xml,
+             auto-merged into this one by Gradle — nothing to add here by hand for it.
+             No <receiver> for flutter_local_notifications' own ActionBroadcastReceiver
+             either: that was only ever needed for the call notification's Accept/
+             Decline action buttons (removed along with the rest of the call-channel
+             flutter_local_notifications code — see call_kit.dart's docstring for why),
+             and it's what surfaced the "nothing happens when clicking Decline" bug in
+             the first place when it was undeclared — a plain notification tap (the only
+             thing flutter_local_notifications still does, for messages) never goes
+             through this component at all. Re-add it if a future notification action
+             button needs it again. -->
     </application>
     <!-- Required to query activities that can process text, see:
          https://developer.android.com/training/package-visibility and

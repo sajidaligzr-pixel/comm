@@ -1,0 +1,206 @@
+/// Native "ring like an actual phone call" UI, for exactly the case local
+/// notifications (features/notifications/local_notifications.dart) can't cover: a
+/// call push arriving while the app is fully closed, or backgrounded with the
+/// screen already on and unlocked. Android's notification API only ever plays a
+/// sound once per post — there is no way to loop it indefinitely from a plain
+/// notification without the app being registered as a system-level calling app.
+/// `flutter_callkit_incoming` wraps exactly that registration (Telecom
+/// ConnectionService + a foreground service on Android, CallKit on iOS) rather than
+/// this app hand-rolling the notoriously fragile PhoneAccount/ConnectionService
+/// plumbing directly — see pubspec.yaml's own comment on why.
+///
+/// iOS is deliberately untouched here (guarded out below): CallKit needs PushKit
+/// registration (AppDelegate.swift, entitlements) this app doesn't have yet, and
+/// iOS work is explicitly paused for now (see push_notifications.dart's own
+/// iOS-scope notes) — calling into flutter_callkit_incoming there without that setup
+/// would be worse than doing nothing.
+///
+/// Scope, stated plainly, same spirit as push_notifications.dart's own: this covers
+/// the call notification/ringing UI a push (or a cold/background app) shows. The
+/// live in-app incoming-call screen (CallOverlay, driven by CallController's own
+/// state machine) is untouched — this file never runs while that's what's on
+/// screen, only when nothing else is telling the user a call is coming in.
+library;
+
+import 'dart:async' show unawaited;
+import 'dart:io' show Platform;
+
+import 'package:flutter_callkit_incoming/entities/entities.dart';
+import 'package:flutter_callkit_incoming/flutter_callkit_incoming.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../api/api_client.dart';
+import '../../api/calls_api.dart';
+import 'call_controller.dart' show callControllerProvider;
+
+/// Matches `CallController._ringTimeout` (call_controller.dart) — after this long
+/// with no answer, flutter_callkit_incoming fires `Event.actionCallTimeout` and
+/// shows its own missed-call notification on this device. No separate server call
+/// needed here: the caller's own ring timer (`startCall`'s `_ringTimer`) already
+/// gives up and sends `call.end` independently after the same 45s, so this device
+/// timing out locally doesn't need to tell anyone anything.
+const _ringTimeoutMs = 45000;
+
+/// Best-effort decline straight to the server — deliberately NOT routed through
+/// `CallController.rejectCall()`, which requires `state.call` to already be
+/// populated. The whole point of this file is covering the case where nothing has
+/// told `CallController` about this call at all yet (app was killed/backgrounded,
+/// no live WS delivery) — going through the REST path directly (same one
+/// local_notifications.dart's old background-isolate Decline handler used) works
+/// regardless of whatever CallController's local state happens to be.
+Future<void> _declineFromEvent(String conversationId, String callId) async {
+  try {
+    final client = await ApiClient.initialize();
+    await CallsApi(client).decline(conversationId, callId, 'declined');
+  } catch (_) {
+    // Same reasoning as every other best-effort notification side effect in this
+    // app: a missed decline here just means the call rings out to the caller's own
+    // no-answer timeout instead of stopping immediately, not a broken experience.
+  }
+}
+
+/// Registers the Accept/Decline event listener and requests the Android
+/// permissions `showIncomingCall` needs — call once from main.dart, alongside
+/// `initPushNotifications`/`initLocalNotifications`. No-ops entirely on iOS/other
+/// platforms (see this file's own docstring).
+Future<void> initCallKit(ProviderContainer container) async {
+  if (!Platform.isAndroid) return;
+
+  FlutterCallkitIncoming.onEvent.listen((event) {
+    if (event == null) return;
+    final body = event.body as Map<String, dynamic>;
+    final callId = body['id'] as String?;
+    final extra = body['extra'] as Map<dynamic, dynamic>?;
+    final conversationId = extra?['conversationId'] as String?;
+
+    switch (event.event) {
+      case Event.actionCallAccept:
+        // Same entry point the old notification "Accept" action button used —
+        // catches CallController up via REST if nothing has told it about this
+        // call yet, then answers immediately. Safe to call even if a live WS
+        // call.ring already got here first.
+        unawaited(
+          container.read(callControllerProvider.notifier).acceptPendingCall(),
+        );
+        break;
+      case Event.actionCallDecline:
+        if (callId == null || conversationId == null) break;
+        unawaited(_declineFromEvent(conversationId, callId));
+        // Belt-and-suspenders: if a live WS call.ring also independently put
+        // CallController into its own `incoming` state for this exact call (a
+        // race with the push/callkit path, same kind of race `_onRing`'s own
+        // busy-guard handles at the source), clear its local ring/UI too — the
+        // REST decline above already told the server regardless of this.
+        final controller = container.read(callControllerProvider.notifier);
+        if (container.read(callControllerProvider).call?.callId == callId) {
+          controller.rejectCall('declined');
+        }
+        break;
+      case Event.actionCallTimeout:
+      case Event.actionCallEnded:
+      case Event.actionCallIncoming:
+      case Event.actionCallStart:
+      case Event.actionCallConnected:
+      case Event.actionCallCallback:
+      case Event.actionCallToggleHold:
+      case Event.actionCallToggleMute:
+      case Event.actionCallToggleDmtf:
+      case Event.actionCallToggleGroup:
+      case Event.actionCallToggleAudioSession:
+      case Event.actionDidUpdateDevicePushTokenVoip:
+      case Event.actionCallCustom:
+        break;
+    }
+  });
+
+  // Android 13+/14+ runtime permissions this UI needs — same two-step shape as
+  // local_notifications.dart's own requestNotificationsPermission/
+  // requestFullScreenIntentPermission, just through this plugin's own channel
+  // (its internal permission bookkeeping is separate from
+  // flutter_local_notifications', so both plugins request independently).
+  await FlutterCallkitIncoming.requestNotificationPermission({
+    'title': 'Notification permission',
+    'rationaleMessagePermission':
+        'Notification permission is required to show incoming calls.',
+    'postNotificationMessageRequired':
+        'Notification permission is required — please allow it from Settings.',
+  });
+  final canUseFullScreen =
+      await FlutterCallkitIncoming.canUseFullScreenIntent() as bool? ?? false;
+  if (!canUseFullScreen) {
+    await FlutterCallkitIncoming.requestFullIntentPermission();
+  }
+}
+
+/// Shows the native incoming-call UI — called from push_notifications.dart's
+/// `_showFromData`, the one place a call notification is ever posted (see that
+/// file's docstring for why the live-WS path never needs this: `CallOverlay`
+/// already covers it while the app is genuinely in front). No-ops on iOS (see this
+/// file's own docstring).
+Future<void> showIncomingCall({
+  required String callId,
+  required String conversationId,
+  required String callerName,
+}) async {
+  if (!Platform.isAndroid) return;
+  await FlutterCallkitIncoming.showCallkitIncoming(
+    CallKitParams(
+      id: callId,
+      nameCaller: callerName,
+      appName: 'Comm',
+      type: 0, // audio call — this app has no video calling
+      textAccept: 'Accept',
+      textDecline: 'Decline',
+      duration: _ringTimeoutMs,
+      extra: {'conversationId': conversationId},
+      missedCallNotification: const NotificationParams(
+        showNotification: true,
+        // No "Call back" action wired up here — this file only has the caller's
+        // display name and this conversation's id on hand, not enough to place a
+        // fresh outgoing call from a cold background isolate the way
+        // CallController.startCall needs (otherUserId, a live mic prompt, etc.).
+        // Tapping the notification body still opens the app normally.
+        isShowCallback: false,
+        subtitle: 'Missed call',
+      ),
+      android: const AndroidParams(
+        isCustomNotification: true,
+        ringtonePath: 'ringtone', // android/app/src/main/res/raw/ringtone.wav —
+        // the same file local_notifications.dart's own (non-looping) call channel
+        // sound already uses, kept as one shared asset rather than two.
+        backgroundColor:
+            '#075E54', // matches WhatsAppColors.appBar (app/app.dart)
+        actionColor: '#25D366', // matches WhatsAppColors.green (app/app.dart)
+        incomingCallNotificationChannelName: 'Incoming call',
+        missedCallNotificationChannelName: 'Missed call',
+        isShowFullLockedScreen: true,
+      ),
+    ),
+  );
+}
+
+/// Called once a call is resolved through any path (answered, declined, ended,
+/// timed out) — same "one choke point clears it regardless of how the call ended"
+/// reasoning `CallController._teardown`'s own docstring already states for the
+/// local ringtone/tray notification it also clears. No-ops on iOS.
+Future<void> endCallKit(String callId) async {
+  if (!Platform.isAndroid) return;
+  try {
+    await FlutterCallkitIncoming.endCall(callId);
+  } catch (_) {
+    // Best-effort, same as clearCallNotification's own reasoning — a failure here
+    // just means a stale ring/notification lingers until its own timeout, not a
+    // broken call.
+  }
+}
+
+/// Purely cosmetic: updates the native call UI/history entry to reflect that
+/// WebRTC actually connected, per flutter_callkit_incoming's own README ("call this
+/// when WebRTC/P2P is established"). Safe to skip on failure — nothing in this
+/// app's own call state depends on it. No-ops on iOS.
+Future<void> setCallKitConnected(String callId) async {
+  if (!Platform.isAndroid) return;
+  try {
+    await FlutterCallkitIncoming.setCallConnected(callId);
+  } catch (_) {}
+}

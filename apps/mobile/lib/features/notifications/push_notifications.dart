@@ -6,18 +6,15 @@
 /// payload: Android auto-displays (and never wakes this app's own code for) a
 /// `notification` message while backgrounded, which would work fine for a plain
 /// message banner but can't run the code an incoming call needs. Both cases funnel
-/// through the exact same `showNewMessageNotification`/`showIncomingCallNotification`
-/// (local_notifications.dart) a live WS event uses, so a notification looks
-/// identical regardless of which path produced it.
+/// through `showNewMessageNotification` (local_notifications.dart, messages) or
+/// `showIncomingCall` (features/calls/call_kit.dart, calls) — the same rendering
+/// each of those uses for a live WS-driven notification too (message_notifier.dart),
+/// so a notification looks identical regardless of which path produced it.
 ///
-/// Scope, stated plainly: this makes the phone actually notify/ring while closed —
-/// it does not build a full-screen, over-the-lock-screen calling UI the way a phone
-/// app's native dialer gets to (that needs a bespoke Android `ConnectionService` +
-/// full-screen-intent Activity, a much larger, separate undertaking). Tapping the
-/// call notification opens this app; from there, `CallController.checkPendingCall`
-/// (run on every WS reconnect) surfaces the real in-app ringing screen if the call
-/// is still within its window — a real, working answer within that window, just not
-/// a lock-screen takeover.
+/// Calls specifically: `showIncomingCall` is a genuine phone-call-style ring (Telecom
+/// ConnectionService on Android via flutter_callkit_incoming — see that file's own
+/// docstring), not just a tray notification — it wakes a locked/off screen and rings
+/// continuously until answered/declined/timed out, matching a real incoming call.
 ///
 /// Split into two entry points, called from two different moments (main.dart /
 /// chats_list_screen.dart) rather than one: the pieces below need Firebase itself,
@@ -39,6 +36,7 @@ import '../../api/messages_api.dart';
 import '../../api/push_api.dart';
 import '../../app/providers.dart' show realtimeClientProvider;
 import '../calls/call_controller.dart' show callControllerProvider;
+import '../calls/call_kit.dart' show showIncomingCall;
 import '../calls/call_state.dart' show CallPhase;
 import 'local_notifications.dart';
 
@@ -62,7 +60,7 @@ Future<void> _showFromData(Map<String, dynamic> data) async {
     final callId = data['callId'] as String?;
     final conversationId = data['conversationId'] as String?;
     if (callId == null || conversationId == null) return;
-    await showIncomingCallNotification(
+    await showIncomingCall(
       callId: callId,
       conversationId: conversationId,
       callerName: data['fromDisplayName'] as String? ?? 'Someone',

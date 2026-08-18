@@ -23,7 +23,7 @@ import 'package:uuid/uuid.dart';
 import '../../api/calls_api.dart';
 import '../../app/providers.dart';
 import '../../realtime/ws_client.dart';
-import '../notifications/local_notifications.dart' show clearCallNotification;
+import 'call_kit.dart' show endCallKit, setCallKitConnected;
 import 'call_state.dart';
 
 const _uuid = Uuid();
@@ -167,6 +167,8 @@ class CallController extends StateNotifier<CallUiState> {
         _ringTimer?.cancel();
         _ringTimer = null;
         state = state.copyWith(phase: CallPhase.connected, statusText: '');
+        final callId = state.call?.callId;
+        if (callId != null) unawaited(setCallKitConnected(callId));
         _durationTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
           state = state.copyWith(durationSec: state.durationSec + 1);
         });
@@ -183,12 +185,12 @@ class CallController extends StateNotifier<CallUiState> {
 
   void _teardown(String finalStatus) {
     // The one call-resolution choke point (ring timeout, rejected, ended, ICE
-    // failure, hangUp/rejectCall) — clearing the "Incoming call" tray notification
-    // here, rather than at each of those call sites individually, covers every one
-    // of them at once, including paths a push-woken notification's own tap never
-    // touches (e.g. the caller cancelling before this device even opens the app).
+    // failure, hangUp/rejectCall) — clearing the native incoming-call UI/ring here,
+    // rather than at each of those call sites individually, covers every one of them
+    // at once, including paths a push-woken call's own UI never touches (e.g. the
+    // caller cancelling before this device even opens the app).
     final callId = state.call?.callId;
-    if (callId != null) unawaited(clearCallNotification(callId));
+    if (callId != null) unawaited(endCallKit(callId));
     unawaited(_stopRinging());
 
     _ringTimer?.cancel();

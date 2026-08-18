@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'api/api_client.dart';
 import 'app/app.dart';
 import 'app/router.dart';
-import 'features/calls/call_controller.dart' show callControllerProvider;
+import 'features/calls/call_kit.dart' show initCallKit;
 import 'features/notifications/local_notifications.dart';
 import 'features/notifications/push_notifications.dart';
 
@@ -30,28 +30,13 @@ Future<void> main() async {
   // long before this resolves, same reasoning as everything else in this app that
   // fails closed rather than blocking on a capability check (biometric_unlock.dart,
   // admin nav gating).
+  //
+  // Only message taps arrive here now — calls have their own native UI/event stream
+  // (features/calls/call_kit.dart's initCallKit, below), not a flutter_local_
+  // notifications tap at all.
   initLocalNotifications(
     onTap: (tap) {
-      if (tap.isCall) {
-        // Deliberately NOT a navigation — CallOverlay is mounted app-wide
-        // (app/app.dart) and shows itself full-screen the instant the call state
-        // changes, on top of whatever screen ends up underneath (`/unlock`,
-        // `/chats`, wherever auth naturally lands). Navigating to the
-        // conversation's thread here — the old behavior — is exactly what left
-        // the user staring at a chat with no incoming-call screen anywhere: this
-        // check is the only thing that actually starts the ringing state.
-        final controller = container.read(callControllerProvider.notifier);
-        if (tap.actionId == 'accept') {
-          // The notification's "Accept" button — answers immediately rather than
-          // just surfacing the incoming-call screen for a second tap. 'decline'
-          // never reaches here at all (see NotificationTap's own docstring).
-          controller.acceptPendingCall();
-        } else {
-          controller.checkPendingCall();
-        }
-      } else {
-        container.read(routerProvider).push('/chats/${tap.conversationId}');
-      }
+      container.read(routerProvider).push('/chats/${tap.conversationId}');
     },
   );
   // Same "deliberately not awaited" reasoning as initLocalNotifications above —
@@ -59,4 +44,8 @@ Future<void> main() async {
   // frame either. Token registration itself needs a signed-in device and happens
   // separately (chats_list_screen.dart's initState, once auth is actually known).
   initPushNotifications(container);
+  // Accept/Decline on the native incoming-call UI (features/calls/call_kit.dart) —
+  // independent of the two calls above, its own event stream rather than a
+  // notification tap.
+  initCallKit(container);
 }
