@@ -98,7 +98,36 @@ installable binary:
 - 1:1 voice calling over `flutter_webrtc`, same WS signaling protocol as the web
   client (interoperates with it unchanged) — native audio routing means the
   browser's speaker-by-default bug doesn't exist here. Full-screen call UI with
-  mute/speaker/end-call, matching WhatsApp's own call-screen layout.
+  mute/speaker/end-call, matching WhatsApp's own call-screen layout. A looping
+  ringtone plays for an incoming call (`assets/sounds/ringtone.wav`, via
+  `audioplayers`), and a short chime plays for a live message arriving in the
+  thread that's already open (`assets/sounds/message.wav`) — the one case that
+  otherwise stayed silent, since a conversation's own system notification is
+  deliberately suppressed while its thread is on screen.
+- A "Calls" tab (chats_list_screen.dart's AppBar → Calls) — every 1:1 call, newest
+  first, direction/outcome per row (missed calls shown in red, matching WhatsApp),
+  tap to call again. Backed by real server-side call history persistence
+  (`calls` rows, `GET /api/calls/history`) that didn't exist anywhere in this
+  project before this pass — apps/web has no equivalent screen yet, only the API.
+- Push notifications via FCM (Android) — real delivery while this app is fully
+  closed, not just backgrounded, for both new messages and incoming calls. A call
+  push is backed by a durable `GET /api/calls/pending` catch-up (Redis, TTL-matched
+  to the 45s ring timeout) since a live `call.ring` WS event has no redelivery of
+  its own — tapping the notification opens the app, which then surfaces the real
+  in-app ringing screen if the call is still within its window. Deliberately not a
+  full-screen, over-the-lock-screen native dialer UI — see "Not built yet" below for
+  that scope line. iOS/APNs not wired (no Apple credentials/build in this project
+  yet) — Android only for now.
+- WS reconnect/resync fixes for three related reported bugs: the chat list, an open
+  thread, and delivery/read ticks could all go stale after the app was backgrounded
+  (the socket can die silently without ever telling this process — see
+  `lib/realtime/ws_client.dart`'s `reconnect` docstring), and read/delivered ticks
+  were never re-seeded from a fresh history fetch for messages already cached
+  locally. Fixed with a lifecycle-triggered forced reconnect
+  (`WidgetsBindingObserver` in app/app.dart), a `'connection.open'` resync hook on
+  the chats list and open thread, a `RouteObserver`-based refresh when returning to
+  the chat list from a thread, and re-seeding tick state from every REST fetch, not
+  only newly-decrypted messages.
 - Device management: list linked devices, revoke any of them, plus a one-tap
   "Sign out N other devices" cleanup action — useful because a reinstall (or any
   case where this app's remembered device id gets lost while the old device row
@@ -188,10 +217,16 @@ a file attachment, and placing a voice call.
 
 ## Not built yet
 
-Push notifications (needs the FCM/APNs backend addition above), group voice/video
-calling (calling remains 1:1 only, matching the web client), read-receipt "seen by"
-UI for groups (per-recipient rows are recorded server-side, just not surfaced in
-this client yet).
+iOS push (Android/FCM only for now — no `GoogleService-Info.plist`/APNs credential
+exists, and every build this project has actually shipped has been an Android APK;
+see "Push notifications" below for what Android does have), a full-screen,
+over-the-lock-screen native calling UI (a real Android `ConnectionService` +
+full-screen-intent Activity is a separate, much larger undertaking than a system
+notification — see push_notifications.dart's own docstring on the exact scope this
+pass settled for instead), group voice/video calling (calling remains 1:1 only,
+matching the web client), read-receipt "seen by" UI for groups (per-recipient rows
+are recorded server-side, just not surfaced in this client yet), and a call-history
+UI on apps/web itself (only apps/mobile has a "Calls" tab so far).
 
 ## Running
 

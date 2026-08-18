@@ -6,6 +6,7 @@ import '../../api/api_client.dart';
 import '../../api/dtos.dart';
 import '../../app/app.dart' show WhatsAppColors;
 import '../../app/providers.dart';
+import '../../app/router.dart' show chatsRouteObserver;
 import '../../crypto/message_cache.dart'
     show
         clearCachedMessages,
@@ -14,6 +15,7 @@ import '../../crypto/message_cache.dart'
         unmarkConversationLocallyDeleted;
 import '../../shared/widgets/error_state.dart';
 import '../notifications/conversation_titles.dart';
+import '../notifications/push_notifications.dart' show registerPushToken;
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 import '../auth/biometric_enroll_prompt.dart';
@@ -25,7 +27,8 @@ class ChatsListScreen extends ConsumerStatefulWidget {
   ConsumerState<ChatsListScreen> createState() => _ChatsListScreenState();
 }
 
-class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
+class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
+    with RouteAware {
   List<ConversationSummary>? _conversations;
   Set<String> _locallyDeleted = {};
   String? _error;
@@ -38,6 +41,12 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
     final realtime = ref.read(realtimeClientProvider);
     realtime.connect();
     realtime.on('new', _onRealtimeMessage);
+    // Covers the case a plain 'new' listener can't: the socket looked fine to
+    // this screen the whole time (nothing ever fired 'connection.close'), but
+    // was actually dead in the background — see ws_client.dart's `reconnect`
+    // docstring. A fresh 'connection.open' means "we might have missed
+    // something," so resync exactly like a manual pull-to-refresh would.
+    realtime.on('connection.open', _onRealtimeReconnect);
 
     final authState = ref.read(authControllerProvider);
     if (authState is AuthSignedIn) {
@@ -45,9 +54,30 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
           .read(groupSessionControllerProvider)
           .setCurrentUserId(authState.profile.id);
       ref.read(messageNotifierProvider).setCurrentUserId(authState.profile.id);
+      // Needs an authenticated device (POST /api/push/subscribe) — see
+      // push_notifications.dart's own docstring on why this is split from the
+      // Firebase-core setup main.dart already did unconditionally.
+      registerPushToken(ref.read(pushApiProvider));
     }
     _checkAdmin();
   }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute<void>) chatsRouteObserver.subscribe(this, route);
+  }
+
+  /// Fires when a route pushed on top of this one (a thread, most commonly) is
+  /// popped and this screen is visible again — e.g. the thread just opened may
+  /// have marked messages read or the conversation may have changed in some
+  /// other way, and without this the row sitting there is whatever this screen
+  /// last fetched, not necessarily still true. Reported directly: an opened
+  /// thread's unread badge/preview not updating back on this list until some
+  /// unrelated refresh happened to run.
+  @override
+  void didPopNext() => _load();
 
   /// Success alone implies admin — see admin_api.dart's docstring on why this is
   /// safe to use as a UI-only convenience: the real gate is server-side
@@ -66,8 +96,14 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
   @override
   void dispose() {
     ref.read(realtimeClientProvider).off('new', _onRealtimeMessage);
+    ref
+        .read(realtimeClientProvider)
+        .off('connection.open', _onRealtimeReconnect);
+    chatsRouteObserver.unsubscribe(this);
     super.dispose();
   }
+
+  void _onRealtimeReconnect(Map<String, dynamic> _) => _load();
 
   /// A live message landing for a conversation this device had locally "deleted"
   /// is exactly the promise made in that confirmation dialog — un-hide it before
@@ -265,6 +301,11 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
               tooltip: 'Admin',
               onPressed: () => context.push('/admin'),
             ),
+          IconButton(
+            icon: const Icon(Icons.call_outlined),
+            tooltip: 'Calls',
+            onPressed: () => context.push('/calls'),
+          ),
           IconButton(
             icon: const Icon(Icons.devices_other),
             tooltip: 'Devices',

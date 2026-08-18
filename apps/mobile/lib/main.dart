@@ -5,6 +5,7 @@ import 'api/api_client.dart';
 import 'app/app.dart';
 import 'app/router.dart';
 import 'features/notifications/local_notifications.dart';
+import 'features/notifications/push_notifications.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,7 +20,9 @@ Future<void> main() async {
   // navigate to the tapped conversation. Standard Riverpod pattern for "a
   // non-widget callback needs provider access."
   final container = ProviderContainer();
-  runApp(UncontrolledProviderScope(container: container, child: const CommApp()));
+  runApp(
+    UncontrolledProviderScope(container: container, child: const CommApp()),
+  );
 
   // Deliberately not awaited: this includes the system notification-permission
   // prompt, which shouldn't hold up the very first frame — the app is fully usable
@@ -27,6 +30,12 @@ Future<void> main() async {
   // fails closed rather than blocking on a capability check (biometric_unlock.dart,
   // admin nav gating).
   initLocalNotifications(
-    onTapConversationId: (conversationId) => container.read(routerProvider).push('/chats/$conversationId'),
+    onTapConversationId: (conversationId) =>
+        container.read(routerProvider).push('/chats/$conversationId'),
   );
+  // Same "deliberately not awaited" reasoning as initLocalNotifications above —
+  // Firebase init + registering the background handler shouldn't hold up the first
+  // frame either. Token registration itself needs a signed-in device and happens
+  // separately (chats_list_screen.dart's initState, once auth is actually known).
+  initPushNotifications(container);
 }

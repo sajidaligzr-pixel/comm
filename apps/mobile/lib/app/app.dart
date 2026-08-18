@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../features/calls/call_overlay.dart';
+import 'providers.dart' show realtimeClientProvider;
 import 'router.dart';
 
 /// WhatsApp's own palette — asked for directly ("keep the UI same as whatsapp,
@@ -26,11 +27,45 @@ class WhatsAppColors {
   static const listBackground = Color(0xFFFFFFFF);
 }
 
-class CommApp extends ConsumerWidget {
+class CommApp extends ConsumerStatefulWidget {
   const CommApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<CommApp> createState() => _CommAppState();
+}
+
+class _CommAppState extends ConsumerState<CommApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// The other half of ws_client.dart's `reconnect` docstring: a backgrounded
+  /// phone can silently kill this app's WebSocket without ever telling this
+  /// process (no `onDone`/`onError`, nothing to trigger the client's own
+  /// reconnect-with-backoff), so coming back to the foreground is the one
+  /// reliable moment to force a fresh connection rather than trust whatever
+  /// `_channel` currently thinks it's holding. Every open screen listening for
+  /// 'connection.open' (chats_list_screen.dart, thread_screen.dart) then resyncs
+  /// itself from this, the same as a manual pull-to-refresh would — this is what
+  /// actually fixes "messages/read receipts only show up after I reopen the
+  /// app," not just future live events.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.read(realtimeClientProvider).reconnect();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final router = ref.watch(routerProvider);
 
     final colorScheme =

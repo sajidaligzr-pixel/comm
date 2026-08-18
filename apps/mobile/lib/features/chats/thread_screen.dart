@@ -132,6 +132,21 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   int _recordingSeconds = 0;
   Timer? _recordingTimer;
 
+  // A dedicated player for the short "message received" chime (_playMessageChime,
+  // called from _ingestIncoming) — separate from any given _VoiceMessagePlayer
+  // bubble's own instance, since those come and go with the widgets that own them
+  // and this needs to outlive any single bubble.
+  final AudioPlayer _chimePlayer = AudioPlayer();
+
+  Future<void> _playMessageChime() async {
+    try {
+      await _chimePlayer.play(AssetSource('sounds/message.wav'));
+    } catch (_) {
+      // Best-effort, same as every other local-notification-adjacent side effect —
+      // never worth surfacing to the user or blocking message ingestion over.
+    }
+  }
+
   // --- Typing indicator (direct conversations only — matches web's own scope,
   // see group-message-thread.tsx's own docstring: "no reply-to, no typing
   // indicator, no read-receipt ticks" for groups) ------------------------------
@@ -160,6 +175,14 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     realtime.on('read', _onRealtimeRead);
     realtime.on('deleted', _onRealtimeDeletedMessage);
     realtime.on('typing', _onRealtimeTyping);
+    // A fresh connection (first connect, or a reconnect after the socket was
+    // silently dead — see ws_client.dart's `reconnect` docstring) means this
+    // screen may have missed live events entirely while it looked "connected."
+    // `_load()` re-fetches history, re-marks-read, and — per the fix below —
+    // re-seeds every own-message's delivered/read tick from the fresh REST
+    // response, so this is what actually resyncs stale ticks after the app was
+    // backgrounded, not just new messages.
+    realtime.on('connection.open', _onRealtimeReconnect);
 
     // Tells messageNotifierProvider not to pop a redundant system notification for
     // whatever's already visible on screen right now, and clears any notification
@@ -179,6 +202,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     realtime.off('read', _onRealtimeRead);
     realtime.off('deleted', _onRealtimeDeletedMessage);
     realtime.off('typing', _onRealtimeTyping);
+    realtime.off('connection.open', _onRealtimeReconnect);
     if (ref.read(currentOpenConversationIdProvider) == widget.conversationId) {
       ref.read(currentOpenConversationIdProvider.notifier).state = null;
     }
@@ -186,10 +210,13 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     _scrollController.dispose();
     _recordingTimer?.cancel();
     _voiceRecorder.dispose();
+    _chimePlayer.dispose();
     _typingStopTimer?.cancel();
     _disappearingPruneTimer?.cancel();
     super.dispose();
   }
+
+  void _onRealtimeReconnect(Map<String, dynamic> _) => _load();
 
   void _onRealtimeNew(Map<String, dynamic> payload) {
     final raw = payload['message'];
@@ -310,7 +337,29 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       // appendCachedMessages's docstring for why the per-message version of this
       // was quietly O(n²) for a conversation with real history.
       final newlyIngested = <CachedMessage>[];
+      // Delivered/read status is per-message state that changes on the SERVER
+      // after this device already has the message cached (the other side
+      // receiving/reading it doesn't touch this device's ciphertext at all) — so
+      // it has to be refreshed from this fresh REST fetch every time, not just
+      // for messages new enough to need decrypting. Found live as the reported
+      // "ticks aren't turning blue" bug: `_ingestIncoming` (below) is the only
+      // place that seeds `_status` from `dto.deliveredAt`/`readAt`, but the
+      // `continue` above skipped it entirely for anything already cached — which
+      // is most of a real conversation's own sent messages after the first load,
+      // so their ticks only ever updated via a live WS event arriving while this
+      // screen happened to already be open and connected.
+      var statusChanged = false;
       for (final dto in page.items) {
+        if (dto.senderUserId == _myUserId) {
+          final next = (
+            delivered: dto.deliveredAt != null,
+            read: dto.readAt != null,
+          );
+          if (_status[dto.id] != next) {
+            _status[dto.id] = next;
+            statusChanged = true;
+          }
+        }
         if (cachedIds.contains(dto.id)) continue;
         final result = await _ingestIncoming(
           dto,
@@ -319,6 +368,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         );
         if (result != null) newlyIngested.add(result);
       }
+      if (statusChanged && mounted) setState(() {});
       if (newlyIngested.isNotEmpty) {
         await appendCachedMessages(kek, widget.conversationId, newlyIngested);
       }
@@ -564,6 +614,12 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
             .read(conversationsApiProvider)
             .markRead(widget.conversationId, dto.id)
             .catchError((_) {});
+        // A short local chime for "a message just landed in the chat you're
+        // already looking at" — the one case that otherwise stays completely
+        // silent: message_notifier.dart deliberately skips the system notification
+        // (and its sound) for whichever conversation is currently open, so without
+        // this, a live reply while this screen is on screen made no sound at all.
+        unawaited(_playMessageChime());
       }
     }
     return cached;

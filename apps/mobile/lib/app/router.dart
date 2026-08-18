@@ -7,6 +7,7 @@
 /// server-rendered middle step here.
 library;
 
+import 'package:flutter/widgets.dart' show PageRoute, RouteObserver;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
@@ -16,6 +17,7 @@ import '../features/auth/login_screen.dart';
 import '../features/auth/unlock_screen.dart';
 import '../features/auth/invite_redeem_screen.dart';
 import '../features/auth/change_password_screen.dart';
+import '../features/calls/call_history_screen.dart';
 import '../features/chats/archived_chats_screen.dart';
 import '../features/chats/chats_list_screen.dart';
 import '../features/chats/thread_screen.dart';
@@ -59,6 +61,14 @@ String? computeAuthRedirect(AuthState auth, String path) {
   }
 }
 
+/// Lets a screen notice it became visible again after another route was popped
+/// off on top of it — chats_list_screen.dart subscribes (`RouteAware`) so
+/// returning from an open thread (which may have just marked messages read,
+/// changed archive state, etc.) refreshes the list instead of showing whatever
+/// was on screen before that thread was opened. A single app-wide instance,
+/// same as any `RouteObserver` — there's only ever one Navigator here to watch.
+final chatsRouteObserver = RouteObserver<PageRoute<void>>();
+
 final routerProvider = Provider<GoRouter>((ref) {
   final auth = ref.watch(authControllerProvider);
 
@@ -66,6 +76,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     initialLocation: '/splash',
     redirect: (context, state) =>
         computeAuthRedirect(auth, state.matchedLocation),
+    observers: [chatsRouteObserver],
     routes: [
       GoRoute(
         path: '/splash',
@@ -101,6 +112,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/devices',
         builder: (context, state) => const DevicesScreen(),
+      ),
+      GoRoute(
+        path: '/calls',
+        builder: (context, state) => const CallHistoryScreen(),
       ),
       GoRoute(path: '/admin', builder: (context, state) => const AdminScreen()),
       GoRoute(

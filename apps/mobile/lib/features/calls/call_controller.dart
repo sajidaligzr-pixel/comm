@@ -14,6 +14,7 @@
 library;
 
 import 'dart:async';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -22,6 +23,7 @@ import 'package:uuid/uuid.dart';
 import '../../api/calls_api.dart';
 import '../../app/providers.dart';
 import '../../realtime/ws_client.dart';
+import '../notifications/local_notifications.dart' show clearCallNotification;
 import 'call_state.dart';
 
 const _uuid = Uuid();
@@ -48,9 +50,15 @@ String _boostOpusAudio(String sdp) {
   final fmtpLineRegex = RegExp('a=fmtp:$payloadType .*');
   const extraParams = 'maxaveragebitrate=32000;useinbandfec=1';
   if (fmtpLineRegex.hasMatch(sdp)) {
-    return sdp.replaceFirstMapped(fmtpLineRegex, (m) => '${m.group(0)};$extraParams');
+    return sdp.replaceFirstMapped(
+      fmtpLineRegex,
+      (m) => '${m.group(0)};$extraParams',
+    );
   }
-  return sdp.replaceFirst(rtpmapMatch.group(0)!, '${rtpmapMatch.group(0)}\r\na=fmtp:$payloadType $extraParams');
+  return sdp.replaceFirst(
+    rtpmapMatch.group(0)!,
+    '${rtpmapMatch.group(0)}\r\na=fmtp:$payloadType $extraParams',
+  );
 }
 
 class CallController extends StateNotifier<CallUiState> {
@@ -60,6 +68,14 @@ class CallController extends StateNotifier<CallUiState> {
     _realtime.on('call.ice-candidate', _onRemoteIceCandidate);
     _realtime.on('call.rejected', _onRejected);
     _realtime.on('call.ended', _onEnded);
+    // Every fresh connection (first connect at app start, or a forced reconnect on
+    // resume — ws_client.dart's `reconnect`) is a chance this device missed a
+    // call.ring while it wasn't actually listening; see `checkPendingCall`'s own
+    // docstring for the full reasoning. Kept inside this controller rather than
+    // wired from app/app.dart or chats_list_screen.dart — this is the one place
+    // that already owns both "is a call currently active" and "how to start
+    // ringing," so nothing external needs to know this check exists at all.
+    _realtime.on('connection.open', _onReconnect);
   }
 
   final CallsApi _callsApi;
@@ -74,6 +90,34 @@ class CallController extends StateNotifier<CallUiState> {
   Timer? _durationTimer;
   Timer? _resetTimer;
 
+  // A separate player from the one thread_screen.dart uses for voice-note
+  // playback (each `AudioPlayer` instance is its own independent player) — this
+  // one only ever plays the two short local assets below, on loop for the
+  // ringtone. Volume follows this app's normal media stream, not the phone's
+  // dedicated "Ring" volume slider the way a native dialer's ringtone would — a
+  // real, disclosed limitation of doing this at the Flutter/`audioplayers` level
+  // rather than through a native `RingtoneManager`-style API; still audible for
+  // the common case (ringer not muted), just not silenced by the same control a
+  // real phone call would be.
+  final AudioPlayer _ringtonePlayer = AudioPlayer();
+
+  Future<void> _startRinging() async {
+    try {
+      await _ringtonePlayer.setReleaseMode(ReleaseMode.loop);
+      await _ringtonePlayer.play(AssetSource('sounds/ringtone.wav'));
+    } catch (_) {
+      // Missing/locked audio output shouldn't block showing the incoming-call
+      // screen itself — same fail-open-on-the-UI, fail-silent-on-the-extra
+      // reasoning as every other best-effort side effect in this file.
+    }
+  }
+
+  Future<void> _stopRinging() async {
+    try {
+      await _ringtonePlayer.stop();
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
     _realtime.off('call.ring', _onRing);
@@ -81,7 +125,9 @@ class CallController extends StateNotifier<CallUiState> {
     _realtime.off('call.ice-candidate', _onRemoteIceCandidate);
     _realtime.off('call.rejected', _onRejected);
     _realtime.off('call.ended', _onEnded);
+    _realtime.off('connection.open', _onReconnect);
     _teardown('');
+    _ringtonePlayer.dispose();
     super.dispose();
   }
 
@@ -90,7 +136,9 @@ class CallController extends StateNotifier<CallUiState> {
     return status.isGranted;
   }
 
-  Future<RTCPeerConnection> _createPeerConnection(List<IceServer> iceServers) async {
+  Future<RTCPeerConnection> _createPeerConnection(
+    List<IceServer> iceServers,
+  ) async {
     final pc = await createPeerConnection({
       'iceServers': iceServers.map((s) => s.toJson()).toList(),
     });
@@ -102,21 +150,28 @@ class CallController extends StateNotifier<CallUiState> {
         'type': 'call.ice-candidate',
         'conversationId': call.conversationId,
         'callId': call.callId,
-        'candidate': {'candidate': candidate.candidate, 'sdpMid': candidate.sdpMid, 'sdpMLineIndex': candidate.sdpMLineIndex},
+        'candidate': {
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        },
       });
     };
 
     pc.onConnectionState = (connectionState) {
       if (pc != _pc) return; // stale event from an already-torn-down connection
-      if (connectionState == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+      if (connectionState ==
+          RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         _ringTimer?.cancel();
         _ringTimer = null;
         state = state.copyWith(phase: CallPhase.connected, statusText: '');
         _durationTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
           state = state.copyWith(durationSec: state.durationSec + 1);
         });
-      } else if (connectionState == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-          connectionState == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+      } else if (connectionState ==
+              RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
+          connectionState ==
+              RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
         _teardown('Call ended');
       }
     };
@@ -125,6 +180,15 @@ class CallController extends StateNotifier<CallUiState> {
   }
 
   void _teardown(String finalStatus) {
+    // The one call-resolution choke point (ring timeout, rejected, ended, ICE
+    // failure, hangUp/rejectCall) — clearing the "Incoming call" tray notification
+    // here, rather than at each of those call sites individually, covers every one
+    // of them at once, including paths a push-woken notification's own tap never
+    // touches (e.g. the caller cancelling before this device even opens the app).
+    final callId = state.call?.callId;
+    if (callId != null) unawaited(clearCallNotification(callId));
+    unawaited(_stopRinging());
+
     _ringTimer?.cancel();
     _ringTimer = null;
     _durationTimer?.cancel();
@@ -139,7 +203,13 @@ class CallController extends StateNotifier<CallUiState> {
     _pendingOffer = null;
 
     if (!mounted) return;
-    state = state.copyWith(phase: CallPhase.ended, statusText: finalStatus, durationSec: 0, muted: false, speakerOn: false);
+    state = state.copyWith(
+      phase: CallPhase.ended,
+      statusText: finalStatus,
+      durationSec: 0,
+      muted: false,
+      speakerOn: false,
+    );
     unawaited(Helper.setSpeakerphoneOn(false));
 
     _resetTimer?.cancel();
@@ -150,10 +220,16 @@ class CallController extends StateNotifier<CallUiState> {
     });
   }
 
-  Future<void> startCall(String conversationId, String otherUserId, String otherDisplayName) async {
+  Future<void> startCall(
+    String conversationId,
+    String otherUserId,
+    String otherDisplayName,
+  ) async {
     if (state.phase != CallPhase.idle) return;
     if (!await _ensureMicPermission()) {
-      state = state.copyWith(micError: 'Microphone access is needed to make a call.');
+      state = state.copyWith(
+        micError: 'Microphone access is needed to make a call.',
+      );
       return;
     }
 
@@ -161,14 +237,27 @@ class CallController extends StateNotifier<CallUiState> {
     try {
       stream = await navigator.mediaDevices.getUserMedia(_audioConstraints);
     } catch (_) {
-      state = state.copyWith(micError: 'Microphone access is needed to make a call.');
+      state = state.copyWith(
+        micError: 'Microphone access is needed to make a call.',
+      );
       return;
     }
     _localStream = stream;
 
     final callId = _uuid.v4();
-    final call = ActiveCall(callId: callId, conversationId: conversationId, otherUserId: otherUserId, otherDisplayName: otherDisplayName, isOutgoing: true);
-    state = state.copyWith(phase: CallPhase.outgoing, call: call, statusText: 'Calling…', clearMicError: true);
+    final call = ActiveCall(
+      callId: callId,
+      conversationId: conversationId,
+      otherUserId: otherUserId,
+      otherDisplayName: otherDisplayName,
+      isOutgoing: true,
+    );
+    state = state.copyWith(
+      phase: CallPhase.outgoing,
+      call: call,
+      statusText: 'Calling…',
+      clearMicError: true,
+    );
 
     final iceServers = await _callsApi.turnCredentials();
     final pc = await _createPeerConnection(iceServers);
@@ -189,7 +278,11 @@ class CallController extends StateNotifier<CallUiState> {
     });
 
     _ringTimer = Timer(_ringTimeout, () {
-      _realtime.send({'type': 'call.end', 'conversationId': conversationId, 'callId': callId});
+      _realtime.send({
+        'type': 'call.end',
+        'conversationId': conversationId,
+        'callId': callId,
+      });
       _teardown('No answer');
     });
   }
@@ -197,11 +290,24 @@ class CallController extends StateNotifier<CallUiState> {
   Future<void> acceptCall() async {
     final call = state.call;
     final offer = _pendingOffer;
-    if (call == null || state.phase != CallPhase.incoming || offer == null) return;
+    if (call == null || state.phase != CallPhase.incoming || offer == null) {
+      return;
+    }
+    // Stops the moment the user taps Accept, not once the (async, multi-step)
+    // connection setup below finishes — a ring continuing through "Connecting…"
+    // would read as a second call coming in.
+    unawaited(_stopRinging());
 
     if (!await _ensureMicPermission()) {
-      state = state.copyWith(micError: 'Microphone access is needed to answer.');
-      _realtime.send({'type': 'call.reject', 'conversationId': call.conversationId, 'callId': call.callId, 'reason': 'declined'});
+      state = state.copyWith(
+        micError: 'Microphone access is needed to answer.',
+      );
+      _realtime.send({
+        'type': 'call.reject',
+        'conversationId': call.conversationId,
+        'callId': call.callId,
+        'reason': 'declined',
+      });
       _teardown('Call declined');
       return;
     }
@@ -210,8 +316,15 @@ class CallController extends StateNotifier<CallUiState> {
     try {
       stream = await navigator.mediaDevices.getUserMedia(_audioConstraints);
     } catch (_) {
-      state = state.copyWith(micError: 'Microphone access is needed to answer.');
-      _realtime.send({'type': 'call.reject', 'conversationId': call.conversationId, 'callId': call.callId, 'reason': 'declined'});
+      state = state.copyWith(
+        micError: 'Microphone access is needed to answer.',
+      );
+      _realtime.send({
+        'type': 'call.reject',
+        'conversationId': call.conversationId,
+        'callId': call.callId,
+        'reason': 'declined',
+      });
       _teardown('Call declined');
       return;
     }
@@ -236,7 +349,10 @@ class CallController extends StateNotifier<CallUiState> {
     _pendingCandidates.clear();
 
     var answer = await pc.createAnswer();
-    answer = RTCSessionDescription(_boostOpusAudio(answer.sdp ?? ''), answer.type);
+    answer = RTCSessionDescription(
+      _boostOpusAudio(answer.sdp ?? ''),
+      answer.type,
+    );
     await pc.setLocalDescription(answer);
 
     _realtime.send({
@@ -251,7 +367,12 @@ class CallController extends StateNotifier<CallUiState> {
   void rejectCall([String reason = 'declined']) {
     final call = state.call;
     if (call != null) {
-      _realtime.send({'type': 'call.reject', 'conversationId': call.conversationId, 'callId': call.callId, 'reason': reason});
+      _realtime.send({
+        'type': 'call.reject',
+        'conversationId': call.conversationId,
+        'callId': call.callId,
+        'reason': reason,
+      });
     }
     _teardown(reason == 'busy' ? 'Call ended' : 'Call declined');
   }
@@ -259,7 +380,11 @@ class CallController extends StateNotifier<CallUiState> {
   void hangUp() {
     final call = state.call;
     if (call != null) {
-      _realtime.send({'type': 'call.end', 'conversationId': call.conversationId, 'callId': call.callId});
+      _realtime.send({
+        'type': 'call.end',
+        'conversationId': call.conversationId,
+        'callId': call.callId,
+      });
     }
     _teardown('Call ended');
   }
@@ -278,6 +403,31 @@ class CallController extends StateNotifier<CallUiState> {
 
   void dismissMicError() => state = state.copyWith(clearMicError: true);
 
+  void _onReconnect(Map<String, dynamic> _) => checkPendingCall();
+
+  /// The catch-up half of push-notification calling (see calls_api.dart's
+  /// `PendingCall` docstring) — called on every WS reconnect (ws_client.dart's
+  /// `reconnect`, wired from app/app.dart's lifecycle observer and
+  /// chats_list_screen.dart's initial connect) rather than only in response to a
+  /// tapped call notification, so this also covers "the call push notification
+  /// hasn't even arrived yet, but reconnecting is what surfaces it" — the two race
+  /// against each other and whichever gets there first wins, same as any other
+  /// live-vs-catch-up pair in this app (thread_screen.dart's `_load` after a WS
+  /// event vs. after a reconnect). Feeds straight into `_onRing`, the exact same
+  /// handler a live `call.ring` WS event uses, so there's exactly one "start
+  /// ringing" code path regardless of which route delivered it.
+  Future<void> checkPendingCall() async {
+    if (state.phase != CallPhase.idle) {
+      return; // already mid-call — nothing to catch up to
+    }
+    final pending = await _callsApi.pending();
+    if (pending == null) return;
+    if (state.phase != CallPhase.idle) {
+      return; // re-check: a live event may have landed while awaiting above
+    }
+    _onRing(pending.toRingPayload());
+  }
+
   void _onRing(Map<String, dynamic> payload) {
     if (state.phase != CallPhase.idle && state.phase != CallPhase.ended) {
       // Already on (or wrapping up) a call — decline as busy, no second ring UI.
@@ -290,7 +440,10 @@ class CallController extends StateNotifier<CallUiState> {
       return;
     }
     final sdp = payload['sdp'] as Map<String, dynamic>;
-    _pendingOffer = RTCSessionDescription(sdp['sdp'] as String?, sdp['type'] as String?);
+    _pendingOffer = RTCSessionDescription(
+      sdp['sdp'] as String?,
+      sdp['type'] as String?,
+    );
     final call = ActiveCall(
       callId: payload['callId'] as String,
       conversationId: payload['conversationId'] as String,
@@ -298,7 +451,13 @@ class CallController extends StateNotifier<CallUiState> {
       otherDisplayName: payload['fromDisplayName'] as String,
       isOutgoing: false,
     );
-    state = state.copyWith(phase: CallPhase.incoming, call: call, statusText: 'Incoming call…', clearMicError: true);
+    state = state.copyWith(
+      phase: CallPhase.incoming,
+      call: call,
+      statusText: 'Incoming call…',
+      clearMicError: true,
+    );
+    unawaited(_startRinging());
   }
 
   void _onAnswered(Map<String, dynamic> payload) {
@@ -306,7 +465,9 @@ class CallController extends StateNotifier<CallUiState> {
     if (pc == null || state.call?.callId != payload['callId']) return;
     final sdp = payload['sdp'] as Map<String, dynamic>;
     () async {
-      await pc.setRemoteDescription(RTCSessionDescription(sdp['sdp'] as String?, sdp['type'] as String?));
+      await pc.setRemoteDescription(
+        RTCSessionDescription(sdp['sdp'] as String?, sdp['type'] as String?),
+      );
       _remoteDescSet = true;
       for (final c in _pendingCandidates) {
         try {
@@ -321,7 +482,11 @@ class CallController extends StateNotifier<CallUiState> {
   void _onRemoteIceCandidate(Map<String, dynamic> payload) {
     if (state.call?.callId != payload['callId']) return;
     final c = payload['candidate'] as Map<String, dynamic>;
-    final candidate = RTCIceCandidate(c['candidate'] as String?, c['sdpMid'] as String?, c['sdpMLineIndex'] as int?);
+    final candidate = RTCIceCandidate(
+      c['candidate'] as String?,
+      c['sdpMid'] as String?,
+      c['sdpMLineIndex'] as int?,
+    );
     final pc = _pc;
     if (pc != null && _remoteDescSet) {
       pc.addCandidate(candidate).catchError((_) {});
@@ -341,8 +506,12 @@ class CallController extends StateNotifier<CallUiState> {
   }
 }
 
-final callControllerProvider = StateNotifierProvider<CallController, CallUiState>((ref) {
-  final controller = CallController(ref.watch(callsApiProvider), ref.watch(realtimeClientProvider));
-  ref.onDispose(controller.dispose);
-  return controller;
-});
+final callControllerProvider =
+    StateNotifierProvider<CallController, CallUiState>((ref) {
+      final controller = CallController(
+        ref.watch(callsApiProvider),
+        ref.watch(realtimeClientProvider),
+      );
+      ref.onDispose(controller.dispose);
+      return controller;
+    });

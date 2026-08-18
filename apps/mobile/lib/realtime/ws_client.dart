@@ -68,7 +68,10 @@ class RealtimeClient {
     final cookieHeader = cookies.map((c) => '${c.name}=${c.value}').join('; ');
 
     final wsUri = Uri.parse(AppConfig.realtimeUrl);
-    final channel = IOWebSocketChannel.connect(wsUri, headers: {'Cookie': cookieHeader});
+    final channel = IOWebSocketChannel.connect(
+      wsUri,
+      headers: {'Cookie': cookieHeader},
+    );
     _channel = channel;
 
     try {
@@ -115,7 +118,9 @@ class RealtimeClient {
 
   void _scheduleReconnect() {
     if (_intentionallyClosed) return;
-    final delayMs = min(1000 * pow(2, _reconnectAttempt).toInt(), 30000) + Random().nextInt(500);
+    final delayMs =
+        min(1000 * pow(2, _reconnectAttempt).toInt(), 30000) +
+        Random().nextInt(500);
     _reconnectAttempt += 1;
     _reconnectTimer?.cancel();
     _reconnectTimer = Timer(Duration(milliseconds: delayMs), connect);
@@ -127,5 +132,22 @@ class RealtimeClient {
     await _sub?.cancel();
     await _channel?.sink.close(1000, 'client_disconnect');
     _channel = null;
+  }
+
+  /// Forces a fresh connection regardless of what `connect()` currently believes
+  /// the state is — called on app resume (app/app.dart's lifecycle observer).
+  /// `connect()` alone isn't enough here: its `if (_channel != null) return`
+  /// guard assumes a non-null channel means "still good," but that's exactly the
+  /// case that doesn't hold after a phone backgrounds this app for a while —
+  /// Android/iOS commonly suspend background network access without ever
+  /// delivering the `onDone`/`onError` this class relies on to notice and
+  /// reconnect on its own, so `_channel` sits there non-null pointing at a
+  /// socket that's actually long dead. Found live as the reported "messages/
+  /// read-receipts only show up after I manually refresh" bug: the app was never
+  /// actually disconnected from the *user's* point of view, so nothing tripped
+  /// the normal reconnect path.
+  Future<void> reconnect() async {
+    await disconnect();
+    await connect();
   }
 }

@@ -18,6 +18,7 @@ import '../api/media_api.dart';
 import '../api/calls_api.dart';
 import '../api/groups_api.dart';
 import '../api/admin_api.dart';
+import '../api/push_api.dart';
 import '../features/groups/group_session_controller.dart';
 import '../features/notifications/message_notifier.dart';
 import '../realtime/ws_client.dart';
@@ -28,16 +29,39 @@ import '../realtime/ws_client.dart';
 /// main.dart's `runApp` call.
 final apiClientProvider = Provider<ApiClient>((ref) => ApiClient.instance);
 
-final authApiProvider = Provider<AuthApi>((ref) => AuthApi(ref.watch(apiClientProvider)));
-final usersApiProvider = Provider<UsersApi>((ref) => UsersApi(ref.watch(apiClientProvider)));
-final keysApiProvider = Provider<KeysApi>((ref) => KeysApi(ref.watch(apiClientProvider)));
-final conversationsApiProvider = Provider<ConversationsApi>((ref) => ConversationsApi(ref.watch(apiClientProvider)));
-final messagesApiProvider = Provider<MessagesApi>((ref) => MessagesApi(ref.watch(apiClientProvider)));
-final devicesApiProvider = Provider<DevicesApi>((ref) => DevicesApi(ref.watch(apiClientProvider)));
-final mediaApiProvider = Provider<MediaApi>((ref) => MediaApi(ref.watch(apiClientProvider)));
-final callsApiProvider = Provider<CallsApi>((ref) => CallsApi(ref.watch(apiClientProvider)));
-final groupsApiProvider = Provider<GroupsApi>((ref) => GroupsApi(ref.watch(apiClientProvider)));
-final adminApiProvider = Provider<AdminApi>((ref) => AdminApi(ref.watch(apiClientProvider)));
+final authApiProvider = Provider<AuthApi>(
+  (ref) => AuthApi(ref.watch(apiClientProvider)),
+);
+final usersApiProvider = Provider<UsersApi>(
+  (ref) => UsersApi(ref.watch(apiClientProvider)),
+);
+final keysApiProvider = Provider<KeysApi>(
+  (ref) => KeysApi(ref.watch(apiClientProvider)),
+);
+final conversationsApiProvider = Provider<ConversationsApi>(
+  (ref) => ConversationsApi(ref.watch(apiClientProvider)),
+);
+final messagesApiProvider = Provider<MessagesApi>(
+  (ref) => MessagesApi(ref.watch(apiClientProvider)),
+);
+final devicesApiProvider = Provider<DevicesApi>(
+  (ref) => DevicesApi(ref.watch(apiClientProvider)),
+);
+final mediaApiProvider = Provider<MediaApi>(
+  (ref) => MediaApi(ref.watch(apiClientProvider)),
+);
+final callsApiProvider = Provider<CallsApi>(
+  (ref) => CallsApi(ref.watch(apiClientProvider)),
+);
+final groupsApiProvider = Provider<GroupsApi>(
+  (ref) => GroupsApi(ref.watch(apiClientProvider)),
+);
+final adminApiProvider = Provider<AdminApi>(
+  (ref) => AdminApi(ref.watch(apiClientProvider)),
+);
+final pushApiProvider = Provider<PushApi>(
+  (ref) => PushApi(ref.watch(apiClientProvider)),
+);
 
 /// Mounted once for the app's lifetime (a plain `Provider`, not tied to any one
 /// screen) — mirrors `GroupSessionProvider`'s app-shell-level placement in
