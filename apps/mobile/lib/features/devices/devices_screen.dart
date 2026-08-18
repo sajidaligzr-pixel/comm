@@ -73,12 +73,18 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
         // Can't happen from a normal navigation (reaching this screen requires an
         // already-unlocked device), but this handler makes no assumption about how
         // it was reached, so it checks rather than assumes.
-        setState(() => _biometricError = 'Unlock this device with your password first, then try again.');
+        setState(
+          () => _biometricError =
+              'Unlock this device with your password first, then try again.',
+        );
         return;
       }
       final ok = await biometric.enableBiometricUnlock(kek);
       if (!ok) {
-        setState(() => _biometricError = "This device couldn't confirm biometrics — nothing was changed.");
+        setState(
+          () => _biometricError =
+              "This device couldn't confirm biometrics — nothing was changed.",
+        );
         return;
       }
       if (mounted) setState(() => _biometricEnabled = true);
@@ -96,6 +102,64 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
     }
   }
 
+  /// Cleans up the common cause of "why do I have several devices that all look
+  /// like this same phone": every login that can't reuse this app's own
+  /// remembered device id (a reinstall wiped it, or the id got cleared after a
+  /// `DEVICE_REVOKED` response — see auth_controller.dart's `login`) registers a
+  /// brand-new device row rather than resurrecting the old one, and the old row
+  /// stays `active` forever since nothing ever explicitly revokes it. There's no
+  /// reliable way to tell server-side which old rows are "actually this same
+  /// physical phone" vs. a different device the user is also legitimately signed
+  /// into, so this doesn't try to guess — it revokes every OTHER device at once,
+  /// on demand, the same one-by-one `revoke` call the per-row button already uses.
+  Future<void> _signOutOtherDevices() async {
+    final others = (_devices ?? const <DeviceSummary>[])
+        .where((d) => !d.isCurrentDevice)
+        .toList();
+    if (others.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Sign out all other devices?'),
+        content: Text(
+          '${others.length} other ${others.length == 1 ? 'device' : 'devices'} will need to sign in again. '
+          'This device stays signed in.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Sign out others'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final failures = <String>[];
+    for (final device in others) {
+      try {
+        await ref.read(devicesApiProvider).revoke(device.id);
+      } on ApiException {
+        failures.add(device.name);
+      }
+    }
+    await _load();
+    if (!mounted) return;
+    if (failures.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not sign out: ${failures.join(', ')}')),
+      );
+    }
+  }
+
   Future<void> _revoke(DeviceSummary device) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -107,9 +171,14 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
               : 'This device will need to sign in again to access your account.',
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
             onPressed: () => Navigator.of(context).pop(true),
             child: const Text('Sign out'),
           ),
@@ -126,7 +195,11 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
       }
       await _load();
     } on ApiException catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
     }
   }
 
@@ -157,15 +230,23 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
             Row(
               children: [
                 CircleAvatar(
-                  backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-                  child: Icon(Icons.fingerprint, color: Theme.of(context).colorScheme.primary),
+                  backgroundColor: Theme.of(
+                    context,
+                  ).colorScheme.primaryContainer,
+                  child: Icon(
+                    Icons.fingerprint,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Biometric unlock', style: TextStyle(fontWeight: FontWeight.w600)),
+                      const Text(
+                        'Biometric unlock',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
                       const SizedBox(height: 2),
                       Text(
                         'Use Face ID, Touch ID, or fingerprint instead of your password to unlock Comm on this '
@@ -180,14 +261,24 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
                 FilledButton.tonal(
                   onPressed: _biometricBusy ? null : _toggleBiometric,
                   child: _biometricBusy
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
                       : Text(_biometricEnabled ? 'Turn off' : 'Turn on'),
                 ),
               ],
             ),
             if (_biometricError != null) ...[
               const SizedBox(height: 8),
-              Text(_biometricError!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12)),
+              Text(
+                _biometricError!,
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.error,
+                  fontSize: 12,
+                ),
+              ),
             ],
           ],
         ),
@@ -198,30 +289,73 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   Widget _buildBody() {
     if (_error != null) return ErrorState(message: _error!, onRetry: _load);
     final devices = _devices;
-    if (devices == null) return const Center(child: CircularProgressIndicator());
+    if (devices == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
     final biometricCard = _buildBiometricCard(context);
+    final otherDeviceCount = devices.where((d) => !d.isCurrentDevice).length;
 
     return RefreshIndicator(
       onRefresh: () => Future.wait([_load(), _loadBiometricState()]),
       child: ListView(
         children: [
-          if (biometricCard != null) ...[biometricCard, const SizedBox(height: 8)],
+          if (biometricCard != null) ...[
+            biometricCard,
+            const SizedBox(height: 8),
+          ],
+          if (otherDeviceCount > 0) ...[
+            ListTile(
+              leading: Icon(
+                Icons.logout,
+                color: Theme.of(context).colorScheme.error,
+              ),
+              title: Text(
+                'Sign out $otherDeviceCount other ${otherDeviceCount == 1 ? 'device' : 'devices'}',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+              subtitle: const Text(
+                'Useful if some of these are old logins from this same phone.',
+              ),
+              onTap: _signOutOtherDevices,
+            ),
+            const Divider(height: 1),
+          ],
           for (var i = 0; i < devices.length; i++) ...[
             if (i > 0) const Divider(height: 1),
             ListTile(
-              leading: Icon(devices[i].deviceType == 'android' ? Icons.phone_android : Icons.devices),
+              leading: Icon(
+                devices[i].deviceType == 'android'
+                    ? Icons.phone_android
+                    : Icons.devices,
+              ),
               title: Row(
                 children: [
-                  Flexible(child: Text(devices[i].name, overflow: TextOverflow.ellipsis)),
+                  Flexible(
+                    child: Text(
+                      devices[i].name,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                   if (devices[i].isCurrentDevice) ...[
                     const SizedBox(width: 8),
-                    Chip(label: const Text('This device', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
+                    Chip(
+                      label: const Text(
+                        'This device',
+                        style: TextStyle(fontSize: 11),
+                      ),
+                      visualDensity: VisualDensity.compact,
+                    ),
                   ],
                 ],
               ),
-              subtitle: Text('Last active ${_relativeTime(devices[i].lastActiveAt)}'),
-              trailing: IconButton(icon: const Icon(Icons.logout), onPressed: () => _revoke(devices[i])),
+              subtitle: Text(
+                'Last active ${_relativeTime(devices[i].lastActiveAt)}',
+              ),
+              trailing: IconButton(
+                icon: const Icon(Icons.logout),
+                onPressed: () => _revoke(devices[i]),
+              ),
             ),
           ],
         ],

@@ -86,11 +86,24 @@ installable binary:
   `_startVoiceRecording`'s docstring in `lib/features/chats/thread_screen.dart`.
 - Reply to a specific message: long-press a bubble to stage a reply, preview strip
   above the composer, quoted snippet rendered inside the sent bubble.
+- Chat management: delete for everyone (long-press → Delete, sender-only, real-time
+  to the other side), disappearing messages (24h/7d/30d, set from the thread's app
+  bar, local pruning backed by the worker's authoritative hourly sweep), typing
+  indicators (1:1 only, matching web's own scope), archive/unarchive, and a
+  WhatsApp-style "Delete chat" (long-press a row in the chat list) that clears this
+  device's own local history and hides the conversation until the other side
+  messages again — purely local, no server-side "delete a conversation" concept
+  exists. Archived chats live on their own page (pushed from an "Archived (N)" row),
+  not an inline dropdown.
 - 1:1 voice calling over `flutter_webrtc`, same WS signaling protocol as the web
   client (interoperates with it unchanged) — native audio routing means the
   browser's speaker-by-default bug doesn't exist here. Full-screen call UI with
   mute/speaker/end-call, matching WhatsApp's own call-screen layout.
-- Device management: list linked devices, revoke any of them.
+- Device management: list linked devices, revoke any of them, plus a one-tap
+  "Sign out N other devices" cleanup action — useful because a reinstall (or any
+  case where this app's remembered device id gets lost while the old device row
+  stays active server-side) registers as a brand-new device rather than reviving
+  the old one, the same behavior apps/web's own login flow has.
 - Biometric unlock: opt-in (one-time dismissible prompt on first sign-in, or toggle
   any time from the Devices screen), auto-attempted on the unlock screen with the
   password field always available as a fallback, automatically disabled if the

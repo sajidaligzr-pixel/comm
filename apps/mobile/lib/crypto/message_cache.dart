@@ -280,5 +280,67 @@ Future<List<CachedMessage>> markCachedMessageDeleted(
 /// ciphertext can only ever be decrypted once (this cache's own docstring above),
 /// this history is not recoverable afterward even from the server's stored
 /// ciphertext.
+///
+/// Used together with [markConversationLocallyDeleted] below, NOT `archived` —
+/// see that function's docstring for why reusing the archive flag for this was
+/// wrong (it visibly landed a "deleted" chat inside the Archived section instead
+/// of actually making it disappear).
 Future<void> clearCachedMessages(String conversationId) =>
     deleteBlob(_cacheKey(conversationId));
+
+const _locallyDeletedKey = 'locally-deleted-conversations';
+
+Future<Set<String>> _readLocallyDeleted() async {
+  final raw = await getBlob(_locallyDeletedKey);
+  if (raw == null) return {};
+  final decoded = jsonDecode(utf8.decode(raw));
+  if (decoded is! List) return {};
+  return decoded.whereType<String>().toSet();
+}
+
+Future<void> _writeLocallyDeleted(Set<String> ids) async {
+  if (ids.isEmpty) {
+    await deleteBlob(_locallyDeletedKey);
+    return;
+  }
+  await putBlob(_locallyDeletedKey, utf8.encode(jsonEncode(ids.toList())));
+}
+
+/// The other half of "Delete chat" (see [clearCachedMessages] above). Unencrypted
+/// on the wire, plaintext at rest is fine here — a conversation id is not
+/// sensitive content, unlike everything else this file stores. Kept in its own
+/// small blob (this device's account-scoped storage, same as everything else in
+/// this file) rather than reusing the server's `archived` field for "deleted":
+/// `archived` is a real, separate WhatsApp feature (chats-shell.tsx's own
+/// `handleToggleArchive`) with its own dedicated screen, and a chat the user just
+/// asked to delete showing up there instead of actually vanishing was the exact,
+/// reported bug this replaced. This is local-only and never reaches the server —
+/// deleting a chat on one device has no effect on the conversation's `archived`
+/// state or visibility on any other device, matching every other "local view
+/// preference" in this file.
+Future<void> markConversationLocallyDeleted(String conversationId) async {
+  final ids = await _readLocallyDeleted();
+  ids.add(conversationId);
+  await _writeLocallyDeleted(ids);
+}
+
+/// Called the moment a live message arrives for a conversation (chats_list_screen.
+/// dart's WS 'new' handler) — this is what actually makes good on "this chat will
+/// come back if they message you again" from the delete-confirmation dialog: a
+/// locally-deleted conversation is hidden by [isConversationLocallyDeleted] below,
+/// not removed from the account, so the moment a new message shows it's still
+/// live, this un-hides it. A no-op if the id wasn't hidden to begin with.
+Future<void> unmarkConversationLocallyDeleted(String conversationId) async {
+  final ids = await _readLocallyDeleted();
+  if (ids.remove(conversationId)) {
+    await _writeLocallyDeleted(ids);
+  }
+}
+
+Future<bool> isConversationLocallyDeleted(String conversationId) async =>
+    (await _readLocallyDeleted()).contains(conversationId);
+
+/// Bulk form of [isConversationLocallyDeleted] — chats_list_screen.dart filters an
+/// entire freshly-fetched list against this once per load rather than one blob
+/// read per row.
+Future<Set<String>> locallyDeletedConversationIds() => _readLocallyDeleted();

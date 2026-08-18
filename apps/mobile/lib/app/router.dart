@@ -16,6 +16,7 @@ import '../features/auth/login_screen.dart';
 import '../features/auth/unlock_screen.dart';
 import '../features/auth/invite_redeem_screen.dart';
 import '../features/auth/change_password_screen.dart';
+import '../features/chats/archived_chats_screen.dart';
 import '../features/chats/chats_list_screen.dart';
 import '../features/chats/thread_screen.dart';
 import '../features/devices/devices_screen.dart';
@@ -47,7 +48,11 @@ String? computeAuthRedirect(AuthState auth, String path) {
       return path == '/unlock' ? null : '/unlock';
     case AuthSignedIn(mustChangePassword: final must):
       if (must) return path == '/change-password' ? null : '/change-password';
-      if (path == '/login' || path == '/unlock' || path == '/change-password' || path == '/splash' || onInvite) {
+      if (path == '/login' ||
+          path == '/unlock' ||
+          path == '/change-password' ||
+          path == '/splash' ||
+          onInvite) {
         return '/chats';
       }
       return null;
@@ -59,27 +64,58 @@ final routerProvider = Provider<GoRouter>((ref) {
 
   return GoRouter(
     initialLocation: '/splash',
-    redirect: (context, state) => computeAuthRedirect(auth, state.matchedLocation),
+    redirect: (context, state) =>
+        computeAuthRedirect(auth, state.matchedLocation),
     routes: [
-      GoRoute(path: '/splash', builder: (context, state) => const SplashScreen()),
+      GoRoute(
+        path: '/splash',
+        builder: (context, state) => const SplashScreen(),
+      ),
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
-      GoRoute(path: '/unlock', builder: (context, state) => const UnlockScreen()),
+      GoRoute(
+        path: '/unlock',
+        builder: (context, state) => const UnlockScreen(),
+      ),
       GoRoute(
         path: '/invite/:token',
-        builder: (context, state) => InviteRedeemScreen(token: state.pathParameters['token']!),
+        builder: (context, state) =>
+            InviteRedeemScreen(token: state.pathParameters['token']!),
       ),
-      GoRoute(path: '/change-password', builder: (context, state) => const ChangePasswordScreen()),
-      GoRoute(path: '/chats', builder: (context, state) => const ChatsListScreen()),
-      GoRoute(path: '/devices', builder: (context, state) => const DevicesScreen()),
+      GoRoute(
+        path: '/change-password',
+        builder: (context, state) => const ChangePasswordScreen(),
+      ),
+      GoRoute(
+        path: '/chats',
+        builder: (context, state) => const ChatsListScreen(),
+      ),
+      // MUST come before '/chats/:id' below — go_router's RouteConfiguration
+      // walks top-level routes in declaration order and returns the first match
+      // (see go_router's configuration.dart, `_getLocRouteMatches`), so a literal
+      // path only wins over a sibling ':id' pattern by being listed first, not by
+      // any built-in literal-over-param precedence.
+      GoRoute(
+        path: '/chats/archived',
+        builder: (context, state) => const ArchivedChatsScreen(),
+      ),
+      GoRoute(
+        path: '/devices',
+        builder: (context, state) => const DevicesScreen(),
+      ),
       GoRoute(path: '/admin', builder: (context, state) => const AdminScreen()),
-      GoRoute(path: '/new-group', builder: (context, state) => const NewGroupScreen()),
+      GoRoute(
+        path: '/new-group',
+        builder: (context, state) => const NewGroupScreen(),
+      ),
       GoRoute(
         path: '/groups/:groupId/info',
-        builder: (context, state) => GroupInfoScreen(groupId: state.pathParameters['groupId']!),
+        builder: (context, state) =>
+            GroupInfoScreen(groupId: state.pathParameters['groupId']!),
       ),
       GoRoute(
         path: '/chats/:id',
-        builder: (context, state) => ThreadScreen(conversationId: state.pathParameters['id']!),
+        builder: (context, state) =>
+            ThreadScreen(conversationId: state.pathParameters['id']!),
       ),
     ],
   );
