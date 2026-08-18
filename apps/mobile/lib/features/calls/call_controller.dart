@@ -64,6 +64,7 @@ String _boostOpusAudio(String sdp) {
 class CallController extends StateNotifier<CallUiState> {
   CallController(this._callsApi, this._realtime) : super(const CallUiState()) {
     _realtime.on('call.ring', _onRing);
+    _realtime.on('call.ringing', _onRinging);
     _realtime.on('call.answered', _onAnswered);
     _realtime.on('call.ice-candidate', _onRemoteIceCandidate);
     _realtime.on('call.rejected', _onRejected);
@@ -121,6 +122,7 @@ class CallController extends StateNotifier<CallUiState> {
   @override
   void dispose() {
     _realtime.off('call.ring', _onRing);
+    _realtime.off('call.ringing', _onRinging);
     _realtime.off('call.answered', _onAnswered);
     _realtime.off('call.ice-candidate', _onRemoteIceCandidate);
     _realtime.off('call.rejected', _onRejected);
@@ -458,6 +460,26 @@ class CallController extends StateNotifier<CallUiState> {
       clearMicError: true,
     );
     unawaited(_startRinging());
+    // Tells the caller's side to move from "Calling…" to "Ringing…" — see
+    // CallRingingRequest's own docstring (packages/types/src/calls.ts). Fired here
+    // rather than only from a live 'call.ring' arrival specifically because `_onRing`
+    // is also what `checkPendingCall`'s catch-up path feeds into (this same
+    // function, not a separate one) — either way this device's incoming-call screen
+    // has now actually appeared, which is exactly the moment worth telling the
+    // caller about.
+    _realtime.send({
+      'type': 'call.ringing',
+      'conversationId': call.conversationId,
+      'callId': call.callId,
+    });
+  }
+
+  void _onRinging(Map<String, dynamic> payload) {
+    if (state.call?.callId != payload['callId'] ||
+        state.phase != CallPhase.outgoing) {
+      return;
+    }
+    state = state.copyWith(statusText: 'Ringing…');
   }
 
   void _onAnswered(Map<String, dynamic> payload) {

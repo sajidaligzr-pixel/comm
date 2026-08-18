@@ -432,6 +432,19 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
       setPhase('incoming');
       setStatusText('Incoming call…');
       setMicError(null);
+      // Tells the caller's side to move from "Calling…" to "Ringing…" — see
+      // CallRingingRequest's own docstring (packages/types/src/calls.ts). This
+      // handler is also what `checkPendingCall`-style catch-up would feed into if
+      // this app ever grows one; either way, this device's incoming-call screen
+      // has now actually appeared, which is exactly the moment worth telling the
+      // caller about.
+      sendRealtimeEvent({ type: 'call.ringing', conversationId: p.conversationId, callId: p.callId });
+    });
+
+    const offRinging = onRealtimeEvent('call.ringing', (payload) => {
+      const p = payload as unknown as { callId: string };
+      if (callRef.current?.callId !== p.callId || phaseRef.current !== 'outgoing') return;
+      setStatusText('Ringing…');
     });
 
     const offAnswered = onRealtimeEvent('call.answered', (payload) => {
@@ -487,6 +500,7 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
 
     return () => {
       offRing();
+      offRinging();
       offAnswered();
       offIce();
       offRejected();

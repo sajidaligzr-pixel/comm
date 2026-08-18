@@ -51,6 +51,22 @@ export const CallInviteRequest = z.object({
 });
 export type CallInviteRequest = z.infer<typeof CallInviteRequest>;
 
+/** Sent by the CALLEE the instant its own incoming-call screen actually appears
+ * (call_controller.dart's `_onRing`/call-provider.tsx's equivalent — both the live
+ * WS path and the push/REST catch-up path funnel into the exact same handler, so
+ * this fires for either one identically), so the caller's "Calling…" can become
+ * "Ringing…" the moment there's real confirmation the other side is actually being
+ * notified — the same distinction a real phone call makes, and one this app never
+ * made before: "Calling…" alone doesn't tell you anything actually happened on the
+ * other end (found live, reported directly — it stayed "Calling…" for the whole
+ * timeout even when the other person was online with a normal connection). No SDP
+ * here — this is pure status, not signaling. */
+export const CallRingingRequest = z.object({
+  conversationId: z.string().uuid(),
+  callId: z.string().uuid(),
+});
+export type CallRingingRequest = z.infer<typeof CallRingingRequest>;
+
 export const CallAnswerRequest = z.object({
   conversationId: z.string().uuid(),
   callId: z.string().uuid(),

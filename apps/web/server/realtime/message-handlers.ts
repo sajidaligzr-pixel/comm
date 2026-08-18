@@ -11,6 +11,7 @@ import {
   AppError,
   SendMessageRequest,
   CallInviteRequest,
+  CallRingingRequest,
   CallAnswerRequest,
   CallIceCandidateRequest,
   CallRejectRequest,
@@ -23,7 +24,7 @@ import { prisma } from '@comm/database';
 import { sendMessage, acknowledgeDelivered, markConversationRead, getMessageSenderDeviceId } from '../modules/messages/service';
 import { getAllOtherMembersActiveDeviceIds, requireConversationMembership } from '../modules/conversations/service';
 import { createGroupKeyShare } from '../modules/groups/key-share-service';
-import { setPendingCall, clearPendingCall, getPendingCall } from '../modules/calls/pending';
+import { setPendingCall, clearPendingCall } from '../modules/calls/pending';
 import { recordCallInvited, recordCallAnswered, recordCallDeclined, recordCallEnded } from '../modules/calls/history';
 import {
   publishNewMessage,
@@ -31,6 +32,7 @@ import {
   publishRead,
   publishTyping,
   publishCallRing,
+  publishCallRinging,
   publishCallAnswered,
   publishCallIceCandidate,
   publishCallRejected,
@@ -56,6 +58,7 @@ const TypingEnvelope = z.object({
   conversationId: z.string().uuid(),
 });
 const CallInviteEnvelope = CallInviteRequest.extend({ type: z.literal('call.invite') });
+const CallRingingEnvelope = CallRingingRequest.extend({ type: z.literal('call.ringing') });
 const CallAnswerEnvelope = CallAnswerRequest.extend({ type: z.literal('call.answer') });
 const CallIceCandidateEnvelope = CallIceCandidateRequest.extend({ type: z.literal('call.ice-candidate') });
 const CallRejectEnvelope = CallRejectRequest.extend({ type: z.literal('call.reject') });
@@ -185,6 +188,23 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         return null;
       }
 
+      // Sent by the callee's device(s) the instant their own incoming-call screen
+      // actually appears — see CallRingingRequest's own docstring (packages/types/
+      // src/calls.ts) for why this exists: "Calling…" alone never told the caller
+      // whether anything actually happened on the other end. Relayed to every one
+      // of the CALLER's active devices, same fan-out reasoning as every other case
+      // here — if the caller is also signed in on more than one device, all of them
+      // should see "Ringing…", not just whichever one happened to be primary.
+      case 'call.ringing': {
+        await enforceRateLimit(RATE_LIMIT_RULES.callSignal, ctx.userId);
+        const body = CallRingingEnvelope.parse(parsed);
+        const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
+        for (const target of targets) {
+          await publishCallRinging(target.deviceId, body.conversationId, body.callId);
+        }
+        return null;
+      }
+
       case 'call.answer': {
         await enforceRateLimit(RATE_LIMIT_RULES.callSignal, ctx.userId);
         const body = CallAnswerEnvelope.parse(parsed);
@@ -235,22 +255,34 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         // call.answer above.
         await clearPendingCall(ctx.deviceId);
         await recordCallDeclined(body.callId);
-        // Multi-device: declining on ONE of this user's devices shouldn't stop the
-        // call ringing on their others (matches a real phone) — only tell the
-        // caller once none of this user's OTHER devices still has this same call
-        // pending either, i.e. this was the last one out. `getPendingCall` is
-        // cheap and this list is always tiny (a handful of devices at most).
+        // Told to the caller immediately — a decline is decisive, not "maybe still
+        // ringing elsewhere." An earlier version of this waited for every one of
+        // this user's OTHER active devices to also stop ringing before forwarding,
+        // meant to let a real phone-like "still ringing on your other device" case
+        // play out — but in practice this account (like most, after enough
+        // reinstalls/relogins over time) has several old device rows that are
+        // still technically `active` but have no real app running on them to ever
+        // decline or answer; call.invite's fan-out gives every one of them a
+        // pending-call entry that then just sits there for the full ring timeout.
+        // Waiting on those meant the caller saw "Calling…" for the full 45s no
+        // matter how fast the other side actually declined — found live, reported
+        // directly. Forwarding immediately is simpler and matches what actually
+        // happens on a real phone in the common case anyway.
+        const callerTargets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
+        for (const target of callerTargets) {
+          await publishCallRejected(target.deviceId, body.conversationId, body.callId, body.reason);
+        }
+        // Also stop the ring on this same user's OTHER devices (mirrors call.answer's
+        // own cross-device cancel above) — declining on one device should end it
+        // everywhere for this user, not leave another device still ringing on a
+        // call this user just turned down.
         const myOtherDevices = await prisma.device.findMany({
           where: { userId: ctx.userId, status: 'active', id: { not: ctx.deviceId } },
           select: { id: true },
         });
-        const stillRinging = await Promise.all(myOtherDevices.map((d) => getPendingCall(d.id)));
-        const anyStillRinging = stillRinging.some((p) => p?.callId === body.callId);
-        if (!anyStillRinging) {
-          const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
-          for (const target of targets) {
-            await publishCallRejected(target.deviceId, body.conversationId, body.callId, body.reason);
-          }
+        for (const device of myOtherDevices) {
+          await clearPendingCall(device.id);
+          await publishCallRejected(device.id, body.conversationId, body.callId, body.reason);
         }
         return null;
       }

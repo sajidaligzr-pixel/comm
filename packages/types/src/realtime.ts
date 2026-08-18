@@ -43,6 +43,7 @@ export type CallEvent =
       fromDisplayName: string;
       sdp: CallSessionDescription;
     }
+  | { type: 'call.ringing'; targetDeviceId: string; conversationId: string; callId: string }
   | { type: 'call.answered'; targetDeviceId: string; conversationId: string; callId: string; sdp: CallSessionDescription }
   | { type: 'call.ice-candidate'; targetDeviceId: string; conversationId: string; callId: string; candidate: CallIceCandidateInit }
   | { type: 'call.rejected'; targetDeviceId: string; conversationId: string; callId: string; reason: CallRejectReason }

@@ -95,6 +95,10 @@ export async function publishCallRing(
   await publishCallEvent({ type: 'call.ring', targetDeviceId, conversationId, callId, fromUserId, fromDisplayName, sdp });
 }
 
+export async function publishCallRinging(targetDeviceId: string, conversationId: string, callId: string): Promise<void> {
+  await publishCallEvent({ type: 'call.ringing', targetDeviceId, conversationId, callId });
+}
+
 export async function publishCallAnswered(
   targetDeviceId: string,
   conversationId: string,
