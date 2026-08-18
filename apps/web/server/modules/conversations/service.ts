@@ -18,8 +18,15 @@ async function toSummary(conversationId: string, callerUserId: string): Promise<
   });
   const self = conversation.members.find((m) => m.userId === callerUserId)!;
 
+  // `reaction` messages are real `Message` rows (they ride the exact same E2E
+  // fan-out as everything else — server/modules/messages/service.ts never
+  // special-cases them), but they're control messages, not content: WhatsApp
+  // doesn't bump a chat's position or unread badge just because someone reacted
+  // to something in it, so both queries below exclude them explicitly. Without
+  // this, reacting to an old message would (wrongly) jump that conversation to
+  // the top of the list and mark it unread for the other participant.
   const lastMessage = await prisma.message.findFirst({
-    where: { conversationId, deletedAt: null },
+    where: { conversationId, deletedAt: null, contentTypeHint: { not: 'reaction' } },
     orderBy: { serverReceivedAt: 'desc' },
   });
 
@@ -31,6 +38,7 @@ async function toSummary(conversationId: string, callerUserId: string): Promise<
     where: {
       conversationId,
       deletedAt: null,
+      contentTypeHint: { not: 'reaction' },
       senderUserId: { not: callerUserId },
       ...(lastRead ? { serverReceivedAt: { gt: lastRead.serverReceivedAt } } : {}),
     },

@@ -76,8 +76,117 @@ _DecodedContent _decodeContent(String contentTypeHint, Uint8List plaintext) {
       return const _DecodedContent(text: '[Malformed attachment]');
     }
   }
+  // `reaction` falls through to plain text like everything else here — its JSON
+  // payload rides `CachedMessage.text` exactly like a real text message would,
+  // the same "zero cache-schema changes" trick apps/web/lib/message-content.ts
+  // uses. Nothing renders it as a bubble (`_buildBody` filters `contentTypeHint
+  // == 'reaction'` out of the visible list); `_buildReactionState` below is what
+  // gives that JSON meaning.
   return _DecodedContent(text: bytesToUtf8(plaintext));
 }
+
+/// The plaintext of a `contentTypeHint: 'reaction'` message — mirrors apps/web/
+/// lib/message-content.ts's `ReactionPayload`/`parseReactionPayload` exactly,
+/// see that file's docstring for why `emoji: null` means "remove my reaction,"
+/// not "react with nothing."
+class _ReactionPayload {
+  final String targetMessageId;
+  final String? emoji;
+  const _ReactionPayload({required this.targetMessageId, this.emoji});
+
+  static _ReactionPayload? tryParse(String text) {
+    try {
+      final json = jsonDecode(text);
+      if (json is! Map<String, dynamic>) return null;
+      final targetMessageId = json['targetMessageId'];
+      if (targetMessageId is! String) return null;
+      final emoji = json['emoji'];
+      if (emoji != null && emoji is! String) return null;
+      return _ReactionPayload(
+        targetMessageId: targetMessageId,
+        emoji: emoji as String?,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+class ReactionSummary {
+  final String emoji;
+  final int count;
+
+  /// Whether the signed-in user is one of the people behind this emoji's count.
+  final bool mine;
+  const ReactionSummary({
+    required this.emoji,
+    required this.count,
+    required this.mine,
+  });
+}
+
+/// See apps/web/lib/message-content.ts's `buildReactionState` — identical
+/// algorithm (latest-by-sentAt reaction per sender, grouped into per-emoji
+/// counts), scanning the full cached message list (reaction rows included, even
+/// though they're filtered out of what's actually rendered as bubbles).
+Map<String, List<ReactionSummary>> _buildReactionState(
+  List<CachedMessage> messages,
+  String currentUserId,
+) {
+  final latestBySender =
+      <String, Map<String, ({String? emoji, DateTime sentAt})>>{};
+  for (final m in messages) {
+    if (m.contentTypeHint != 'reaction') continue;
+    final payload = _ReactionPayload.tryParse(m.text);
+    if (payload == null) continue;
+    final bySender = latestBySender.putIfAbsent(
+      payload.targetMessageId,
+      () => {},
+    );
+    final sentAt =
+        DateTime.tryParse(m.sentAt) ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final existing = bySender[m.senderUserId];
+    if (existing == null || !sentAt.isBefore(existing.sentAt)) {
+      bySender[m.senderUserId] = (emoji: payload.emoji, sentAt: sentAt);
+    }
+  }
+
+  final result = <String, List<ReactionSummary>>{};
+  for (final entry in latestBySender.entries) {
+    final counts = <String, int>{};
+    String? mine;
+    for (final senderEntry in entry.value.entries) {
+      final emoji = senderEntry.value.emoji;
+      if (emoji == null) continue; // this sender's latest action was a removal
+      counts[emoji] = (counts[emoji] ?? 0) + 1;
+      if (senderEntry.key == currentUserId) mine = emoji;
+    }
+    final summaries = counts.entries
+        .map(
+          (e) => ReactionSummary(
+            emoji: e.key,
+            count: e.value,
+            mine: e.key == mine,
+          ),
+        )
+        .toList();
+    if (summaries.isNotEmpty) result[entry.key] = summaries;
+  }
+  return result;
+}
+
+String? _myReactionAmong(List<ReactionSummary> summaries) {
+  for (final r in summaries) {
+    if (r.mine) return r.emoji;
+  }
+  return null;
+}
+
+/// A small curated set — mirrors apps/web's `EmojiPicker` in spirit (a
+/// functional set without pulling in an emoji-data package), scoped down to the
+/// handful long-press reveals directly rather than a full picker grid, since a
+/// phone's long-press bottom sheet has much less room than a desktop dropdown.
+const _quickReactionEmoji = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
 class ThreadScreen extends ConsumerStatefulWidget {
   const ThreadScreen({super.key, required this.conversationId});
@@ -792,11 +901,31 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
 
   void _cancelReply() => setState(() => _replyingTo = null);
 
-  /// Long-press a bubble — Reply (any message) + Delete (own messages only,
-  /// "delete for everyone," matching web's own `m.isOwn` gate on showing the
-  /// button at all). Uses the same bottom-sheet pattern chats_list_screen.dart's
-  /// own long-press menu already established, rather than a different one-off
-  /// interaction just for this screen.
+  /// Toggle: reacting with the same emoji already active for this user on this
+  /// message removes it, any other emoji (including a first reaction) replaces
+  /// it — see `_ReactionPayload`'s docstring. Goes through the exact same
+  /// `_sendEnvelope` every other content type uses (full multi-device fan-out
+  /// for free, no dedicated endpoint), so there's genuinely nothing
+  /// reaction-specific about the send path itself.
+  Future<void> _react(CachedMessage target, String emoji) async {
+    final reactions =
+        _buildReactionState(_messages, _myUserId)[target.id] ?? const [];
+    final mine = _myReactionAmong(reactions);
+    final next = mine == emoji ? null : emoji;
+    final payload = jsonEncode({'targetMessageId': target.id, 'emoji': next});
+    await _sendEnvelope(
+      contentTypeHint: 'reaction',
+      plaintext: utf8ToBytes(payload),
+      cacheText: payload,
+    );
+  }
+
+  /// Long-press a bubble — a quick-reaction emoji row (WhatsApp/Telegram's own
+  /// long-press affordance) above Reply (any message) + Delete (own messages
+  /// only, "delete for everyone," matching web's own `m.isOwn` gate on showing
+  /// the button at all). Uses the same bottom-sheet pattern chats_list_screen.
+  /// dart's own long-press menu already established, rather than a different
+  /// one-off interaction just for this screen.
   void _showMessageActions(CachedMessage message) {
     HapticFeedback.selectionClick();
     showModalBottomSheet<void>(
@@ -805,6 +934,30 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final emoji in _quickReactionEmoji)
+                    InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        _react(message, emoji);
+                      },
+                      child: Padding(
+                        padding: const EdgeInsets.all(6),
+                        child: Text(
+                          emoji,
+                          style: const TextStyle(fontSize: 26),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
             ListTile(
               leading: const Icon(Icons.reply),
               title: const Text('Reply'),
@@ -1086,7 +1239,10 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           final ownOtherDevices = ownDevices
               .where((d) => !d.isCurrentDevice && d.status == 'active')
               .map((d) => (userId: _myUserId, deviceId: d.id));
-          targets = _targetDevices = [...otherMemberDevices, ...ownOtherDevices];
+          targets = _targetDevices = [
+            ...otherMemberDevices,
+            ...ownOtherDevices,
+          ];
         }
         if (targets.isEmpty) {
           throw StateError(
@@ -1359,16 +1515,25 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     // list itself — cheap given the 500-message-per-conversation cache cap.
     final messagesById = {for (final m in _messages) m.id: m};
 
+    // `reaction` rows are cached alongside everything else but never rendered
+    // as their own bubble — see `_ReactionPayload`'s docstring. `visibleMessages`
+    // is what the list actually iterates; `reactionState` folds every reaction
+    // row into per-target pill summaries instead.
+    final visibleMessages = _messages
+        .where((m) => m.contentTypeHint != 'reaction')
+        .toList(growable: false);
+    final reactionState = _buildReactionState(_messages, _myUserId);
+
     // Typing indicator renders as a trailing list item, not a widget bolted on
     // outside the ListView — that keeps it scrolling into view with everything
     // else instead of needing its own separate layout/visibility logic.
     final showTyping = _otherTyping && _conversation?.type == 'direct';
-    final itemCount = _messages.length + (showTyping ? 1 : 0);
+    final itemCount = visibleMessages.length + (showTyping ? 1 : 0);
 
     return Column(
       children: [
         Expanded(
-          child: _messages.isEmpty && !showTyping
+          child: visibleMessages.isEmpty && !showTyping
               ? const EmptyState(
                   icon: Icons.chat_bubble_outline,
                   message: 'No messages yet — say hello.',
@@ -1378,10 +1543,10 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                   padding: const EdgeInsets.all(12),
                   itemCount: itemCount,
                   itemBuilder: (context, index) {
-                    if (index == _messages.length) {
+                    if (index == visibleMessages.length) {
                       return const _TypingIndicatorBubble();
                     }
-                    final message = _messages[index];
+                    final message = visibleMessages[index];
                     return _MessageBubble(
                       message: message,
                       onDownload: _downloadAttachment,
@@ -1393,6 +1558,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                       onLongPress: message.deleted
                           ? null
                           : () => _showMessageActions(message),
+                      reactions: reactionState[message.id] ?? const [],
+                      onReactTap: (emoji) => _react(message, emoji),
                     );
                   },
                 ),
@@ -1767,6 +1934,8 @@ class _MessageBubble extends StatelessWidget {
     this.pending = false,
     this.replySource,
     this.onLongPress,
+    this.reactions = const [],
+    this.onReactTap,
   });
   final CachedMessage message;
   final void Function(AttachmentDescriptor) onDownload;
@@ -1784,6 +1953,12 @@ class _MessageBubble extends StatelessWidget {
   /// there's genuinely nothing left to show in that case, not a bug).
   final CachedMessage? replySource;
   final VoidCallback? onLongPress;
+
+  /// Aggregated reaction pills for this message — resolved once per build by
+  /// the parent (`_ThreadScreenState._buildBody`'s `_buildReactionState` call),
+  /// not recomputed per bubble.
+  final List<ReactionSummary> reactions;
+  final void Function(String emoji)? onReactTap;
 
   @override
   Widget build(BuildContext context) {
@@ -1843,166 +2018,246 @@ class _MessageBubble extends StatelessWidget {
 
     return Align(
       alignment: message.isOwn ? Alignment.centerRight : Alignment.centerLeft,
-      child: GestureDetector(
-        onLongPress: onLongPress,
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 2),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.78,
-          ),
-          decoration: BoxDecoration(
-            color: message.isOwn
-                ? WhatsAppColors.outgoingBubble
-                : WhatsAppColors.incomingBubble,
-            // The pinched corner on the side nearest the sender approximates
-            // WhatsApp's speech-bubble tail — a plain uniform radius reads as a
-            // generic chat bubble, not specifically WhatsApp's.
-            borderRadius: BorderRadius.only(
-              topLeft: const Radius.circular(8),
-              topRight: const Radius.circular(8),
-              bottomLeft: Radius.circular(message.isOwn ? 8 : 0),
-              bottomRight: Radius.circular(message.isOwn ? 0 : 8),
-            ),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x14000000),
-                blurRadius: 1,
-                offset: Offset(0, 1),
+      child: Stack(
+        // Lets the reaction-pill row (Positioned, below) overlap the bottom edge
+        // of the bubble instead of being clipped by it — same overlap web's
+        // absolutely-positioned pill row achieves (message-thread.tsx).
+        clipBehavior: Clip.none,
+        children: [
+          GestureDetector(
+            onLongPress: onLongPress,
+            child: Container(
+              margin: const EdgeInsets.symmetric(vertical: 2),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.78,
               ),
-            ],
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (replySource != null)
-                Container(
-                  margin: const EdgeInsets.only(bottom: 4),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 6,
+              decoration: BoxDecoration(
+                color: message.isOwn
+                    ? WhatsAppColors.outgoingBubble
+                    : WhatsAppColors.incomingBubble,
+                // The pinched corner on the side nearest the sender approximates
+                // WhatsApp's speech-bubble tail — a plain uniform radius reads as a
+                // generic chat bubble, not specifically WhatsApp's.
+                borderRadius: BorderRadius.only(
+                  topLeft: const Radius.circular(8),
+                  topRight: const Radius.circular(8),
+                  bottomLeft: Radius.circular(message.isOwn ? 8 : 0),
+                  bottomRight: Radius.circular(message.isOwn ? 0 : 8),
+                ),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x14000000),
+                    blurRadius: 1,
+                    offset: Offset(0, 1),
                   ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.05),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border(
-                      left: BorderSide(
-                        color: WhatsAppColors.tealAccent,
-                        width: 3,
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (replySource != null)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 4),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.05),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border(
+                          left: BorderSide(
+                            color: WhatsAppColors.tealAccent,
+                            width: 3,
+                          ),
+                        ),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            replySource!.isOwn ? 'You' : 'Them',
+                            style: const TextStyle(
+                              color: WhatsAppColors.tealAccent,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 12,
+                            ),
+                          ),
+                          Text(
+                            _replyPreviewText(replySource!),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: fgColor.withValues(alpha: 0.7),
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 2),
+                    child:
+                        message.contentTypeHint == 'voice' &&
+                            message.mediaBase64 != null
+                        ? _VoiceMessagePlayer(
+                            base64Audio: message.mediaBase64!,
+                            durationHintSec: message.mediaDurationSec,
+                            fgColor: fgColor,
+                          )
+                        : attachment != null
+                        ? InkWell(
+                            onTap: () => onDownload(attachment),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.insert_drive_file, color: fgColor),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        attachment.fileName,
+                                        style: TextStyle(color: fgColor),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      Text(
+                                        _formatBytes(attachment.sizeBytes),
+                                        style: TextStyle(
+                                          color: fgColor.withValues(
+                                            alpha: 0.75,
+                                          ),
+                                          fontSize: 12,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Icon(Icons.download, color: fgColor, size: 18),
+                              ],
+                            ),
+                          )
+                        : Text(message.text, style: TextStyle(color: fgColor)),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                  // Timestamp + delivery/read tick, bottom-right inside the bubble —
+                  // WhatsApp's own placement. Ticks only ever appear on OWN messages
+                  // (they show what happened to a message you sent); an incoming message
+                  // never carries them, on WhatsApp or here.
+                  Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        replySource!.isOwn ? 'You' : 'Them',
-                        style: const TextStyle(
-                          color: WhatsAppColors.tealAccent,
-                          fontWeight: FontWeight.w600,
-                          fontSize: 12,
+                        _formatBubbleTime(message.sentAt),
+                        style: TextStyle(
+                          color: fgColor.withValues(alpha: 0.6),
+                          fontSize: 11,
                         ),
                       ),
+                      if (message.isOwn) ...[
+                        const SizedBox(width: 4),
+                        Builder(
+                          builder: (context) {
+                            final tick = tickStateFor(status, pending: pending);
+                            if (tick == TickState.sending) {
+                              return Icon(
+                                Icons.access_time,
+                                size: 13,
+                                color: fgColor.withValues(alpha: 0.6),
+                              );
+                            }
+                            return Icon(
+                              tick == TickState.sent
+                                  ? Icons.done
+                                  : Icons.done_all,
+                              size: 15,
+                              color: tick == TickState.read
+                                  ? const Color(0xFF34B7F1)
+                                  : fgColor.withValues(alpha: 0.6),
+                            );
+                          },
+                        ),
+                      ],
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (reactions.isNotEmpty)
+            Positioned(
+              bottom: -10,
+              right: message.isOwn ? 8 : null,
+              left: message.isOwn ? null : 8,
+              child: _ReactionPillRow(reactions: reactions, onTap: onReactTap),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The small pill row rendered under a bubble that has at least one active
+/// reaction — mirrors apps/web's identical treatment (message-thread.tsx):
+/// tapping a pill toggles the current user's reaction to/from that emoji.
+class _ReactionPillRow extends StatelessWidget {
+  const _ReactionPillRow({required this.reactions, this.onTap});
+  final List<ReactionSummary> reactions;
+  final void Function(String emoji)? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      decoration: BoxDecoration(
+        color: WhatsAppColors.listBackground,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.black.withValues(alpha: 0.08)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x14000000),
+            blurRadius: 2,
+            offset: Offset(0, 1),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final r in reactions)
+            InkWell(
+              customBorder: const CircleBorder(),
+              onTap: onTap == null ? null : () => onTap!(r.emoji),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(r.emoji, style: const TextStyle(fontSize: 13)),
+                    if (r.count > 1) ...[
+                      const SizedBox(width: 2),
                       Text(
-                        _replyPreviewText(replySource!),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                        '${r.count}',
                         style: TextStyle(
-                          color: fgColor.withValues(alpha: 0.7),
-                          fontSize: 12,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: r.mine
+                              ? WhatsAppColors.tealAccent
+                              : Colors.black54,
                         ),
                       ),
                     ],
-                  ),
-                ),
-              Padding(
-                padding: const EdgeInsets.only(bottom: 2),
-                child:
-                    message.contentTypeHint == 'voice' &&
-                        message.mediaBase64 != null
-                    ? _VoiceMessagePlayer(
-                        base64Audio: message.mediaBase64!,
-                        durationHintSec: message.mediaDurationSec,
-                        fgColor: fgColor,
-                      )
-                    : attachment != null
-                    ? InkWell(
-                        onTap: () => onDownload(attachment),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.insert_drive_file, color: fgColor),
-                            const SizedBox(width: 8),
-                            Flexible(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    attachment.fileName,
-                                    style: TextStyle(color: fgColor),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  Text(
-                                    _formatBytes(attachment.sizeBytes),
-                                    style: TextStyle(
-                                      color: fgColor.withValues(alpha: 0.75),
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Icon(Icons.download, color: fgColor, size: 18),
-                          ],
-                        ),
-                      )
-                    : Text(message.text, style: TextStyle(color: fgColor)),
-              ),
-              // Timestamp + delivery/read tick, bottom-right inside the bubble —
-              // WhatsApp's own placement. Ticks only ever appear on OWN messages
-              // (they show what happened to a message you sent); an incoming message
-              // never carries them, on WhatsApp or here.
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _formatBubbleTime(message.sentAt),
-                    style: TextStyle(
-                      color: fgColor.withValues(alpha: 0.6),
-                      fontSize: 11,
-                    ),
-                  ),
-                  if (message.isOwn) ...[
-                    const SizedBox(width: 4),
-                    Builder(
-                      builder: (context) {
-                        final tick = tickStateFor(status, pending: pending);
-                        if (tick == TickState.sending) {
-                          return Icon(
-                            Icons.access_time,
-                            size: 13,
-                            color: fgColor.withValues(alpha: 0.6),
-                          );
-                        }
-                        return Icon(
-                          tick == TickState.sent ? Icons.done : Icons.done_all,
-                          size: 15,
-                          color: tick == TickState.read
-                              ? const Color(0xFF34B7F1)
-                              : fgColor.withValues(alpha: 0.6),
-                        );
-                      },
-                    ),
                   ],
-                ],
+                ),
               ),
-            ],
-          ),
-        ),
+            ),
+        ],
       ),
     );
   }

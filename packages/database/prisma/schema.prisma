@@ -497,6 +497,15 @@ model MessageRecipient {
   @@map("message_recipients")
 }
 
+/// INTENTIONALLY UNUSED — kept for historical/documentation reasons, not wired
+/// into any route. This table's shape (plaintext `userId`/`emoji` visible to the
+/// server) is exactly the design reactions did NOT ship with: docs/13-roadmap.md's
+/// reactions pass instead sends a reaction as a real E2E-encrypted `Message` row
+/// (`contentTypeHint: 'reaction'`, plaintext `{targetMessageId, emoji}` — see
+/// apps/web/lib/message-content.ts's `ReactionPayload`), so the server never
+/// learns who reacted with what, same as it never learns any other message's
+/// content. A future cleanup migration could drop this table outright; it's left
+/// standing for now rather than folded into an unrelated change's diff.
 model MessageReaction {
   messageId String   @map("message_id") @db.Uuid
   userId    String   @map("user_id") @db.Uuid

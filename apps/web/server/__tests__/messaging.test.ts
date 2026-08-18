@@ -11,7 +11,7 @@ import {
 } from '@comm/crypto';
 import type { NewDeviceRegistration, SendMessageRequest } from '@comm/types';
 import { registerDevice } from '../modules/devices/service';
-import { createOrGetDirectConversation, requireConversationMembership } from '../modules/conversations/service';
+import { createOrGetDirectConversation, requireConversationMembership, getConversation } from '../modules/conversations/service';
 import { sendMessage, listMessages, deleteMessage, markConversationRead } from '../modules/messages/service';
 import { getKeyBundle } from '../modules/keys/service';
 import { createActiveUser, deleteTestUser } from './helpers';
@@ -240,6 +240,77 @@ describe('messaging (real crypto end-to-end)', () => {
 
     await expect(listMessages(outsider.userId, 'irrelevant', conversation.id, undefined, 10)).rejects.toMatchObject({ code: 'FORBIDDEN' });
     await expect(requireConversationMembership(outsider.userId, conversation.id)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  /**
+   * Reactions (docs/13-roadmap.md) are ordinary `Message` rows with
+   * `contentTypeHint: 'reaction'` — sendMessage/listMessages never special-case
+   * them at all (see lib/message-content.ts's module docstring). The one place
+   * that DOES need to treat them differently is `toSummary` (server/modules/
+   * conversations/service.ts): a reaction is a control message, not content, so
+   * it must never bump a conversation's `unreadCount` or `lastMessageAt` the way
+   * a real message does — this is the test for that exclusion.
+   */
+  it('reacting to a message does not bump the conversation unread count or lastMessageAt', async () => {
+    const { alice, bob, aliceDevice, aliceDeviceId, bobDeviceId, conversation } = await setupConversation();
+
+    async function encryptFor(text: string) {
+      const bundle = await getKeyBundle(bob.userId, bobDeviceId);
+      const publicBundle: PublicKeyBundle = {
+        identityAgreementKey: Buffer.from(bundle.identityKey.agreementPublicKey, 'base64'),
+        identitySigningKey: Buffer.from(bundle.identityKey.signingPublicKey, 'base64'),
+        signedPreKeyId: bundle.signedPreKey.keyId,
+        signedPreKeyPublic: Buffer.from(bundle.signedPreKey.publicKey, 'base64'),
+        signedPreKeySignature: Buffer.from(bundle.signedPreKey.signature, 'base64'),
+        oneTimePreKeyId: bundle.oneTimePreKey?.keyId ?? null,
+        oneTimePreKeyPublic: bundle.oneTimePreKey ? Buffer.from(bundle.oneTimePreKey.publicKey, 'base64') : null,
+      };
+      const { session, x3dhInit } = createOutboundSession(aliceDevice.identity, publicBundle);
+      return { envelope: encryptMessage(session, new TextEncoder().encode(text)), x3dhInit };
+    }
+
+    const real = await encryptFor('a real message worth a badge');
+    const realMessageId = crypto.randomUUID();
+    await sendMessage(
+      { userId: alice.userId, deviceId: aliceDeviceId },
+      conversation.id,
+      {
+        messageId: realMessageId,
+        envelopeType: 'x3dh_ratchet_1to1',
+        recipients: [{ deviceId: bobDeviceId, envelope: real.envelope, x3dhInit: real.x3dhInit }],
+        contentTypeHint: 'text',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+
+    const before = await getConversation(bob.userId, conversation.id);
+    expect(before.unreadCount).toBe(1);
+    expect(before.lastMessageAt).not.toBeNull();
+
+    const reaction = await encryptFor(JSON.stringify({ targetMessageId: realMessageId, emoji: '👍' }));
+    await sendMessage(
+      { userId: alice.userId, deviceId: aliceDeviceId },
+      conversation.id,
+      {
+        messageId: crypto.randomUUID(),
+        envelopeType: 'x3dh_ratchet_1to1',
+        recipients: [{ deviceId: bobDeviceId, envelope: reaction.envelope, x3dhInit: reaction.x3dhInit }],
+        contentTypeHint: 'reaction',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+
+    const after = await getConversation(bob.userId, conversation.id);
+    expect(after.unreadCount).toBe(1); // still 1, not 2 — the reaction itself doesn't count
+    expect(after.lastMessageAt).toBe(before.lastMessageAt); // still the real message, not the reaction
+
+    // The reaction is still a genuine, retrievable Message row on the wire —
+    // just excluded from summary metadata, not from delivery itself.
+    const page = await listMessages(bob.userId, bobDeviceId, conversation.id, undefined, 10);
+    const reactionDto = page.items.find((m) => m.contentTypeHint === 'reaction');
+    expect(reactionDto).toBeDefined();
   });
 
   it('deleting a message tombstones it: ciphertext is actually nulled, not just flagged', async () => {

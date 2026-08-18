@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { MessageDto, MessageDeletionReason, DeviceSummary } from '@comm/types';
 import { utf8ToBytes, bytesToBase64 } from '@comm/crypto';
 import { cn } from '@/lib/cn';
@@ -17,7 +17,13 @@ import {
   type CachedMessage,
 } from '@/lib/crypto/message-cache';
 import { connectRealtime, onRealtimeEvent, sendRealtimeEvent } from '@/lib/realtime-client';
-import { decodeMessagePlaintext, deletedPlaceholderText, type AttachmentDescriptor } from '@/lib/message-content';
+import {
+  decodeMessagePlaintext,
+  deletedPlaceholderText,
+  buildReactionState,
+  type AttachmentDescriptor,
+  type ReactionPayload,
+} from '@/lib/message-content';
 import { encryptAttachment } from '@/lib/crypto/attachment-crypto';
 import { uploadAttachmentCiphertext } from '@/lib/media-client';
 import { EmojiPicker } from './emoji-picker';
@@ -149,6 +155,28 @@ export function MessageThread({
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  // `reaction` rows live in the same cached `messages` array as everything else
+  // (see lib/message-content.ts's module docstring) but are never rendered as
+  // bubbles — `visibleMessages` below is what the thread actually maps over,
+  // while this resolves each real message's current reaction pills from the
+  // full array, reactions included.
+  const visibleMessages = messages.filter((m) => m.contentTypeHint !== 'reaction');
+  const reactionState = useMemo(() => buildReactionState(messages, currentUserId), [messages, currentUserId]);
+
+  /** Tapping a pill (or picking an emoji from the react trigger) toggles: the same
+   * emoji you already reacted with removes it, any other emoji (including a first
+   * reaction) replaces it — matches Telegram/WhatsApp's one-reaction-per-person
+   * model. Goes through the exact same `sendEncrypted` every other content type
+   * uses, so it gets full multi-device fan-out for free and needs no dedicated
+   * server route at all. */
+  async function handleReact(targetMessageId: string, emoji: string) {
+    setActiveMenuId(null);
+    const mine = reactionState.get(targetMessageId)?.mine ?? null;
+    const next = mine === emoji ? null : emoji;
+    const payload: ReactionPayload = { targetMessageId, emoji: next };
+    await sendEncrypted({ contentTypeHint: 'reaction', plaintext: utf8ToBytes(JSON.stringify(payload)) });
+  }
 
   // Local, immediate enforcement of the disappearing-message timer — checked on
   // mount/timer-change and then periodically, not just once, since a message can
@@ -413,7 +441,7 @@ export function MessageThread({
    * right away (WhatsApp-style instant bubble with a clock icon), POST, and roll the
    * optimistic bubble back out of the local cache if the send actually fails. */
   async function sendEncrypted(opts: {
-    contentTypeHint: 'text' | 'voice' | 'image' | 'media';
+    contentTypeHint: 'text' | 'voice' | 'image' | 'media' | 'reaction';
     plaintext: Uint8Array;
     draftText?: string;
     mediaDurationSec?: number;
@@ -725,13 +753,13 @@ export function MessageThread({
             </button>
           </div>
         )}
-        {ready && messages.length === 0 && (
+        {ready && visibleMessages.length === 0 && (
           <p className="py-8 text-center text-sm text-muted-foreground">
             No messages yet. Say hello to {otherDisplayName}.
           </p>
         )}
-        {messages.map((m, i) => {
-          const prev = messages[i - 1];
+        {visibleMessages.map((m, i) => {
+          const prev = visibleMessages[i - 1];
           const showDateSeparator = !prev || !isSameCalendarDay(prev.sentAt, m.sentAt);
           const grouped =
             !showDateSeparator &&
@@ -739,6 +767,7 @@ export function MessageThread({
             prev.isOwn === m.isOwn &&
             new Date(m.sentAt).getTime() - new Date(prev.sentAt).getTime() < 5 * 60_000;
           const replySource = m.replyToMessageId ? messages.find((mm) => mm.id === m.replyToMessageId) : undefined;
+          const reactions = reactionState.get(m.id)?.summaries ?? [];
 
           return (
             <div key={m.id}>
@@ -810,46 +839,84 @@ export function MessageThread({
                       {formatBubbleTime(m.sentAt)}
                       {ticksFor(m)}
                     </p>
+
+                    {reactions.length > 0 && (
+                      <div
+                        className={cn(
+                          'absolute -bottom-3 flex gap-0.5 rounded-full border border-border bg-background px-1 py-0.5 shadow-sm',
+                          m.isOwn ? 'right-2' : 'left-2',
+                        )}
+                      >
+                        {reactions.map((r) => (
+                          <button
+                            key={r.emoji}
+                            type="button"
+                            onClick={() => void handleReact(m.id, r.emoji)}
+                            title={r.mine ? 'Remove your reaction' : `React with ${r.emoji}`}
+                            className={cn(
+                              'flex items-center gap-0.5 rounded-full px-1.5 text-[11px] leading-5',
+                              r.mine ? 'bg-primary/15 text-primary' : 'text-foreground',
+                            )}
+                          >
+                            <span>{r.emoji}</span>
+                            {r.count > 1 && <span className="font-medium">{r.count}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {!m.deleted && (
-                    <div className="relative opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-                      <button
-                        type="button"
-                        onClick={() => setActiveMenuId((id) => (id === m.id ? null : m.id))}
-                        aria-label="Message actions"
-                        className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
-                      >
-                        <IconMoreVertical className="h-4 w-4" />
-                      </button>
-                      {activeMenuId === m.id && (
-                        <div
-                          className={cn(
-                            'absolute top-8 z-10 w-40 overflow-hidden rounded-xl border border-border bg-background py-1 shadow-lg',
-                            m.isOwn ? 'right-0' : 'left-0',
-                          )}
+                    <div
+                      className={cn(
+                        'flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100',
+                        reactions.length > 0 && 'self-start',
+                      )}
+                    >
+                      <EmojiPicker
+                        onSelect={(emoji) => void handleReact(m.id, emoji)}
+                        size="sm"
+                        align={m.isOwn ? 'right' : 'left'}
+                        ariaLabel="React to message"
+                      />
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setActiveMenuId((id) => (id === m.id ? null : m.id))}
+                          aria-label="Message actions"
+                          className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
                         >
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setReplyingTo(m);
-                              setActiveMenuId(null);
-                            }}
-                            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+                          <IconMoreVertical className="h-4 w-4" />
+                        </button>
+                        {activeMenuId === m.id && (
+                          <div
+                            className={cn(
+                              'absolute top-8 z-10 w-40 overflow-hidden rounded-xl border border-border bg-background py-1 shadow-lg',
+                              m.isOwn ? 'right-0' : 'left-0',
+                            )}
                           >
-                            <IconReply className="h-4 w-4" /> Reply
-                          </button>
-                          {m.isOwn && (
                             <button
                               type="button"
-                              onClick={() => void handleDelete(m.id)}
-                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-danger hover:bg-muted"
+                              onClick={() => {
+                                setReplyingTo(m);
+                                setActiveMenuId(null);
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
                             >
-                              <IconTrash className="h-4 w-4" /> Delete
+                              <IconReply className="h-4 w-4" /> Reply
                             </button>
-                          )}
-                        </div>
-                      )}
+                            {m.isOwn && (
+                              <button
+                                type="button"
+                                onClick={() => void handleDelete(m.id)}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-danger hover:bg-muted"
+                              >
+                                <IconTrash className="h-4 w-4" /> Delete
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>

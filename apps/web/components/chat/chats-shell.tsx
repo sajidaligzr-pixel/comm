@@ -26,6 +26,19 @@ function toPreview(m: CachedMessage): ConversationPreview {
   return { text: m.text, isOwn: m.isOwn, contentTypeHint: m.contentTypeHint, deleted: !!m.deleted, deletedReason: m.deletedReason };
 }
 
+/** The last cached message that's actually preview-worthy — skips `reaction` rows
+ * (a reaction to some earlier message is never itself "the last message" for
+ * sidebar-preview purposes, same reasoning server/modules/conversations/service.ts's
+ * `toSummary` excludes them from `lastMessageAt`/`unreadCount`). Reaction rows still
+ * get cached normally by every call site below; this is only about which cached row
+ * is *shown*. */
+function lastPreviewable(cached: CachedMessage[]): CachedMessage | undefined {
+  for (let i = cached.length - 1; i >= 0; i--) {
+    if (cached[i]!.contentTypeHint !== 'reaction') return cached[i];
+  }
+  return undefined;
+}
+
 /**
  * The persistent chat frame — sidebar (search + conversation list) on the left,
  * whichever thread/empty-state page is active as `children` on the right, WhatsApp
@@ -112,7 +125,7 @@ export function ChatsShell({
     async function hydrate(ids: string[]) {
       for (const id of ids) {
         const cached = await loadCachedMessages(kek!, id);
-        const last = cached[cached.length - 1];
+        const last = lastPreviewable(cached);
         if (!cancelled && last) {
           setPreviews((prev) => ({ ...prev, [id]: toPreview(last) }));
         }
@@ -158,17 +171,24 @@ export function ChatsShell({
       // the fragile-WS-only gap already found and fixed everywhere else.
       apiFetch(`/api/messages/${message.id}/delivered`, { method: 'POST' }).catch(() => undefined);
 
-      setConversations((prev) => {
-        const idx = prev.findIndex((c) => c.id === message.conversationId);
-        if (idx === -1) return prev;
-        const current = prev[idx]!;
-        const updated: ConversationSummary = {
-          ...current,
-          lastMessageAt: message.sentAt,
-          unreadCount: isOpen ? current.unreadCount : current.unreadCount + 1,
-        };
-        return [updated, ...prev.slice(0, idx), ...prev.slice(idx + 1)];
-      });
+      // A reaction is a control message, not content — see `lastPreviewable`'s
+      // docstring above. Skipping this block entirely for one means it neither
+      // bumps the conversation to the top of the list nor increments its unread
+      // badge, matching what `toSummary` already does server-side for the exact
+      // same reason.
+      if (message.contentTypeHint !== 'reaction') {
+        setConversations((prev) => {
+          const idx = prev.findIndex((c) => c.id === message.conversationId);
+          if (idx === -1) return prev;
+          const current = prev[idx]!;
+          const updated: ConversationSummary = {
+            ...current,
+            lastMessageAt: message.sentAt,
+            unreadCount: isOpen ? current.unreadCount : current.unreadCount + 1,
+          };
+          return [updated, ...prev.slice(0, idx), ...prev.slice(idx + 1)];
+        });
+      }
 
       void (async () => {
         if (!conversationsRef.current.some((c) => c.id === message.conversationId)) {
@@ -199,7 +219,12 @@ export function ChatsShell({
             replyToMessageId: message.replyToMessageId,
           };
           await appendCachedMessage(kek, cached);
-          setPreviews((prev) => ({ ...prev, [message.conversationId]: toPreview(cached) }));
+          // Still cached above (so it's there once the thread is opened and
+          // reaction pills get computed from the full cache), just never shown
+          // as the sidebar preview itself.
+          if (cached.contentTypeHint !== 'reaction') {
+            setPreviews((prev) => ({ ...prev, [message.conversationId]: toPreview(cached) }));
+          }
         } catch {
           // Undecryptable on this device — the same honest limitation
           // message-thread.tsx's catch-up loop documents.
@@ -217,7 +242,7 @@ export function ChatsShell({
         const kek = getCurrentKek();
         if (!kek) return;
         const updated = await markCachedMessageDeleted(kek, conversationId, messageId, reason);
-        const last = updated[updated.length - 1];
+        const last = lastPreviewable(updated);
         setPreviews((prev) => ({ ...prev, [conversationId]: last ? toPreview(last) : prev[conversationId] }));
       })();
     });

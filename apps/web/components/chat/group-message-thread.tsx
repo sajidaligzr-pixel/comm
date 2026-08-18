@@ -16,7 +16,7 @@
  * rows are still recorded server-side, just not surfaced as a "seen by N" UI) — all
  * flagged, not silently missing.
  */
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { MessageDto, GroupMemberDto, MessageDeletionReason } from '@comm/types';
 import { utf8ToBytes, bytesToBase64 } from '@comm/crypto';
 import { cn } from '@/lib/cn';
@@ -32,7 +32,7 @@ import {
   type CachedMessage,
 } from '@/lib/crypto/message-cache';
 import { connectRealtime, onRealtimeEvent } from '@/lib/realtime-client';
-import { decodeMessagePlaintext, deletedPlaceholderText } from '@/lib/message-content';
+import { decodeMessagePlaintext, deletedPlaceholderText, buildReactionState, type ReactionPayload } from '@/lib/message-content';
 import { encryptAttachment } from '@/lib/crypto/attachment-crypto';
 import { uploadAttachmentCiphertext } from '@/lib/media-client';
 import { useGroupSession } from '@/components/group/group-session-provider';
@@ -115,6 +115,13 @@ export function GroupMessageThread({
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+
+  // See message-thread.tsx's identical pair — `reaction` rows ride the same shared
+  // group-ratchet envelope as any other content type (no server or crypto changes
+  // needed at all) but are filtered out of the rendered bubble list and folded into
+  // per-message pill state instead.
+  const visibleMessages = messages.filter((m) => m.contentTypeHint !== 'reaction');
+  const reactionState = useMemo(() => buildReactionState(messages, currentUserId), [messages, currentUserId]);
 
   // Local, immediate enforcement of the disappearing-message timer — same as
   // message-thread.tsx's identical effect. apps/worker's hourly sweep (which
@@ -300,7 +307,7 @@ export function GroupMessageThread({
   }, []);
 
   async function sendEncrypted(opts: {
-    contentTypeHint: 'text' | 'voice' | 'image' | 'media';
+    contentTypeHint: 'text' | 'voice' | 'image' | 'media' | 'reaction';
     plaintext: Uint8Array;
     draftText?: string;
     mediaDurationSec?: number;
@@ -455,6 +462,17 @@ export function GroupMessageThread({
     }
   }
 
+  /** See message-thread.tsx's identical function — same one-reaction-per-person
+   * toggle semantics, sent through the group's shared ratchet envelope instead of
+   * per-device ones, but otherwise unchanged. */
+  async function handleReact(targetMessageId: string, emoji: string) {
+    setActiveMenuId(null);
+    const mine = reactionState.get(targetMessageId)?.mine ?? null;
+    const next = mine === emoji ? null : emoji;
+    const payload: ReactionPayload = { targetMessageId, emoji: next };
+    await sendEncrypted({ contentTypeHint: 'reaction', plaintext: utf8ToBytes(JSON.stringify(payload)) });
+  }
+
   async function handleDelete(messageId: string) {
     setActiveMenuId(null);
     if (!window.confirm('Delete this message for everyone?')) return;
@@ -549,14 +567,15 @@ export function GroupMessageThread({
             </button>
           </div>
         )}
-        {ready && messages.length === 0 && (
+        {ready && visibleMessages.length === 0 && (
           <p className="py-8 text-center text-sm text-muted-foreground">No messages yet. Say hello to the group.</p>
         )}
-        {messages.map((m, i) => {
-          const prev = messages[i - 1];
+        {visibleMessages.map((m, i) => {
+          const prev = visibleMessages[i - 1];
           const showDateSeparator = !prev || !isSameCalendarDay(prev.sentAt, m.sentAt);
           const showSenderName = !m.isOwn && (!prev || prev.senderUserId !== m.senderUserId || showDateSeparator);
           const grouped = !showDateSeparator && prev && prev.senderUserId === m.senderUserId && !showSenderName;
+          const reactions = reactionState.get(m.id)?.summaries ?? [];
 
           return (
             <div key={m.id}>
@@ -603,27 +622,71 @@ export function GroupMessageThread({
                     <p className={cn('mt-0.5 text-right text-[10px]', m.isOwn ? 'text-primary-foreground/70' : 'text-muted-foreground')}>
                       {formatBubbleTime(m.sentAt)}
                     </p>
+
+                    {reactions.length > 0 && (
+                      <div
+                        className={cn(
+                          'absolute -bottom-3 flex gap-0.5 rounded-full border border-border bg-background px-1 py-0.5 shadow-sm',
+                          m.isOwn ? 'right-2' : 'left-2',
+                        )}
+                      >
+                        {reactions.map((r) => (
+                          <button
+                            key={r.emoji}
+                            type="button"
+                            onClick={() => void handleReact(m.id, r.emoji)}
+                            title={r.mine ? 'Remove your reaction' : `React with ${r.emoji}`}
+                            className={cn(
+                              'flex items-center gap-0.5 rounded-full px-1.5 text-[11px] leading-5',
+                              r.mine ? 'bg-primary/15 text-primary' : 'text-foreground',
+                            )}
+                          >
+                            <span>{r.emoji}</span>
+                            {r.count > 1 && <span className="font-medium">{r.count}</span>}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
-                  {!m.deleted && m.isOwn && (
-                    <div className="relative opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
-                      <button
-                        type="button"
-                        onClick={() => setActiveMenuId((id) => (id === m.id ? null : m.id))}
-                        aria-label="Message actions"
-                        className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
-                      >
-                        <IconMoreVertical className="h-4 w-4" />
-                      </button>
-                      {activeMenuId === m.id && (
-                        <div className="absolute right-0 top-8 z-10 w-40 overflow-hidden rounded-xl border border-border bg-background py-1 shadow-lg">
+                  {/* Reacting is open to every member (not just `m.isOwn` — unlike
+                      Delete, which stays sender-only just below), so this wrapper
+                      is no longer gated on ownership the way the old delete-only
+                      menu was. */}
+                  {!m.deleted && (
+                    <div
+                      className={cn(
+                        'flex items-center gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100',
+                        reactions.length > 0 && 'self-start',
+                      )}
+                    >
+                      <EmojiPicker
+                        onSelect={(emoji) => void handleReact(m.id, emoji)}
+                        size="sm"
+                        align={m.isOwn ? 'right' : 'left'}
+                        ariaLabel="React to message"
+                      />
+                      {m.isOwn && (
+                        <div className="relative">
                           <button
                             type="button"
-                            onClick={() => void handleDelete(m.id)}
-                            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-danger hover:bg-muted"
+                            onClick={() => setActiveMenuId((id) => (id === m.id ? null : m.id))}
+                            aria-label="Message actions"
+                            className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
                           >
-                            <IconTrash className="h-4 w-4" /> Delete
+                            <IconMoreVertical className="h-4 w-4" />
                           </button>
+                          {activeMenuId === m.id && (
+                            <div className="absolute right-0 top-8 z-10 w-40 overflow-hidden rounded-xl border border-border bg-background py-1 shadow-lg">
+                              <button
+                                type="button"
+                                onClick={() => void handleDelete(m.id)}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-danger hover:bg-muted"
+                              >
+                                <IconTrash className="h-4 w-4" /> Delete
+                              </button>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
