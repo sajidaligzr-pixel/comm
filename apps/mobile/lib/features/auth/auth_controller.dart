@@ -29,7 +29,13 @@ String _guessDeviceName() {
 }
 
 class AuthController extends StateNotifier<AuthState> {
-  AuthController(this._authApi, this._usersApi, this._apiClient) : super(const AuthChecking()) {
+  AuthController(this._authApi, this._usersApi, this._apiClient)
+    : super(const AuthChecking()) {
+    // The one place ApiClient can reach back into auth state — see
+    // ApiClient.onSessionExpired's own docstring for exactly when this fires
+    // (an access-token refresh was attempted and still failed, meaning the
+    // session is genuinely gone, not just a routine login-flow rejection).
+    _apiClient.onSessionExpired = forceSignOut;
     bootstrap();
   }
 
@@ -61,7 +67,10 @@ class AuthController extends StateNotifier<AuthState> {
 
     final unlocked = await unlockLocalIdentity(password);
     if (unlocked == null) {
-      throw ApiException('AUTH_INVALID', "Could not unlock this device's local keys with that password.");
+      throw ApiException(
+        'AUTH_INVALID',
+        "Could not unlock this device's local keys with that password.",
+      );
     }
     setUnlockedIdentity(unlocked.kek, unlocked.identity);
     state = AuthSignedIn(current.profile, mustChangePassword: false);
@@ -102,11 +111,19 @@ class AuthController extends StateNotifier<AuthState> {
     final AuthSessionResponse result;
     try {
       result = returning
-          ? await _authApi.login(username: username, password: password, deviceId: knownDeviceId)
+          ? await _authApi.login(
+              username: username,
+              password: password,
+              deviceId: knownDeviceId,
+            )
           : await _authApi.login(
               username: username,
               password: password,
-              newDevice: NewDeviceRegistration(name: _guessDeviceName(), deviceType: deviceTypeMobile, keyBundle: newIdentity!.keyBundle),
+              newDevice: NewDeviceRegistration(
+                name: _guessDeviceName(),
+                deviceType: deviceTypeMobile,
+                keyBundle: newIdentity!.keyBundle,
+              ),
             );
     } on ApiException catch (e) {
       if (e.code == 'DEVICE_REVOKED') {
@@ -127,7 +144,10 @@ class AuthController extends StateNotifier<AuthState> {
         // identity being re-wrapped to match — surfaced as an error rather than
         // silently regenerating a new identity, which would orphan every session
         // built on the old one.
-        throw ApiException('AUTH_INVALID', "Could not unlock this device's local keys with that password.");
+        throw ApiException(
+          'AUTH_INVALID',
+          "Could not unlock this device's local keys with that password.",
+        );
       }
       setUnlockedIdentity(unlocked.kek, unlocked.identity);
     } else {
@@ -135,7 +155,10 @@ class AuthController extends StateNotifier<AuthState> {
     }
 
     final profile = await _usersApi.me();
-    state = AuthSignedIn(profile, mustChangePassword: result.mustChangePassword);
+    state = AuthSignedIn(
+      profile,
+      mustChangePassword: result.mustChangePassword,
+    );
   }
 
   Future<void> redeemInvite(String token, String password) async {
@@ -146,7 +169,11 @@ class AuthController extends StateNotifier<AuthState> {
     final result = await _authApi.redeemInvite(
       token: token,
       password: password,
-      device: NewDeviceRegistration(name: _guessDeviceName(), deviceType: deviceTypeMobile, keyBundle: newIdentity.keyBundle),
+      device: NewDeviceRegistration(
+        name: _guessDeviceName(),
+        deviceType: deviceTypeMobile,
+        keyBundle: newIdentity.keyBundle,
+      ),
     );
 
     await setRememberedDeviceId(info.username, result.deviceId);
@@ -154,7 +181,10 @@ class AuthController extends StateNotifier<AuthState> {
     setUnlockedIdentity(newIdentity.kek, newIdentity.identity);
 
     final profile = await _usersApi.me();
-    state = AuthSignedIn(profile, mustChangePassword: result.mustChangePassword);
+    state = AuthSignedIn(
+      profile,
+      mustChangePassword: result.mustChangePassword,
+    );
   }
 
   Future<void> markPasswordChanged() async {
@@ -186,6 +216,22 @@ class AuthController extends StateNotifier<AuthState> {
     state = const AuthSignedOut();
   }
 
+  /// Called via ApiClient.onSessionExpired when a request discovers the session
+  /// is genuinely, unrecoverably gone (see that field's docstring). Same local
+  /// cleanup as [logout], minus the server round trip — there's no live session
+  /// left server-side to tell, and attempting one more authenticated call here
+  /// would just fail (or, worse, loop) the same way. Router redirect logic
+  /// (app/router.dart's computeAuthRedirect) already forces any screen back to
+  /// /login the instant this state change lands, so nothing else has to notice
+  /// this happened.
+  Future<void> forceSignOut() async {
+    if (state is! AuthSignedIn && state is! AuthNeedsUnlock) return;
+    await _apiClient.clearCookies();
+    clearUnlockedIdentity();
+    clearActiveAccount();
+    state = const AuthSignedOut();
+  }
+
   /// "Forget this device" — explicit, destructive, separate from logout. Wipes the
   /// local identity/session cache (crypto/local_identity.dart, storage/blob_store.dart)
   /// so a future login on this phone registers as a brand-new device.
@@ -196,6 +242,12 @@ class AuthController extends StateNotifier<AuthState> {
   }
 }
 
-final authControllerProvider = StateNotifierProvider<AuthController, AuthState>((ref) {
-  return AuthController(ref.watch(authApiProvider), ref.watch(usersApiProvider), ref.watch(apiClientProvider));
-});
+final authControllerProvider = StateNotifierProvider<AuthController, AuthState>(
+  (ref) {
+    return AuthController(
+      ref.watch(authApiProvider),
+      ref.watch(usersApiProvider),
+      ref.watch(apiClientProvider),
+    );
+  },
+);

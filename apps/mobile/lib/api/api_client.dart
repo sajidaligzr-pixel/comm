@@ -48,7 +48,9 @@ class ApiClient {
     if (_instance != null) return _instance!;
 
     final supportDir = await getApplicationSupportDirectory();
-    final cookieJar = PersistCookieJar(storage: FileStorage('${supportDir.path}/.cookies/'));
+    final cookieJar = PersistCookieJar(
+      storage: FileStorage('${supportDir.path}/.cookies/'),
+    );
 
     final dio = Dio(
       BaseOptions(
@@ -70,13 +72,24 @@ class ApiClient {
 
   static ApiClient get instance {
     final i = _instance;
-    if (i == null) throw StateError('ApiClient.initialize() must be awaited before use (see main.dart).');
+    if (i == null) {
+      throw StateError(
+        'ApiClient.initialize() must be awaited before use (see main.dart).',
+      );
+    }
     return i;
   }
 
   /// Shared with `realtime/ws_client.dart`, which needs the same persisted cookies
   /// to authenticate the WS upgrade (no browser here to ride them automatically).
   PersistCookieJar get cookieJar => _cookieJar;
+
+  /// Set by `AuthController`'s constructor — the one place this app can react to
+  /// "the session is genuinely, unrecoverably gone" (an access token expired AND
+  /// the refresh attempt below that should have silently fixed it also failed —
+  /// see `_refreshAccessToken`'s docstring) regardless of which screen's request
+  /// happened to be the one that discovered it.
+  void Function()? onSessionExpired;
 
   Future<String?> _readCsrfToken() async {
     final uri = Uri.parse(AppConfig.apiBaseUrl);
@@ -87,6 +100,67 @@ class ApiClient {
     return null;
   }
 
+  static const _refreshPath = '/api/auth/refresh';
+
+  /// Coalesces concurrent refresh attempts — several requests can discover an
+  /// expired access token around the same moment (e.g. a screen's own parallel
+  /// fetches), and only one of them should actually call `/api/auth/refresh`;
+  /// the rest just wait on that same in-flight attempt rather than each
+  /// triggering their own (which would race the server's refresh-token
+  /// rotation and fail all but one anyway — docs/07-auth-architecture.md).
+  Future<bool>? _refreshInFlight;
+
+  Future<bool> _refreshAccessToken() {
+    return _refreshInFlight ??= _doRefresh().whenComplete(
+      () => _refreshInFlight = null,
+    );
+  }
+
+  Future<bool> _doRefresh() async {
+    try {
+      // Deliberately not requestVoid/request<T> — those funnel back through
+      // this same auth-expiry handling, which would recurse the moment a
+      // refresh itself ever came back AUTH_EXPIRED. No CSRF header either:
+      // the server route itself doesn't require one for this one endpoint —
+      // it authenticates purely off the HttpOnly refresh-token cookie, which
+      // a cross-site request can't forge the value of in the first place.
+      final res = await _dio.request<dynamic>(
+        _refreshPath,
+        options: Options(method: 'POST'),
+      );
+      final json = res.data;
+      return json is Map<String, dynamic> && json['ok'] == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<Response<dynamic>> _rawCall(
+    String path,
+    String method,
+    Object? body,
+    Map<String, dynamic>? query,
+  ) async {
+    final headers = <String, dynamic>{};
+    if (method != 'GET') {
+      final csrf = await _readCsrfToken();
+      if (csrf != null) headers[_csrfHeaderName] = csrf;
+    }
+    try {
+      return await _dio.request<dynamic>(
+        path,
+        data: body,
+        queryParameters: query,
+        options: Options(method: method, headers: headers),
+      );
+    } on DioException catch (e) {
+      throw ApiException(
+        'NETWORK_ERROR',
+        e.message ?? 'Could not reach the server.',
+      );
+    }
+  }
+
   Future<T> request<T>(
     String path, {
     String? method,
@@ -95,31 +169,52 @@ class ApiClient {
     required T Function(dynamic data) parse,
   }) async {
     final resolvedMethod = method ?? (body != null ? 'POST' : 'GET');
-    final headers = <String, dynamic>{};
-    if (resolvedMethod != 'GET') {
-      final csrf = await _readCsrfToken();
-      if (csrf != null) headers[_csrfHeaderName] = csrf;
+    var res = await _rawCall(path, resolvedMethod, body, query);
+    var json = res.data;
+
+    // Access tokens are short-lived by design (~15 min — docs/07-auth-
+    // architecture.md) specifically so the server can refresh them
+    // transparently; that only works if a client actually calls
+    // /api/auth/refresh when one expires. Found live: nothing anywhere in
+    // this app (nor, it turns out, apps/web — neither client ever calls this
+    // route) was doing that, so every session hit a hard 15-minute wall of
+    // real use before every subsequent request started failing with "Your
+    // session has expired." This is that missing piece: transparently
+    // refresh and retry the one request that discovered it, once, rather
+    // than surfacing an auth error to whatever screen happened to be
+    // mid-action when the clock ran out.
+    if (json is Map<String, dynamic> &&
+        json['ok'] != true &&
+        path != _refreshPath) {
+      final code = (json['error'] as Map<String, dynamic>?)?['code'] as String?;
+      if (code == 'AUTH_EXPIRED' && await _refreshAccessToken()) {
+        res = await _rawCall(path, resolvedMethod, body, query);
+        json = res.data;
+      }
     }
 
-    late final Response<dynamic> res;
-    try {
-      res = await _dio.request<dynamic>(
-        path,
-        data: body,
-        queryParameters: query,
-        options: Options(method: resolvedMethod, headers: headers),
-      );
-    } on DioException catch (e) {
-      throw ApiException('NETWORK_ERROR', e.message ?? 'Could not reach the server.');
-    }
-
-    final json = res.data;
     if (json is! Map<String, dynamic>) {
-      throw ApiException('INTERNAL', 'Malformed response from server (status ${res.statusCode}).');
+      throw ApiException(
+        'INTERNAL',
+        'Malformed response from server (status ${res.statusCode}).',
+      );
     }
     if (json['ok'] != true) {
       final error = json['error'] as Map<String, dynamic>?;
-      throw ApiException((error?['code'] as String?) ?? 'INTERNAL', (error?['message'] as String?) ?? 'Something went wrong.');
+      final code = (error?['code'] as String?) ?? 'INTERNAL';
+      // Only AUTH_EXPIRED surviving a refresh attempt means the session is
+      // truly gone (the refresh token itself is expired/revoked/reuse-
+      // detected). Deliberately NOT triggered on a bare AUTH_INVALID/
+      // DEVICE_REVOKED here — both codes are also returned for entirely
+      // routine, not-yet-signed-in failures (a wrong password on the login
+      // screen, a stale remembered device id AuthController.login already
+      // handles locally) that must never be misread as "force-sign-out an
+      // active session."
+      if (code == 'AUTH_EXPIRED') onSessionExpired?.call();
+      throw ApiException(
+        code,
+        (error?['message'] as String?) ?? 'Something went wrong.',
+      );
     }
     return parse(json['data']);
   }
@@ -136,4 +231,6 @@ class ApiClient {
 /// Marker used by callers that need to distinguish "definitely offline/unreachable"
 /// from a real server-side error code — kept here rather than importing `dart:io`
 /// elsewhere just for `SocketException`.
-bool isNetworkError(Object err) => err is ApiException && err.code == 'NETWORK_ERROR' || err is SocketException;
+bool isNetworkError(Object err) =>
+    err is ApiException && err.code == 'NETWORK_ERROR' ||
+    err is SocketException;
