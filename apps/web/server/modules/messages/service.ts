@@ -1,22 +1,32 @@
 import { prisma, Prisma } from '@comm/database';
 import { AppError, type SendMessageRequest, type MessageDto } from '@comm/types';
-import { requireConversationMembership, getGroupMemberPrimaryDevices } from '../conversations/service';
+import {
+  requireConversationMembership,
+  getGroupMemberPrimaryDevices,
+  getAllOtherMembersActiveDeviceIds,
+} from '../conversations/service';
 import { claimPendingUpload } from '../media/service';
 
 /**
- * Phase 3 scope, stated once here rather than scattered across comments: a message
- * is encrypted for and delivered to exactly ONE device PER OTHER MEMBER
- * (`getPrimaryRecipientDevice`/`getGroupMemberPrimaryDevices`), not fanned out to
- * every device a member owns. Real multi-device fan-out (encrypting once per device
- * a member has, docs/06-device-architecture.md's general model) is a tracked
- * follow-up — see docs/04-websocket-realtime.md's revision note. This is a genuine,
- * documented scope limit, not an oversight: it means a member only receives new
- * messages on whichever single device was most recently active, until that
- * follow-up ships. `sendMessage` returns one `MessageDto` per target device (one
- * for a direct conversation, one per other group member for a group one) — see
- * docs/13-roadmap.md's group chat pass for why this generalized from a single DTO
- * without changing `MessageDto`'s own shape (each DTO is still "this copy, for this
- * one device").
+ * Multi-device fan-out (docs/06-device-architecture.md's original target design,
+ * shipped here after being tracked as a gap through Phase 3/4/5): a `direct`
+ * message now reaches every active device of every conversation member — the other
+ * participant's, AND the sender's own — not just whichever single device happened
+ * to be "most recently active." `group` messages are unaffected (every member
+ * already shared one Megolm-style session, which sidesteps this whole problem —
+ * see `getGroupMemberPrimaryDevices`'s own doc comment, still tracking one device
+ * per *member* rather than every device, a separate, smaller, still-open gap).
+ *
+ * The reason this needed a schema change rather than "just fan out more": a
+ * pairwise Double Ratchet session's ciphertext is only valid for the one specific
+ * device it was encrypted for, and `Message` only ever had room for one ciphertext.
+ * `MessageRecipient` now carries its own `envelopeHeader`/`ciphertext`/`x3dhInit`
+ * for exactly this case; `toDto` below falls back to `Message`-level columns for
+ * `group` rows (still the single shared ciphertext) and for any `direct` message
+ * sent before this shipped (never backfilled — those rows keep working exactly as
+ * they always did). `sendMessage` returns one `MessageDto` per target device, same
+ * shape as before this change — only the fan-out width changed, not `MessageDto`
+ * itself.
  */
 
 function toDto(row: {
@@ -32,10 +42,40 @@ function toDto(row: {
   replyToMessageId: string | null;
   sentAt: Date;
   serverReceivedAt: Date;
-  recipients: Array<{ recipientDeviceId: string; deliveredAt: Date | null; readAt: Date | null }>;
-}): MessageDto {
-  const recipient = row.recipients[0];
-  if (!row.envelopeHeader || !row.ciphertext || !recipient) {
+  recipients: Array<{
+    recipientDeviceId: string;
+    deliveredAt: Date | null;
+    readAt: Date | null;
+    envelopeHeader: Buffer | null;
+    ciphertext: Buffer | null;
+    x3dhInit: unknown;
+  }>;
+},
+  // Which specific device is asking — REQUIRED whenever `row.recipients` could
+  // contain more than one device's row (i.e. `listMessages`, where multi-device
+  // fan-out means a `direct` message now has a genuinely different, mutually
+  // undecryptable ciphertext per recipient device). Without this, picking an
+  // arbitrary `recipients[0]` risks handing back a DIFFERENT device's envelope —
+  // decryptable by nobody who receives it, silently swallowed by the client as
+  // "undecryptable on this device" and looking exactly like a dropped message.
+  // Omitted only by `sendMessage`'s own re-fetch, which already queries exactly one
+  // already-known-correct row (`include: { recipients: { where: { recipientDeviceId } } }`)
+  // and by callers with no specific viewer device to disambiguate by (there are none
+  // today — every caller of this function is device-scoped).
+  viewerDeviceId?: string,
+): MessageDto {
+  const recipient = (viewerDeviceId && row.recipients.find((r) => r.recipientDeviceId === viewerDeviceId)) || row.recipients[0];
+  if (!recipient) {
+    throw new AppError('INTERNAL', 'Message is missing its envelope.');
+  }
+  // Per-recipient envelope wins when present (multi-device `direct` fan-out); every
+  // other case (group, or a `direct` message sent before this existed) falls back
+  // to `Message`-level columns, which is exactly where their one shared ciphertext
+  // has always lived.
+  const envelopeHeader = recipient.envelopeHeader ?? row.envelopeHeader;
+  const ciphertext = recipient.ciphertext ?? row.ciphertext;
+  const x3dhInit = recipient.envelopeHeader ? recipient.x3dhInit : row.x3dhInit;
+  if (!envelopeHeader || !ciphertext) {
     // Tombstoned (deleted/expired) messages are filtered out by callers before this
     // runs — reaching here with nulled fields would be a caller bug, not a normal
     // state, so this throws loudly rather than fabricating an empty envelope.
@@ -48,8 +88,8 @@ function toDto(row: {
     senderDeviceId: row.senderDeviceId,
     recipientDeviceId: recipient.recipientDeviceId,
     envelopeType: row.envelopeType as MessageDto['envelopeType'],
-    envelope: { header: row.envelopeHeader.toString('base64'), ciphertext: row.ciphertext.toString('base64') },
-    x3dhInit: row.x3dhInit as MessageDto['x3dhInit'],
+    envelope: { header: envelopeHeader.toString('base64'), ciphertext: ciphertext.toString('base64') },
+    x3dhInit: x3dhInit as MessageDto['x3dhInit'],
     contentTypeHint: row.contentTypeHint as MessageDto['contentTypeHint'],
     replyToMessageId: row.replyToMessageId,
     sentAt: row.sentAt.toISOString(),
@@ -68,7 +108,17 @@ export async function sendMessage(
 
   const conversation = await prisma.conversation.findUniqueOrThrow({ where: { id: conversationId } });
 
+  // Populated only for the `direct` branch below — each entry is one device's own
+  // independently-encrypted envelope; empty for `group`, which still shares one
+  // envelope at the `Message` level (input.envelope/input.x3dhInit), unchanged.
+  let perDeviceEnvelopes: Array<{
+    deviceId: string;
+    header: Buffer;
+    ciphertext: Buffer;
+    x3dhInit: Prisma.InputJsonValue | undefined;
+  }> = [];
   let targetDeviceIds: string[];
+
   if (conversation.type === 'group') {
     // group is guaranteed non-null when type === 'group' — see toSummary's note in
     // conversations/service.ts.
@@ -81,24 +131,44 @@ export async function sendMessage(
         throw new AppError('FORBIDDEN', 'Only group admins can send messages in this group.');
       }
     }
+    if (!input.envelope) {
+      throw new AppError('VALIDATION_FAILED', 'A group message needs a shared envelope.');
+    }
     const targets = await getGroupMemberPrimaryDevices(conversationId, ctx.userId);
     targetDeviceIds = targets.map((t) => t.deviceId);
   } else {
-    if (!input.recipientDeviceId) {
-      throw new AppError('VALIDATION_FAILED', 'A recipient device is required.');
+    if (!input.recipients || input.recipients.length === 0) {
+      throw new AppError('VALIDATION_FAILED', 'At least one recipient device is required.');
     }
-    const recipientDevice = await prisma.device.findUnique({
-      where: { id: input.recipientDeviceId },
-      include: { user: true },
+    // The REAL target set, resolved server-side — never trust the client's own idea
+    // of who should receive this. Every other member's active devices (the
+    // multi-device-per-recipient half of this fix) plus the sender's own other
+    // active devices (the self-fan-out half — a second phone, a desktop client, a
+    // web tab left open elsewhere all need their own copy too).
+    const otherMemberDevices = await getAllOtherMembersActiveDeviceIds(conversationId, ctx.userId);
+    const ownOtherDevices = await prisma.device.findMany({
+      where: { userId: ctx.userId, status: 'active', id: { not: ctx.deviceId } },
+      select: { id: true },
     });
-    if (!recipientDevice || recipientDevice.status !== 'active') {
-      throw new AppError('DEVICE_REVOKED', 'That device can no longer receive messages.');
+    const validTargetIds = new Set([...otherMemberDevices.map((d) => d.deviceId), ...ownOtherDevices.map((d) => d.id)]);
+
+    // Silently drop any envelope the client supplied for a device outside the real
+    // target set (IDOR guard, docs/35-authorization.md) — never throw for THAT case
+    // specifically, since a device that just went inactive/was revoked in the race
+    // window between the client resolving targets and sending shouldn't fail the
+    // whole send for every other, still-valid target.
+    const validRecipients = input.recipients.filter((r) => validTargetIds.has(r.deviceId));
+    if (validRecipients.length === 0) {
+      throw new AppError('MESSAGE_FAILED', 'No one in this conversation currently has an active device to receive messages.');
     }
-    // The recipient device's OWNER must actually be a member of this conversation —
-    // stops a caller from targeting an arbitrary device id that has nothing to do
-    // with this conversation (docs/35-authorization.md's IDOR guard).
-    await requireConversationMembership(recipientDevice.userId, conversationId);
-    targetDeviceIds = [input.recipientDeviceId];
+
+    perDeviceEnvelopes = validRecipients.map((r) => ({
+      deviceId: r.deviceId,
+      header: Buffer.from(r.envelope.header, 'base64'),
+      ciphertext: Buffer.from(r.envelope.ciphertext, 'base64'),
+      x3dhInit: r.x3dhInit ?? undefined,
+    }));
+    targetDeviceIds = perDeviceEnvelopes.map((e) => e.deviceId);
   }
 
   // A message with nobody currently reachable to deliver it to is refused rather
@@ -117,6 +187,8 @@ export async function sendMessage(
     }
   }
 
+  const envelopeByDevice = new Map(perDeviceEnvelopes.map((e) => [e.deviceId, e]));
+
   // Idempotent insert (docs/02-database-schema.md#message-ids): a retried send from
   // a flaky connection with the same client-generated id is a silent no-op, not a
   // duplicate or an error. Wrapped in a transaction together with the attachment
@@ -131,9 +203,12 @@ export async function sendMessage(
           senderUserId: ctx.userId,
           senderDeviceId: ctx.deviceId,
           envelopeType: input.envelopeType,
-          envelopeHeader: Buffer.from(input.envelope.header, 'base64'),
-          ciphertext: Buffer.from(input.envelope.ciphertext, 'base64'),
-          x3dhInit: input.x3dhInit ?? undefined,
+          // `direct` sends carry no `Message`-level envelope anymore — each target
+          // device's own ciphertext lives on its own `MessageRecipient` row instead
+          // (below). `input.envelope` is only ever present for `group`.
+          envelopeHeader: input.envelope ? Buffer.from(input.envelope.header, 'base64') : null,
+          ciphertext: input.envelope ? Buffer.from(input.envelope.ciphertext, 'base64') : null,
+          x3dhInit: input.envelope ? input.x3dhInit ?? undefined : undefined,
           contentTypeHint: input.contentTypeHint,
           replyToMessageId: input.replyToMessageId,
           sentAt: new Date(input.sentAt),
@@ -143,7 +218,16 @@ export async function sendMessage(
     });
 
     await tx.messageRecipient.createMany({
-      data: targetDeviceIds.map((recipientDeviceId) => ({ messageId: input.messageId, recipientDeviceId })),
+      data: targetDeviceIds.map((recipientDeviceId) => {
+        const own = envelopeByDevice.get(recipientDeviceId);
+        return {
+          messageId: input.messageId,
+          recipientDeviceId,
+          envelopeHeader: own?.header,
+          ciphertext: own?.ciphertext,
+          x3dhInit: own?.x3dhInit,
+        };
+      }),
       skipDuplicates: true,
     });
 
@@ -174,6 +258,7 @@ export async function sendMessage(
 
 export async function listMessages(
   callerUserId: string,
+  callerDeviceId: string,
   conversationId: string,
   cursor: string | undefined,
   limit: number,
@@ -184,9 +269,12 @@ export async function listMessages(
     where: {
       conversationId,
       deletedAt: null,
-      // Phase 3's single-recipient-device model (see module header) means "messages
-      // visible to me" is: ones I sent, or ones where I'm the targeted recipient —
-      // not every device, just the caller's own devices.
+      // "Messages visible to me" is: ones I sent, or ones where any of MY devices
+      // is a targeted recipient — not filtered to just `callerDeviceId` here (a
+      // message this account's OTHER device already caught up on should still show
+      // in this device's history), which is exactly why `toDto` below needs
+      // `callerDeviceId` explicitly: `recipients` can contain several of this
+      // user's own devices' rows plus other members' devices' rows.
       OR: [{ senderUserId: callerUserId }, { recipients: { some: { recipientDevice: { userId: callerUserId } } } }],
     },
     include: { recipients: true },
@@ -199,7 +287,7 @@ export async function listMessages(
   const page = hasMore ? rows.slice(0, limit) : rows;
 
   return {
-    items: page.map((row) => toDto(row)),
+    items: page.map((row) => toDto(row, callerDeviceId)),
     nextCursor: hasMore ? page[page.length - 1]!.id : null,
   };
 }
@@ -269,10 +357,20 @@ export async function deleteMessage(callerUserId: string, messageId: string): Pr
   // (docs/02-database-schema.md's "On deletion" note) — a later DB compromise can't
   // retroactively decrypt "deleted" content. `Prisma.JsonNull` (not plain `null`)
   // is required to actually clear a JSON column rather than leave it untouched —
-  // Prisma treats a bare `null` here as ambiguous.
-  await prisma.message.update({
-    where: { id: messageId },
-    data: { deletedAt: new Date(), ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason: 'manual' },
-  });
+  // Prisma treats a bare `null` here as ambiguous. A `direct` message's actual
+  // ciphertext may live on its `MessageRecipient` rows instead of `Message` itself
+  // now (multi-device fan-out, this module's own docstring) — both need clearing in
+  // the same transaction, or a "deleted" message could still have live ciphertext
+  // sitting in a per-recipient row.
+  await prisma.$transaction([
+    prisma.message.update({
+      where: { id: messageId },
+      data: { deletedAt: new Date(), ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason: 'manual' },
+    }),
+    prisma.messageRecipient.updateMany({
+      where: { messageId },
+      data: { ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull },
+    }),
+  ]);
   return { conversationId: message.conversationId };
 }

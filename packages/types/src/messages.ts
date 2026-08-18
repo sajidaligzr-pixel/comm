@@ -160,16 +160,33 @@ export type UpdateConversationRequest = z.infer<typeof UpdateConversationRequest
 
 /**
  * `POST /api/conversations/:id/messages` (WS `message.send` uses the same shape —
- * docs/04-websocket-realtime.md). Phase 3 scope note: for a `direct` conversation,
- * targets exactly ONE recipient device, not every device the recipient owns — see
- * docs/04-websocket-realtime.md's revision note on why full multi-device fan-out is a
- * tracked follow-up, not shipped in this phase. `recipientDeviceId` is optional
- * specifically for the group case (docs/13-roadmap.md's group chat pass): a group
- * conversation has no single recipient device to name from the client — the server
- * resolves every current member's primary device itself
- * (server/modules/messages/service.ts). Required (enforced at runtime, not by this
- * schema alone) for `direct` conversations.
+ * docs/04-websocket-realtime.md). Two shapes depending on `conversation.type`,
+ * distinguished by which of `envelope`/`recipients` is present (enforced by the
+ * `.refine()` below, not by a discriminated union — the two cases share every other
+ * field, and `sendMessage` itself is what already knows the conversation's type):
+ *
+ * - **group**: one shared envelope (`envelope`/`x3dhInit`) — every member reads the
+ *   same Megolm-style group-session ciphertext, so there's nothing per-device to
+ *   name from the client. `recipients` must be absent.
+ * - **direct**: `recipients` — one entry per target device, each independently
+ *   encrypted (pairwise Double Ratchet sessions can't share a ciphertext across
+ *   devices). The client resolves the full target set itself (every other member's
+ *   active devices, `GET /api/conversations/:id/recipient-devices`, **plus** its own
+ *   other active devices, `GET /api/devices`) and calls `encryptForDevice` once per
+ *   target — this is what makes multi-device sync real: a second phone, a desktop
+ *   client, a web tab left open elsewhere all receive their own copy, not just
+ *   whichever single device happened to be "most recently active." `envelope`/
+ *   `x3dhInit` must be absent; `sendMessage` (server/modules/messages/service.ts)
+ *   still validates every supplied device against the real membership/device state,
+ *   never trusting the client's target list blindly.
  */
+const RecipientEnvelope = z.object({
+  deviceId: z.string().uuid(),
+  envelope: MessageEnvelopeUpload,
+  x3dhInit: X3dhInitPayload.nullable(),
+});
+export type RecipientEnvelope = z.infer<typeof RecipientEnvelope>;
+
 /** Only present when `contentTypeHint === 'media'` — links this message to an
  * already-uploaded object (docs/13-roadmap.md's media pass). `objectKey` must match a
  * live `media:pending:<objectKey>` Redis record created by this same caller via
@@ -181,17 +198,21 @@ export const MessageAttachmentRef = z.object({
 });
 export type MessageAttachmentRef = z.infer<typeof MessageAttachmentRef>;
 
-export const SendMessageRequest = z.object({
-  messageId: z.string().uuid(),
-  recipientDeviceId: z.string().uuid().optional(),
-  envelopeType: MessageEnvelopeType,
-  envelope: MessageEnvelopeUpload,
-  x3dhInit: X3dhInitPayload.nullable(),
-  contentTypeHint: MessageContentType,
-  replyToMessageId: z.string().uuid().nullable(),
-  sentAt: z.string().datetime(),
-  attachment: MessageAttachmentRef.optional(),
-});
+export const SendMessageRequest = z
+  .object({
+    messageId: z.string().uuid(),
+    envelopeType: MessageEnvelopeType,
+    envelope: MessageEnvelopeUpload.optional(),
+    x3dhInit: X3dhInitPayload.nullable().optional(),
+    recipients: z.array(RecipientEnvelope).min(1).optional(),
+    contentTypeHint: MessageContentType,
+    replyToMessageId: z.string().uuid().nullable(),
+    sentAt: z.string().datetime(),
+    attachment: MessageAttachmentRef.optional(),
+  })
+  .refine((v) => (v.envelope !== undefined) !== (v.recipients !== undefined), {
+    message: 'Provide exactly one of envelope (group) or recipients (direct).',
+  });
 export type SendMessageRequest = z.infer<typeof SendMessageRequest>;
 
 export const MessageDto = z.object({

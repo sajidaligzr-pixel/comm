@@ -391,6 +391,14 @@ model Message {
   // ciphertext: it's routing/ratchet-bookkeeping metadata the *server* never needs
   // to parse, but the *recipient's* ratchet needs both pieces to decrypt
   // (docs/05-crypto-architecture.md). Both null after tombstoning.
+  //
+  // Multi-device fan-out note: for `megolm_group` messages this is still THE
+  // ciphertext (every member shares one group-session envelope). For `direct`
+  // messages fanned out to more than one device, each device's own independent
+  // envelope lives on its own `MessageRecipient` row instead (different device
+  // pairings can't share one Double-Ratchet ciphertext) — these columns are then
+  // unused going forward, kept only as the fallback `toDto` reads for any `direct`
+  // message sent before that existed (see MessageRecipient's own comment).
   envelopeHeader   Bytes?              @map("envelope_header")
   ciphertext       Bytes?
   // Present only on the first message of a brand-new X3DH session — see
@@ -467,6 +475,20 @@ model MessageRecipient {
   recipientDeviceId String    @map("recipient_device_id") @db.Uuid
   deliveredAt       DateTime? @map("delivered_at")
   readAt            DateTime? @map("read_at")
+  // Per-device pairwise Double Ratchet envelope — populated for `direct`-conversation
+  // messages fanned out to more than one device (true multi-device sync: every other
+  // member's active devices, plus the sender's own other active devices), since each
+  // device pairing has an independently-encrypted ciphertext, unlike `megolm_group`
+  // messages where every member shares one `Message`-level ciphertext. Null here for
+  // group rows (always) and for any `direct` row sent before this existed — both
+  // cases fall back to `Message`'s own envelope columns (see `toDto` in
+  // server/modules/messages/service.ts). Nulled alongside `Message`'s own columns on
+  // every tombstone path (manual delete, disappearing timer, media retention) — see
+  // those call sites for why: leaving live ciphertext here after a "delete" would
+  // defeat the point of nulling it on `Message` at all.
+  envelopeHeader Bytes? @map("envelope_header")
+  ciphertext     Bytes?
+  x3dhInit       Json?  @map("x3dh_init")
 
   message         Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
   recipientDevice Device  @relation(fields: [recipientDeviceId], references: [id], onDelete: Cascade)

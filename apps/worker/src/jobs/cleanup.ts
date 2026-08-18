@@ -147,10 +147,20 @@ async function sweepDisappearingMessages(now: Date): Promise<number> {
     });
 
     for (const message of expired) {
-      await prisma.message.update({
-        where: { id: message.id },
-        data: { deletedAt: now, ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason: 'disappearing_timer' },
-      });
+      // Both updates in one transaction — see server/modules/messages/service.ts's
+      // deleteMessage for why the per-recipient row also needs clearing: a direct
+      // message's actual ciphertext may live there instead of on `Message` itself
+      // (multi-device fan-out).
+      await prisma.$transaction([
+        prisma.message.update({
+          where: { id: message.id },
+          data: { deletedAt: now, ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason: 'disappearing_timer' },
+        }),
+        prisma.messageRecipient.updateMany({
+          where: { messageId: message.id },
+          data: { ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull },
+        }),
+      ]);
       for (const device of devices) {
         const event: MessageEvent = {
           type: 'deleted',
@@ -236,10 +246,17 @@ async function sweepExpiredMedia(now: Date): Promise<number> {
       await storage.deleteObject(message.attachment.objectKey);
     }
 
-    await prisma.message.update({
-      where: { id: message.id },
-      data: { deletedAt: now, ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason: 'media_retention' },
-    });
+    // Same "both need clearing together" reasoning as sweepDisappearingMessages above.
+    await prisma.$transaction([
+      prisma.message.update({
+        where: { id: message.id },
+        data: { deletedAt: now, ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason: 'media_retention' },
+      }),
+      prisma.messageRecipient.updateMany({
+        where: { messageId: message.id },
+        data: { ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull },
+      }),
+    ]);
 
     const userIds = userIdsByConversation.get(message.conversationId) ?? [];
     for (const userId of userIds) {

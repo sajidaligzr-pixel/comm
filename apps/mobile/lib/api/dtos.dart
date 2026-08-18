@@ -366,12 +366,37 @@ class MessageAttachmentRef {
   };
 }
 
-class SendMessageRequest {
-  final String messageId;
-  final String? recipientDeviceId;
-  final String envelopeType; // 'x3dh_ratchet_1to1' | 'megolm_group'
+/// One target device's own independently-encrypted envelope — a `direct` send's
+/// `recipients` list carries one of these per target device (every other member's
+/// active devices, plus the sender's own other active devices); a `group` send has
+/// no `recipients` at all (one shared envelope on `SendMessageRequest` itself
+/// instead — every member already shares one Megolm-style session).
+class RecipientEnvelope {
+  final String deviceId;
   final MessageEnvelopeUpload envelope;
   final X3dhInitPayload? x3dhInit;
+  const RecipientEnvelope({
+    required this.deviceId,
+    required this.envelope,
+    required this.x3dhInit,
+  });
+  Map<String, dynamic> toJson() => {
+    'deviceId': deviceId,
+    'envelope': envelope.toJson(),
+    'x3dhInit': x3dhInit?.toJson(),
+  };
+}
+
+class SendMessageRequest {
+  final String messageId;
+  final String envelopeType; // 'x3dh_ratchet_1to1' | 'megolm_group'
+  /// Group sends only — the one shared envelope every member decrypts.
+  final MessageEnvelopeUpload? envelope;
+  final X3dhInitPayload? x3dhInit;
+  /// Direct sends only — one entry per target device. Exactly one of
+  /// `envelope`/`recipients` must be set (mirrors `SendMessageRequest`'s own
+  /// `.refine()` in packages/types/src/messages.ts).
+  final List<RecipientEnvelope>? recipients;
   final String contentTypeHint;
   final String? replyToMessageId;
   final String sentAt;
@@ -379,10 +404,10 @@ class SendMessageRequest {
 
   const SendMessageRequest({
     required this.messageId,
-    required this.recipientDeviceId,
     required this.envelopeType,
-    required this.envelope,
-    required this.x3dhInit,
+    this.envelope,
+    this.x3dhInit,
+    this.recipients,
     required this.contentTypeHint,
     required this.replyToMessageId,
     required this.sentAt,
@@ -391,10 +416,10 @@ class SendMessageRequest {
 
   Map<String, dynamic> toJson() => {
     'messageId': messageId,
-    if (recipientDeviceId != null) 'recipientDeviceId': recipientDeviceId,
     'envelopeType': envelopeType,
-    'envelope': envelope.toJson(),
-    'x3dhInit': x3dhInit?.toJson(),
+    if (envelope != null) 'envelope': envelope!.toJson(),
+    if (envelope != null) 'x3dhInit': x3dhInit?.toJson(),
+    if (recipients != null) 'recipients': recipients!.map((r) => r.toJson()).toList(),
     'contentTypeHint': contentTypeHint,
     'replyToMessageId': replyToMessageId,
     'sentAt': sentAt,

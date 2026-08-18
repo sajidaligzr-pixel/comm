@@ -92,14 +92,17 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   final List<CachedMessage> _messages = [];
   final _textController = TextEditingController();
 
-  /// Resolved once when the thread opens, reused for every send — mirrors
-  /// apps/web's `recipientDeviceIdRef` (message-thread.tsx) exactly, including WHY:
-  /// re-resolving this on every single send was a real, found regression (each send
-  /// paid a full network round trip before encryption could even start, on top of
-  /// the actual send request). A device change mid-conversation-view is rare enough
-  /// that "resolved once per thread visit" is the right tradeoff, same call the web
-  /// client already made.
-  ({String userId, String deviceId})? _recipientDevice;
+  /// Every device a direct-conversation send needs its own independently-encrypted
+  /// envelope for — the other member's active devices, plus this account's own
+  /// other active devices (self-fan-out: a second phone, a desktop client, a web
+  /// tab left open elsewhere). Resolved once when the thread opens, reused for
+  /// every send — mirrors apps/web's `targetDeviceIdsRef` (message-thread.tsx)
+  /// exactly, including WHY: re-resolving this on every single send was a real,
+  /// found regression (each send paid a full network round trip before encryption
+  /// could even start, on top of the actual send request). A device change
+  /// mid-conversation-view is rare enough that "resolved once per thread visit" is
+  /// the right tradeoff, same call the web client already made.
+  List<({String userId, String deviceId})> _targetDevices = [];
 
   /// Delivered/read status for messages THIS device sent, keyed by message id —
   /// deliberately NOT part of `CachedMessage`/the persistent local cache, mirroring
@@ -411,10 +414,15 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         await groupController.registerGroupMembership(conversation.groupId!);
         await groupController.ensureGroupKeysUpToDate(conversation.groupId!);
       } else if (conversation.type == 'direct') {
-        // Resolved once here, not per-send — see _recipientDevice's own docstring.
-        _recipientDevice = await ref
+        // Resolved once here, not per-send — see _targetDevices' own docstring.
+        final otherMemberDevices = await ref
             .read(conversationsApiProvider)
-            .recipientDevice(widget.conversationId);
+            .recipientDevices(widget.conversationId);
+        final ownDevices = await ref.read(devicesApiProvider).list();
+        final ownOtherDevices = ownDevices
+            .where((d) => !d.isCurrentDevice && d.status == 'active')
+            .map((d) => (userId: _myUserId, deviceId: d.id));
+        _targetDevices = [...otherMemberDevices, ...ownOtherDevices];
       }
 
       final page = await pageFuture;
@@ -1053,8 +1061,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
             .encryptForGroup(groupId, _myUserId, plaintext);
         req = SendMessageRequest(
           messageId: messageId,
-          recipientDeviceId:
-              null, // the server resolves every current member's primary device itself
           envelopeType: 'megolm_group',
           envelope: MessageEnvelopeUpload(
             header: encrypted.header,
@@ -1068,33 +1074,52 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           attachment: attachmentRef,
         );
       } else {
-        // Falls back to a fresh fetch only if the cached value is somehow missing
+        // Falls back to a fresh fetch only if the cached list is somehow missing
         // (e.g. a send racing the very first _load()) — the normal path reuses what
-        // _load() already resolved, see _recipientDevice's docstring.
-        final target = _recipientDevice ??= await ref
-            .read(conversationsApiProvider)
-            .recipientDevice(widget.conversationId);
-        if (target == null) {
+        // _load() already resolved, see _targetDevices' own docstring.
+        var targets = _targetDevices;
+        if (targets.isEmpty) {
+          final otherMemberDevices = await ref
+              .read(conversationsApiProvider)
+              .recipientDevices(widget.conversationId);
+          final ownDevices = await ref.read(devicesApiProvider).list();
+          final ownOtherDevices = ownDevices
+              .where((d) => !d.isCurrentDevice && d.status == 'active')
+              .map((d) => (userId: _myUserId, deviceId: d.id));
+          targets = _targetDevices = [...otherMemberDevices, ...ownOtherDevices];
+        }
+        if (targets.isEmpty) {
           throw StateError(
             'The other person has no reachable device right now.',
           );
         }
 
-        final outgoing = await convo.encryptForDevice(
-          ref.read(keysApiProvider),
-          target.userId,
-          target.deviceId,
-          plaintext,
-        );
+        // One independent envelope per target device — real multi-device sync, not
+        // just delivery to whichever single device used to be guessed as
+        // "primary." encryptForDevice is safe to call any number of times.
+        final recipients = <RecipientEnvelope>[];
+        for (final target in targets) {
+          final outgoing = await convo.encryptForDevice(
+            ref.read(keysApiProvider),
+            target.userId,
+            target.deviceId,
+            plaintext,
+          );
+          recipients.add(
+            RecipientEnvelope(
+              deviceId: target.deviceId,
+              envelope: MessageEnvelopeUpload(
+                header: outgoing.envelope.header,
+                ciphertext: outgoing.envelope.ciphertext,
+              ),
+              x3dhInit: outgoing.x3dhInit,
+            ),
+          );
+        }
         req = SendMessageRequest(
           messageId: messageId,
-          recipientDeviceId: target.deviceId,
           envelopeType: 'x3dh_ratchet_1to1',
-          envelope: MessageEnvelopeUpload(
-            header: outgoing.envelope.header,
-            ciphertext: outgoing.envelope.ciphertext,
-          ),
-          x3dhInit: outgoing.x3dhInit,
+          recipients: recipients,
           contentTypeHint: contentTypeHint,
           replyToMessageId: replyToMessageId,
           sentAt: sentAt,

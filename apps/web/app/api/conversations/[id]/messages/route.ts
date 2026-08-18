@@ -15,7 +15,7 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const ctx = await requireAuth(req);
     const { id: conversationId } = await params;
     const { cursor, limit } = parseQuery(req, CursorQuery);
-    const page = await listMessages(ctx.userId, conversationId, cursor, limit);
+    const page = await listMessages(ctx.userId, ctx.deviceId, conversationId, cursor, limit);
     return jsonOk(page);
   });
 }

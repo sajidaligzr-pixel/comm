@@ -196,31 +196,6 @@ export async function getAllOtherMembersActiveDeviceIds(
 }
 
 /**
- * Which single device a new outgoing message in this conversation should target —
- * see the Phase 3 scope note in server/modules/messages/service.ts: exactly one
- * recipient device for now, chosen as the other member's most-recently-active
- * active device. Real multi-device fan-out (encrypting once per device) is a
- * tracked follow-up, not a permanent design.
- */
-export async function getPrimaryRecipientDevice(
-  conversationId: string,
-  callerUserId: string,
-): Promise<{ userId: string; deviceId: string } | null> {
-  await requireConversationMembership(callerUserId, conversationId);
-
-  const other = await prisma.conversationMember.findFirst({ where: { conversationId, userId: { not: callerUserId } } });
-  if (!other) return null;
-
-  const device = await prisma.device.findFirst({
-    where: { userId: other.userId, status: 'active' },
-    orderBy: { lastActiveAt: 'desc' },
-  });
-  if (!device) return null;
-
-  return { userId: other.userId, deviceId: device.id };
-}
-
-/**
  * The group-conversation analog of `getPrimaryRecipientDevice` above — same
  * single-device-per-member simplification (Phase 3's tracked gap, not solved anew
  * here), generalized from "the one other member" to "every other member." Used by

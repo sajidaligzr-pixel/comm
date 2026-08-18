@@ -158,7 +158,7 @@ Index: `(conversation_id, server_received_at)` for pagination/sync; `(sender_use
 
 **On "deletion":** `deleted_at` marks a tombstone; the row's `envelope_header`/`ciphertext`/`x3dh_init` are nulled out at that point (actual erasure, not just a flag) so a later DB compromise can't retroactively decrypt "deleted" content once keys are eventually rotated. Three independent paths produce this same tombstone shape, distinguished only by `deletion_reason`: a manual `DELETE /api/messages/:id`; disappearing-message expiry (`apps/worker`'s hourly sweep, triggered by `sent_at` age against the conversation's `disappearing_timer`); and media retention (`apps/worker`'s separate `sweepExpiredMedia` — docs/10-privacy-data-retention.md's media retention section — a 24h-always default for `image`/`voice`/`media` content specifically, independent of the conversation's disappearing-timer setting). All three additionally publish a live `deleted` realtime event (now carrying `reason`) so participants' locally-decrypted caches — which the tombstone alone can't reach — are scrubbed too, see [04-websocket-realtime](04-websocket-realtime.md).
 
-**Phase 3 scope note:** `sendMessage` currently addresses exactly one recipient device per conversation (the other 1:1 participant's single active device) — real multi-device fan-out (a sender's *own* other devices, and a recipient with more than one active device) is explicitly deferred; see the docstring on `getPrimaryRecipientDevice` in `apps/web/server/modules/conversations/service.ts`. `message_recipients` below is already shaped for the multi-device case so that follow-up is additive, not a schema change.
+**Multi-device sync (shipped, docs/13-roadmap.md):** a `direct` message now reaches every active device of every conversation member — the other participant's, and the sender's own. This turned out NOT to be purely additive to `message_recipients` as originally expected here: a pairwise Double Ratchet session's ciphertext is only valid for the one device it was encrypted for, so `envelope_header`/`ciphertext`/`x3dh_init` had to be added to `message_recipients` itself (nullable — populated per target device for `direct` sends going forward; `group` rows and any `direct` message sent before this shipped keep reading the columns on `messages` above, no backfill needed). `group` conversations still resolve one device per *other* member, not every device — a smaller, separate, still-open gap.
 
 <a id="message-ids"></a>**Message IDs**: UUIDv7 (time-ordered, generated client-side at compose time) doubles as the idempotency key — the ingest endpoint is `INSERT ... ON CONFLICT (id) DO NOTHING`, so retried sends from flaky connections never duplicate (see [04-websocket-realtime](04-websocket-realtime.md)).
 
@@ -171,6 +171,9 @@ Per-recipient-device delivery/read state — necessary because in a multi-device
 | recipient_device_id | uuid fk → devices.id | |
 | delivered_at | timestamptz null | |
 | read_at | timestamptz null | only recorded if the recipient's privacy setting allows read receipts, see [10](10-privacy-data-retention.md) |
+| envelope_header | bytea null | multi-device sync (above) — this device's own pairwise-session envelope for a `direct` message, when fanned out to more than one device. Null for `group` rows and pre-multi-device `direct` rows, which fall back to `messages.envelope_header` |
+| ciphertext | bytea null | same fallback rule as `envelope_header` |
+| x3dh_init | jsonb null | same fallback rule as `envelope_header` |
 
 Primary key: `(message_id, recipient_device_id)`.
 

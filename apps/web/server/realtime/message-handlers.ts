@@ -44,7 +44,12 @@ import { enforceRateLimit } from '../common/rate-limit';
 
 export type OutboundWsEvent = { type: string; [key: string]: unknown };
 
-const MessageSendEnvelope = SendMessageRequest.extend({
+// `SendMessageRequest` is a `.refine()`d schema (ZodEffects), which has no
+// `.extend()` — pull `type`/`conversationId` out with their own small schema
+// instead, and validate the rest of the body with `SendMessageRequest` directly
+// (extra keys a plain z.object doesn't know about, like these two, are stripped
+// rather than rejected, so parsing the same raw body twice is safe).
+const MessageSendEnvelope = z.object({
   type: z.literal('message.send'),
   conversationId: z.string().uuid(),
 });
@@ -98,13 +103,14 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         // an authenticated socket could otherwise spam `message.send` frames with no
         // ceiling at all.
         await enforceRateLimit(RATE_LIMIT_RULES.messageSend, ctx.userId);
-        const body = MessageSendEnvelope.parse(parsed);
+        const envelope = MessageSendEnvelope.parse(parsed);
+        const body = SendMessageRequest.parse(parsed);
         if (body.contentTypeHint === 'image' || body.contentTypeHint === 'voice') {
           await enforceRateLimit(RATE_LIMIT_RULES.mediaMessageSend, ctx.userId);
         }
-        // One DTO per target device (docs/13-roadmap.md's group chat pass — a direct
-        // conversation always yields exactly one) — each gets its own WS `new` event.
-        const messages = await sendMessage(ctx, body.conversationId, body);
+        // One DTO per target device (multi-device fan-out — see messages/service.ts)
+        // — each gets its own WS `new` event.
+        const messages = await sendMessage(ctx, envelope.conversationId, body);
         for (const message of messages) {
           await publishNewMessage(message);
         }

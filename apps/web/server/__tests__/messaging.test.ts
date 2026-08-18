@@ -91,33 +91,103 @@ describe('messaging (real crypto end-to-end)', () => {
     const messageId = crypto.randomUUID();
     const request: SendMessageRequest = {
       messageId,
-      recipientDeviceId: bobDeviceId,
       envelopeType: 'x3dh_ratchet_1to1',
-      envelope,
-      x3dhInit,
+      recipients: [{ deviceId: bobDeviceId, envelope, x3dhInit }],
       contentTypeHint: 'text',
       replyToMessageId: null,
       sentAt: new Date().toISOString(),
     };
 
-    // One MessageDto per target device (docs/13-roadmap.md's group chat pass) —
-    // a direct conversation always yields exactly one.
+    // One MessageDto per target device (multi-device fan-out) — Bob only has one
+    // active device here, so exactly one.
     const sent = await sendMessage({ userId: alice.userId, deviceId: aliceDeviceId }, conversation.id, request);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.id).toBe(messageId);
 
     // The server-stored row is genuinely opaque ciphertext — assert directly against
-    // the database, not just the service's own return value.
+    // the database, not just the service's own return value. `direct` messages now
+    // carry their ciphertext on the per-recipient row, not `Message` itself (see
+    // messages/service.ts's module docstring) — the `Message` row's own columns stay
+    // null for a `direct` send.
     const row = await prisma.message.findUniqueOrThrow({ where: { id: messageId } });
-    expect(row.ciphertext).toBeTruthy();
-    const storedAsString = row.ciphertext!.toString('utf8');
+    expect(row.ciphertext).toBeNull();
+    const recipientRow = await prisma.messageRecipient.findUniqueOrThrow({
+      where: { messageId_recipientDeviceId: { messageId, recipientDeviceId: bobDeviceId } },
+    });
+    expect(recipientRow.ciphertext).toBeTruthy();
+    const storedAsString = recipientRow.ciphertext!.toString('utf8');
     expect(storedAsString).not.toContain('hey bob');
     expect(storedAsString).not.toContain('real E2E');
 
-    const page = await listMessages(bob.userId, conversation.id, undefined, 10);
+    const page = await listMessages(bob.userId, bobDeviceId, conversation.id, undefined, 10);
     expect(page.items).toHaveLength(1);
     expect(page.items[0]!.id).toBe(messageId);
     expect(page.items[0]!.envelope.ciphertext).toBe(envelope.ciphertext);
+  });
+
+  it('multi-device fan-out: a message reaches every OTHER-member device AND every OTHER device the sender owns', async () => {
+    const { alice, bob, aliceDevice, aliceDeviceId, bobDeviceId, conversation } = await setupConversation();
+
+    // A second device each for Alice (sender) and Bob (recipient) — real
+    // multi-device sync means both need their own independently-encrypted copy.
+    const aliceDevice2 = realDeviceRegistration('Alice second device');
+    const bobDevice2 = realDeviceRegistration('Bob second device');
+    const { deviceId: aliceDeviceId2 } = await registerDevice(prisma, alice.userId, aliceDevice2.registration);
+    const { deviceId: bobDeviceId2 } = await registerDevice(prisma, bob.userId, bobDevice2.registration);
+
+    async function encryptFor(targetUserId: string, targetDeviceId: string) {
+      const bundle = await getKeyBundle(targetUserId, targetDeviceId);
+      const publicBundle: PublicKeyBundle = {
+        identityAgreementKey: Buffer.from(bundle.identityKey.agreementPublicKey, 'base64'),
+        identitySigningKey: Buffer.from(bundle.identityKey.signingPublicKey, 'base64'),
+        signedPreKeyId: bundle.signedPreKey.keyId,
+        signedPreKeyPublic: Buffer.from(bundle.signedPreKey.publicKey, 'base64'),
+        signedPreKeySignature: Buffer.from(bundle.signedPreKey.signature, 'base64'),
+        oneTimePreKeyId: bundle.oneTimePreKey?.keyId ?? null,
+        oneTimePreKeyPublic: bundle.oneTimePreKey ? Buffer.from(bundle.oneTimePreKey.publicKey, 'base64') : null,
+      };
+      const { session, x3dhInit } = createOutboundSession(aliceDevice.identity, publicBundle);
+      const envelope = encryptMessage(session, new TextEncoder().encode(`for device ${targetDeviceId}`));
+      return { envelope, x3dhInit };
+    }
+
+    const forBob1 = await encryptFor(bob.userId, bobDeviceId);
+    const forBob2 = await encryptFor(bob.userId, bobDeviceId2);
+    const forAlice2 = await encryptFor(alice.userId, aliceDeviceId2);
+
+    const messageId = crypto.randomUUID();
+    const sent = await sendMessage(
+      { userId: alice.userId, deviceId: aliceDeviceId },
+      conversation.id,
+      {
+        messageId,
+        envelopeType: 'x3dh_ratchet_1to1',
+        recipients: [
+          { deviceId: bobDeviceId, envelope: forBob1.envelope, x3dhInit: forBob1.x3dhInit },
+          { deviceId: bobDeviceId2, envelope: forBob2.envelope, x3dhInit: forBob2.x3dhInit },
+          { deviceId: aliceDeviceId2, envelope: forAlice2.envelope, x3dhInit: forAlice2.x3dhInit },
+        ],
+        contentTypeHint: 'text',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+
+    // One MessageDto per target device — every other-member device AND the
+    // sender's own other device, not just whichever one was "most recently active."
+    expect(sent).toHaveLength(3);
+    const byDevice = new Map(sent.map((m) => [m.recipientDeviceId, m]));
+    expect(byDevice.get(bobDeviceId)!.envelope.ciphertext).toBe(forBob1.envelope.ciphertext);
+    expect(byDevice.get(bobDeviceId2)!.envelope.ciphertext).toBe(forBob2.envelope.ciphertext);
+    expect(byDevice.get(aliceDeviceId2)!.envelope.ciphertext).toBe(forAlice2.envelope.ciphertext);
+    // Each device pairing got its OWN distinct ciphertext, not one shared blob —
+    // the whole reason this needed its own per-recipient columns.
+    expect(byDevice.get(bobDeviceId)!.envelope.ciphertext).not.toBe(byDevice.get(bobDeviceId2)!.envelope.ciphertext);
+
+    // Bob's second device sees this message in its own catch-up fetch too —
+    // listMessages isn't just reading the DTO the send call happened to return.
+    const bob2Page = await listMessages(bob.userId, bobDeviceId2, conversation.id, undefined, 10);
+    expect(bob2Page.items.map((m) => m.id)).toContain(messageId);
   });
 
   it('rejects sending to a device that is not part of the conversation (IDOR)', async () => {
@@ -140,22 +210,27 @@ describe('messaging (real crypto end-to-end)', () => {
     const { session, x3dhInit } = createOutboundSession(aliceDevice.identity, publicBundle);
     const envelope = encryptMessage(session, new TextEncoder().encode('leaking into the wrong conversation'));
 
+    // The target device set is now resolved server-side, never trusted from the
+    // client (see sendMessage's own docstring) — an outsider's device simply isn't
+    // in that set, so it's silently dropped rather than individually rejected; with
+    // zero valid targets left, this is indistinguishable from "nobody reachable,"
+    // the same MESSAGE_FAILED a legitimate all-offline conversation would get. That
+    // is the point: an attacker attempting this IDOR learns nothing about whether
+    // outsiderDeviceId exists, belongs to someone, or is just offline.
     await expect(
       sendMessage(
         { userId: alice.userId, deviceId: aliceDeviceId },
         conversation.id,
         {
           messageId: crypto.randomUUID(),
-          recipientDeviceId: outsiderDeviceId,
           envelopeType: 'x3dh_ratchet_1to1',
-          envelope,
-          x3dhInit,
+          recipients: [{ deviceId: outsiderDeviceId, envelope, x3dhInit }],
           contentTypeHint: 'text',
           replyToMessageId: null,
           sentAt: new Date().toISOString(),
         },
       ),
-    ).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    ).rejects.toMatchObject({ code: 'MESSAGE_FAILED' });
   });
 
   it('rejects a non-member from reading conversation history', async () => {
@@ -163,7 +238,7 @@ describe('messaging (real crypto end-to-end)', () => {
     const outsider = await createActiveUser();
     createdUserIds.push(outsider.userId);
 
-    await expect(listMessages(outsider.userId, conversation.id, undefined, 10)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+    await expect(listMessages(outsider.userId, 'irrelevant', conversation.id, undefined, 10)).rejects.toMatchObject({ code: 'FORBIDDEN' });
     await expect(requireConversationMembership(outsider.userId, conversation.id)).rejects.toMatchObject({ code: 'FORBIDDEN' });
   });
 
@@ -188,10 +263,8 @@ describe('messaging (real crypto end-to-end)', () => {
       conversation.id,
       {
         messageId,
-        recipientDeviceId: bobDeviceId,
         envelopeType: 'x3dh_ratchet_1to1',
-        envelope,
-        x3dhInit,
+        recipients: [{ deviceId: bobDeviceId, envelope, x3dhInit }],
         contentTypeHint: 'text',
         replyToMessageId: null,
         sentAt: new Date().toISOString(),
@@ -204,6 +277,15 @@ describe('messaging (real crypto end-to-end)', () => {
     expect(row.deletedAt).not.toBeNull();
     expect(row.ciphertext).toBeNull();
     expect(row.envelopeHeader).toBeNull();
+
+    // The per-recipient envelope (where this direct message's actual ciphertext
+    // lives now) must be nulled too — leaving it live after "deleting" the message
+    // would defeat the point of nulling Message's own columns above.
+    const recipientRow = await prisma.messageRecipient.findUniqueOrThrow({
+      where: { messageId_recipientDeviceId: { messageId, recipientDeviceId: bobDeviceId } },
+    });
+    expect(recipientRow.ciphertext).toBeNull();
+    expect(recipientRow.envelopeHeader).toBeNull();
   });
 
   it('respects the reader privacy setting: read receipts are not recorded when disabled', async () => {
@@ -229,10 +311,8 @@ describe('messaging (real crypto end-to-end)', () => {
       conversation.id,
       {
         messageId,
-        recipientDeviceId: bobDeviceId,
         envelopeType: 'x3dh_ratchet_1to1',
-        envelope,
-        x3dhInit,
+        recipients: [{ deviceId: bobDeviceId, envelope, x3dhInit }],
         contentTypeHint: 'text',
         replyToMessageId: null,
         sentAt: new Date().toISOString(),

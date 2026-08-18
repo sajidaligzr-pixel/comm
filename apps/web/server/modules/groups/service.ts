@@ -101,9 +101,10 @@ export async function getGroup(groupId: string, callerUserId: string): Promise<G
  * Which single device to target per OTHER current member, for the CALLER to
  * key-share a group session to (docs/13-roadmap.md's design note) — the client-side
  * analog of "who do I need to send my outbound session to." Delegates to the
- * conversations module's `getGroupMemberPrimaryDevices` (same single-device-per-member
- * simplification `getPrimaryRecipientDevice` already uses for 1:1) after resolving
- * `groupId` to its `conversationId`.
+ * conversations module's `getGroupMemberPrimaryDevices` (still one device per
+ * *member*, a separate, smaller, still-open gap from the one 1:1 messages already
+ * closed — see that function's own docstring) after resolving `groupId` to its
+ * `conversationId`.
  */
 export async function getGroupMemberDeviceTargets(
   groupId: string,

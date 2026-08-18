@@ -38,9 +38,11 @@ Linked Devices
 
 Revoking is a single action (`DELETE /devices/:id`), takes effect immediately server-side (not "on next sync"), and generates a `security_events` row (`device_revoked`) visible in the account's Security activity log — so a user who didn't initiate a revocation (or, conversely, who spots a device they don't recognize) has both the visibility and the one-click response the master prompt requires.
 
-## Multi-device message fan-out
+## Multi-device message fan-out ✅
 
-A sender addresses a message to *every active device* of every conversation recipient (device-level fan-out happens client-side at encrypt time — one ciphertext per recipient device, since each has an independent Olm session; see [05](05-crypto-architecture.md)). `message_recipients` therefore tracks delivery/read state per `(message_id, recipient_device_id)`, not per user — a message is "delivered" to a user once its primary/active device has it, but the UI's ✓✓ read state reflects the state the master prompt actually cares about (did a human read it), which we take as "any of the recipient's devices marked it read," synchronized back to the sender via the same WS fan-out.
+Shipped, for `direct` conversations (docs/13-roadmap.md): a sender addresses a message to *every active device* of every conversation recipient, AND the sender's own other active devices (device-level fan-out happens client-side at encrypt time — one ciphertext per target device, since each has an independent Olm session; see [05](05-crypto-architecture.md)). `message_recipients` tracks delivery/read state per `(message_id, recipient_device_id)`, not per user, and — since this shipped — also carries each `direct` recipient's own `envelope_header`/`ciphertext`/`x3dh_init` (a pairwise session's ciphertext can't be shared across devices the way `group` messages' one Megolm-style session can; `Message`'s own envelope columns stay the source of truth for `group` rows, and for any `direct` message sent before this existed). A message is "delivered" to a user once any of their active devices has it, and the UI's ✓✓ read state is "any of the recipient's devices marked it read," synchronized back to the sender via the same WS fan-out.
+
+Still open: `group` conversations still resolve one device per *other* member (`getGroupMemberPrimaryDevices`), not every device — a smaller, separate gap from the one this section originally described, tracked in docs/13-roadmap.md.
 
 ## Relationship to authentication sessions
 

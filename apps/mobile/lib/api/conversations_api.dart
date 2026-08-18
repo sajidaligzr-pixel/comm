@@ -43,19 +43,21 @@ class ConversationsApi {
     );
   }
 
-  /// The primary (most-recently-active) device id for the other member of a direct
-  /// conversation — what `SendMessageRequest.recipientDeviceId` must target. Null if
-  /// the other member has no active device at all (shouldn't happen in practice —
-  /// every account has at least the device it was created on, unless fully revoked).
-  Future<({String userId, String deviceId})?> recipientDevice(String conversationId) {
+  /// Every OTHER member's active device — what a `direct`-conversation send needs
+  /// to encrypt for (one `encryptForDevice` call each), for real multi-device sync.
+  /// Combined client-side with the caller's own other active devices
+  /// (`DevicesApi.list()`, filtered to `!isCurrentDevice`) for self-fan-out — see
+  /// `thread_screen.dart`'s send flow. Was a singular "primary device" guess before
+  /// this; replaced outright, not kept alongside, since there's no longer a single
+  /// correct device to guess.
+  Future<List<({String userId, String deviceId})>> recipientDevices(String conversationId) {
     return _client.request(
-      '/api/conversations/$conversationId/recipient-device',
+      '/api/conversations/$conversationId/recipient-devices',
       method: 'GET',
-      parse: (data) {
-        if (data == null) return null;
-        final map = data as Map<String, dynamic>;
-        return (userId: map['userId'] as String, deviceId: map['deviceId'] as String);
-      },
+      parse: (data) => (data as List)
+          .map((e) => e as Map<String, dynamic>)
+          .map((m) => (userId: m['userId'] as String, deviceId: m['deviceId'] as String))
+          .toList(),
     );
   }
 }

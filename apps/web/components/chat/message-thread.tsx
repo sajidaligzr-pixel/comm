@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import type { MessageDto, MessageDeletionReason } from '@comm/types';
+import type { MessageDto, MessageDeletionReason, DeviceSummary } from '@comm/types';
 import { utf8ToBytes, bytesToBase64 } from '@comm/crypto';
 import { cn } from '@/lib/cn';
 import { formatBubbleTime, formatDateSeparator, formatRecordingTime, isSameCalendarDay } from '@/lib/format';
@@ -124,7 +124,14 @@ export function MessageThread({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const recipientDeviceIdRef = useRef<string | null>(null);
+  // Every device an outgoing message needs its own independently-encrypted envelope
+  // for — the other member's active devices, plus the caller's own other active
+  // devices (self-fan-out — a second phone, a desktop client, a web tab left open
+  // elsewhere). Refreshed on every load, same timing as the old single-device ref
+  // this replaced; a device that comes online mid-thread is picked up the next time
+  // this effect reruns (conversation reopen), not mid-session — an acceptable,
+  // bounded staleness window, same one the old ref already had.
+  const targetDeviceIdsRef = useRef<Array<{ userId: string; deviceId: string }>>([]);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -224,10 +231,14 @@ export function MessageThread({
       const cached = await loadCachedMessages(kek, conversationId);
       if (!cancelled) setMessages(cached);
 
-      const recipient = await apiFetch<{ userId: string; deviceId: string } | null>(
-        `/api/conversations/${conversationId}/recipient-device`,
-      );
-      recipientDeviceIdRef.current = recipient?.deviceId ?? null;
+      const [otherMemberDevices, ownDevices] = await Promise.all([
+        apiFetch<Array<{ userId: string; deviceId: string }>>(`/api/conversations/${conversationId}/recipient-devices`),
+        apiFetch<DeviceSummary[]>('/api/devices'),
+      ]);
+      const ownOtherDevices = ownDevices
+        .filter((d) => !d.isCurrentDevice && d.status === 'active')
+        .map((d) => ({ userId: currentUserId, deviceId: d.id }));
+      targetDeviceIdsRef.current = [...otherMemberDevices, ...ownOtherDevices];
 
       // Catch up on anything this device hasn't decrypted yet — Double Ratchet
       // message keys are single-use, so this is a one-shot "first look" at each
@@ -416,8 +427,8 @@ export function MessageThread({
       setError('This device is locked. Please sign in again.');
       return;
     }
-    const recipientDeviceId = recipientDeviceIdRef.current;
-    if (!recipientDeviceId) {
+    const targets = targetDeviceIdsRef.current;
+    if (targets.length === 0) {
       setError('This contact has no active device to message yet.');
       return;
     }
@@ -427,7 +438,18 @@ export function MessageThread({
     setReplyingTo(null);
 
     try {
-      const { envelope, x3dhInit } = await encryptForDevice(otherUserId, recipientDeviceId, opts.plaintext);
+      // One independent envelope per target device (the other member's active
+      // devices, and the caller's own other active devices) — real multi-device
+      // sync, not just delivery to whichever single device used to be guessed as
+      // "primary." `encryptForDevice` is safe to call any number of times; each call
+      // either reuses that device's already-established ratchet session or runs a
+      // fresh X3DH handshake against its published bundle first.
+      const recipients = await Promise.all(
+        targets.map(async (t) => {
+          const { envelope, x3dhInit } = await encryptForDevice(t.userId, t.deviceId, opts.plaintext);
+          return { deviceId: t.deviceId, envelope, x3dhInit };
+        }),
+      );
       const sentAt = new Date().toISOString();
 
       setPendingIds((prev) => new Set(prev).add(messageId));
@@ -451,10 +473,8 @@ export function MessageThread({
         method: 'POST',
         body: {
           messageId,
-          recipientDeviceId,
           envelopeType: 'x3dh_ratchet_1to1',
-          envelope,
-          x3dhInit,
+          recipients,
           contentTypeHint: opts.contentTypeHint,
           replyToMessageId,
           sentAt,
