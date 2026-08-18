@@ -23,7 +23,20 @@ export const CallIceCandidateInit = z.object({
 });
 export type CallIceCandidateInit = z.infer<typeof CallIceCandidateInit>;
 
-export const CallRejectReason = z.enum(['declined', 'busy', 'no-answer']);
+// 'answered_elsewhere' is server-generated only (never sent by a client in a
+// CallRejectRequest) — see message-handlers.ts's `call.answer` case: when one of
+// this user's several simultaneously-active devices answers, every OTHER device
+// that was also ringing for the same call gets told this, the multi-device
+// counterpart to a real phone's "answered on another device, stop ringing here."
+// Found live as the root cause of "notification arrives, but no incoming-call
+// screen anywhere" — a call was being targeted at exactly one of a user's active
+// devices (`getPrimaryRecipientDevice`'s "most recently active" guess), which is
+// fragile the moment more than one of a user's devices is genuinely
+// active — routine after a reinstall during testing, but just as real for anyone
+// who's simply signed in on both apps/web and apps/mobile at once. Call signaling
+// now fans out to every active device of the other conversation member instead of
+// guessing one.
+export const CallRejectReason = z.enum(['declined', 'busy', 'no-answer', 'answered_elsewhere']);
 export type CallRejectReason = z.infer<typeof CallRejectReason>;
 
 /** C→S WS envelopes (docs/04-websocket-realtime.md). Every event carries

@@ -497,7 +497,16 @@ class CallController extends StateNotifier<CallUiState> {
 
   void _onRejected(Map<String, dynamic> payload) {
     if (state.call?.callId != payload['callId']) return;
-    _teardown(payload['reason'] == 'busy' ? 'Busy' : 'Call declined');
+    final reason = payload['reason'];
+    final message = reason == 'busy'
+        ? 'Busy'
+        : reason == 'answered_elsewhere'
+        // Another of this account's active devices answered first — the
+        // multi-device fan-out in call.invite (message-handlers.ts) is what makes
+        // this reachable at all now; see that handler's own docstring.
+        ? 'Answered on another device'
+        : 'Call declined';
+    _teardown(message);
   }
 
   void _onEnded(Map<String, dynamic> payload) {

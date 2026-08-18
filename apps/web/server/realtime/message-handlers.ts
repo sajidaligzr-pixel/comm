@@ -21,9 +21,9 @@ import { RATE_LIMIT_RULES } from '@comm/security';
 import type { AuthContext } from '../common/auth';
 import { prisma } from '@comm/database';
 import { sendMessage, acknowledgeDelivered, markConversationRead, getMessageSenderDeviceId } from '../modules/messages/service';
-import { getAllOtherMembersActiveDeviceIds, requireConversationMembership, getPrimaryRecipientDevice } from '../modules/conversations/service';
+import { getAllOtherMembersActiveDeviceIds, requireConversationMembership } from '../modules/conversations/service';
 import { createGroupKeyShare } from '../modules/groups/key-share-service';
-import { setPendingCall, clearPendingCall } from '../modules/calls/pending';
+import { setPendingCall, clearPendingCall, getPendingCall } from '../modules/calls/pending';
 import { recordCallInvited, recordCallAnswered, recordCallDeclined, recordCallEnded } from '../modules/calls/history';
 import {
   publishNewMessage,
@@ -149,22 +149,38 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
       }
 
       // Call signaling (docs/04-websocket-realtime.md's "Call signaling") — a blind
-      // relay authorized purely by conversation membership. `getPrimaryRecipientDevice`
+      // relay authorized purely by conversation membership. `getAllOtherMembersActiveDeviceIds`
       // both checks membership AND resolves who to relay to; nothing here trusts a
       // client-claimed device id, same pattern as message.send/typing/read above.
+      //
+      // Fans out to EVERY active device of the other conversation member, not just
+      // a single guessed "primary" one (`getPrimaryRecipientDevice`, used here until
+      // this pass) — found live as the root cause of "the push notification arrives
+      // but no incoming-call screen ever appears": that heuristic picks whichever
+      // device has the most recent `lastActiveAt`, which is only ever a guess the
+      // instant more than one of a user's devices is genuinely active at once
+      // (routine during mobile testing after a reinstall registers a fresh device
+      // without the old session ever being told to stop, but just as real for
+      // anyone signed into apps/web and apps/mobile simultaneously). Ringing every
+      // active device and letting whichever one answers win — see call.answer
+      // below — is what a real phone does across multiple devices, not a
+      // workaround; messages/typing/read already fan out the identical way via this
+      // same helper.
       case 'call.invite': {
         await enforceRateLimit(RATE_LIMIT_RULES.callInvite, ctx.userId);
         const body = CallInviteEnvelope.parse(parsed);
-        const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
-        if (recipient) {
+        const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
+        if (targets.length > 0) {
           const caller = await prisma.user.findUnique({ where: { id: ctx.userId }, select: { displayName: true } });
           const fromDisplayName = caller?.displayName ?? 'Unknown';
-          // Stored BEFORE the pub/sub publish below, not after — a device that
-          // reconnects and checks GET /calls/pending in the narrow window between
-          // these two calls should already find it, not race an empty result.
-          await setPendingCall(recipient.deviceId, body.conversationId, body.callId, ctx.userId, fromDisplayName, body.sdp);
           await recordCallInvited(body.callId, body.conversationId, ctx.userId);
-          await publishCallRing(recipient.deviceId, body.conversationId, body.callId, ctx.userId, fromDisplayName, body.sdp);
+          for (const target of targets) {
+            // Stored BEFORE the pub/sub publish below, not after — a device that
+            // reconnects and checks GET /calls/pending in the narrow window between
+            // these two calls should already find it, not race an empty result.
+            await setPendingCall(target.deviceId, body.conversationId, body.callId, ctx.userId, fromDisplayName, body.sdp);
+            await publishCallRing(target.deviceId, body.conversationId, body.callId, ctx.userId, fromDisplayName, body.sdp);
+          }
         }
         return null;
       }
@@ -172,16 +188,31 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
       case 'call.answer': {
         await enforceRateLimit(RATE_LIMIT_RULES.callSignal, ctx.userId);
         const body = CallAnswerEnvelope.parse(parsed);
-        const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
-        if (recipient) {
+        const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
+        if (targets.length > 0) {
           // A pending-call entry is always keyed by the CALLEE's device id (see
           // call.invite above) — the caller of THIS handler is the callee
-          // answering, so that's `ctx.deviceId` here, not `recipient.deviceId`
-          // (which — same "other conversation member" resolution every case in
-          // this block uses — is the *caller's* device from this side).
+          // answering, so that's `ctx.deviceId` here, not one of `targets` (which —
+          // same "other conversation member" resolution every case in this block
+          // uses — are the *caller's* devices from this side).
           await clearPendingCall(ctx.deviceId);
           await recordCallAnswered(body.callId);
-          await publishCallAnswered(recipient.deviceId, body.conversationId, body.callId, body.sdp);
+          for (const target of targets) {
+            await publishCallAnswered(target.deviceId, body.conversationId, body.callId, body.sdp);
+          }
+          // This user may have OTHER devices that were also ringing for this same
+          // call (the whole reason call.invite fans out above) — now that one has
+          // answered, tell each of them to stop, the multi-device counterpart to a
+          // real phone's "answered elsewhere." Harmless no-op on a device that was
+          // never actually ringing for this callId (checked client-side).
+          const myOtherDevices = await prisma.device.findMany({
+            where: { userId: ctx.userId, status: 'active', id: { not: ctx.deviceId } },
+            select: { id: true },
+          });
+          for (const device of myOtherDevices) {
+            await clearPendingCall(device.id);
+            await publishCallRejected(device.id, body.conversationId, body.callId, 'answered_elsewhere');
+          }
         }
         return null;
       }
@@ -189,9 +220,9 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
       case 'call.ice-candidate': {
         await enforceRateLimit(RATE_LIMIT_RULES.callSignal, ctx.userId);
         const body = CallIceCandidateEnvelope.parse(parsed);
-        const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
-        if (recipient) {
-          await publishCallIceCandidate(recipient.deviceId, body.conversationId, body.callId, body.candidate);
+        const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
+        for (const target of targets) {
+          await publishCallIceCandidate(target.deviceId, body.conversationId, body.callId, body.candidate);
         }
         return null;
       }
@@ -199,14 +230,27 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
       case 'call.reject': {
         await enforceRateLimit(RATE_LIMIT_RULES.callSignal, ctx.userId);
         const body = CallRejectEnvelope.parse(parsed);
-        const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
-        if (recipient) {
-          // call.reject is always sent by the callee (declining, or auto-busy from
-          // call_controller.dart's `_onRing`) — same `ctx.deviceId` reasoning as
-          // call.answer above.
-          await clearPendingCall(ctx.deviceId);
-          await recordCallDeclined(body.callId);
-          await publishCallRejected(recipient.deviceId, body.conversationId, body.callId, body.reason);
+        // call.reject is always sent by the callee (declining, or auto-busy from
+        // call_controller.dart's `_onRing`) — same `ctx.deviceId` reasoning as
+        // call.answer above.
+        await clearPendingCall(ctx.deviceId);
+        await recordCallDeclined(body.callId);
+        // Multi-device: declining on ONE of this user's devices shouldn't stop the
+        // call ringing on their others (matches a real phone) — only tell the
+        // caller once none of this user's OTHER devices still has this same call
+        // pending either, i.e. this was the last one out. `getPendingCall` is
+        // cheap and this list is always tiny (a handful of devices at most).
+        const myOtherDevices = await prisma.device.findMany({
+          where: { userId: ctx.userId, status: 'active', id: { not: ctx.deviceId } },
+          select: { id: true },
+        });
+        const stillRinging = await Promise.all(myOtherDevices.map((d) => getPendingCall(d.id)));
+        const anyStillRinging = stillRinging.some((p) => p?.callId === body.callId);
+        if (!anyStillRinging) {
+          const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
+          for (const target of targets) {
+            await publishCallRejected(target.deviceId, body.conversationId, body.callId, body.reason);
+          }
         }
         return null;
       }
@@ -214,19 +258,19 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
       case 'call.end': {
         await enforceRateLimit(RATE_LIMIT_RULES.callSignal, ctx.userId);
         const body = CallEndEnvelope.parse(parsed);
-        const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
-        if (recipient) {
-          // Unlike answer/reject, call.end can come from either side (the caller's
-          // own ring-timeout giving up with "no answer" — call_controller.dart's
-          // `startCall` — as well as a normal post-connect hangup from either end),
-          // so `ctx.deviceId` isn't reliably "the callee" here the way it is above.
-          // `recipient.deviceId` is: for the no-answer-timeout case it resolves to
-          // the callee (the pending entry's actual key, so this is the case that
-          // matters); for every other case the entry is already gone by now (answer
-          // already cleared it), so this DEL is just a harmless no-op.
-          await clearPendingCall(recipient.deviceId);
-          await recordCallEnded(body.callId);
-          await publishCallEnded(recipient.deviceId, body.conversationId, body.callId);
+        const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
+        // Unlike answer/reject, call.end can come from either side (the caller's
+        // own ring-timeout giving up with "no answer" — call_controller.dart's
+        // `startCall` — as well as a normal post-connect hangup from either end), so
+        // `ctx.deviceId` isn't reliably "the callee" here the way it is above.
+        // Clearing every one of `targets`' pending entries is: for the no-answer-
+        // timeout case, exactly the devices that were ringing (the case that
+        // matters); for every other case those entries are already gone by now
+        // (answer already cleared them), so this is just a harmless no-op.
+        await recordCallEnded(body.callId);
+        for (const target of targets) {
+          await clearPendingCall(target.deviceId);
+          await publishCallEnded(target.deviceId, body.conversationId, body.callId);
         }
         return null;
       }

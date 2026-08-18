@@ -470,7 +470,13 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
     const offRejected = onRealtimeEvent('call.rejected', (payload) => {
       const p = payload as unknown as { callId: string; reason: CallRejectReason };
       if (callRef.current?.callId !== p.callId) return;
-      teardown(p.reason === 'busy' ? 'Busy' : 'Call declined');
+      teardown(
+        p.reason === 'busy'
+          ? 'Busy'
+          : p.reason === 'answered_elsewhere'
+            ? 'Answered on another device'
+            : 'Call declined',
+      );
     });
 
     const offEnded = onRealtimeEvent('call.ended', (payload) => {
