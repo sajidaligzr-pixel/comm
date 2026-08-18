@@ -35,3 +35,6 @@ packages/database/generated/
 # apps/web/.env / apps/worker/.env above.
 /.backup-env
 /.backups/
+
+comm-5d11c-firebase-adminsdk-fbsvc-e0a9fd2487.json
+google-services.json

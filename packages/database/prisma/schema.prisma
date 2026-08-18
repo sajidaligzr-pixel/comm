@@ -62,6 +62,7 @@ model User {
   sentMessages            Message[]
   messageReactions        MessageReaction[]
   groupMemberships        GroupMember[]
+  initiatedCalls          Call[]
 
   @@map("users")
 }
@@ -343,6 +344,7 @@ model Conversation {
   group    Group?               @relation(fields: [groupId], references: [id], onDelete: Cascade)
   members  ConversationMember[]
   messages Message[]
+  calls    Call[]
 
   @@map("conversations")
 }
@@ -602,4 +604,49 @@ model GroupKeyShare {
 
   @@index([toDeviceId, consumedAt])
   @@map("group_key_shares")
+}
+
+/// Call history (docs/02-database-schema.md's "Calls" section, docs/13-roadmap.md's
+/// tracked gap — "no recent calls list, no missed-call log") — live signaling
+/// (server/realtime/message-handlers.ts's `call.*` cases) shipped well before this;
+/// this is that persistence layer, finally landing. Trimmed from the doc's original
+/// forward sketch: no `type` column (only `voice` exists — added if/when video
+/// calling does), no `end_reason` (the three `CallStatus` values already say
+/// everything a call-log UI needs to show), and no separate `call_participants`
+/// table (1:1-only calling means "the other participant" is always just the
+/// conversation's other member — a real, generalizable need only once group calls
+/// exist, matching this project's own "add a table when the code that uses it
+/// lands" rule already stated at the top of this file).
+///
+/// One row per call, `id` is the client-generated `callId` already used throughout
+/// call signaling (same "client UUID doubles as the idempotency key" convention
+/// `Message.id` uses) — written once at `call.invite` (status defaults to `missed`,
+/// the correct outcome if nothing later updates it — a caller who gives up before
+/// any answer is exactly a missed call) and updated in place at `call.answer`
+/// (-> `answered`, `startedAt` set) / `call.reject` (-> `declined`) / `call.end`
+/// (`endedAt` set; status only changes if it was never answered — see
+/// server/modules/calls/history.ts).
+model Call {
+  id              String     @id @db.Uuid
+  conversationId  String     @map("conversation_id") @db.Uuid
+  initiatorUserId String     @map("initiator_user_id") @db.Uuid
+  status          CallStatus @default(missed)
+  startedAt       DateTime?  @map("started_at")
+  endedAt         DateTime?  @map("ended_at")
+  createdAt       DateTime   @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  initiator    User         @relation(fields: [initiatorUserId], references: [id], onDelete: Cascade)
+
+  // The "list my recent calls across every conversation, newest first" query
+  // (server/modules/calls/history.ts) — conversationId narrows to one
+  // conversation's own membership-scoped fetch first, createdAt orders the result.
+  @@index([conversationId, createdAt])
+  @@map("calls")
+}
+
+enum CallStatus {
+  answered
+  missed
+  declined
 }

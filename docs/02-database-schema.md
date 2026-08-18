@@ -255,30 +255,20 @@ Index: `(to_device_id, consumed_at)` — the "what's still pending for my device
 
 ## Calls
 
-**Live signaling has shipped ahead of this persistence layer** (docs/13-roadmap.md's Phase 6 slice) — 1:1 audio calling works end-to-end today (`server/realtime/message-handlers.ts`'s `call.*` cases, docs/04-websocket-realtime.md's "Call signaling" section) as a pure blind relay: no DB row is ever written for a call. The tables below (call type/status/duration history, multi-participant tracking) remain forward design, not yet in the Prisma schema — a real, tracked gap (no "recent calls" list, no missed-call history), not an oversight.
+**Shipped** (apps/mobile's push notification pass — the persistence layer live signaling shipped well ahead of, per this section's original note below). One row per call, written and updated by `server/realtime/message-handlers.ts`'s `call.*` cases as the call resolves — see the `Call` Prisma model's own docstring (schema.prisma) for the exact state machine, and `server/modules/calls/history.ts` for how `GET /api/calls/history` (apps/mobile's "Calls" tab) derives direction and the other party from it.
+
+Trimmed from this doc's original forward sketch below (kept for context, not current): no `type` column (only `voice` exists — add it if/when video calling does), no `end_reason` (the three `CallStatus` values already say everything a call-log UI needs), and no separate `call_participants` table — 1:1-only calling means "the other participant" is always just the conversation's other member; a real, generalizable need only once group calls exist.
 
 ### `calls`
 | column | type | notes |
 |---|---|---|
-| id | uuid pk | |
+| id | uuid pk | Client-generated `callId`, same "doubles as the idempotency key" convention `messages.id` uses |
 | conversation_id | uuid fk → conversations.id | |
-| initiator_user_id | uuid fk → users.id | |
-| type | enum(`voice`,`video`) not null | |
-| status | enum(`ringing`,`active`,`ended`,`missed`,`declined`) not null | |
-| started_at | timestamptz null | |
-| ended_at | timestamptz null | |
-| end_reason | enum(`hangup`,`timeout`,`declined`,`error`) null | |
-
-### `call_participants`
-| column | type | notes |
-|---|---|---|
-| call_id | uuid fk → calls.id | |
-| user_id | uuid fk → users.id | |
-| device_id | uuid fk → devices.id | |
-| joined_at | timestamptz null | |
-| left_at | timestamptz null | |
-
-Primary key: `(call_id, user_id, device_id)`. Media never transits the server (see [08-threat-model](08-threat-model.md), call security) — this table is signaling/history metadata only.
+| initiator_user_id | uuid fk → users.id | The caller — `direction` (incoming/outgoing) in the API response is just a comparison against the viewing user |
+| status | enum(`answered`,`missed`,`declined`) not null default `missed` | Written at `call.invite`, before either side has acted — the correct default: nothing later resolving it means the caller gave up |
+| started_at | timestamptz null | Set at `call.answer` |
+| ended_at | timestamptz null | Set at `call.reject`/`call.end` |
+| created_at | timestamptz | |
 
 ## Notifications, privacy, safety
 
@@ -287,7 +277,7 @@ Renamed from this doc's original forward-design `push_tokens` name to match the 
 | column | type | notes |
 |---|---|---|
 | device_id | uuid pk fk → devices.id | Primary key, not a separate `id` — a device has at most one live subscription; re-subscribing upserts over the old row |
-| provider | enum(`web_push`,`fcm`) not null default `web_push` | `fcm` reserved, unused — for the future native Android client |
+| provider | enum(`web_push`,`fcm`) not null default `web_push` | `fcm` — **shipped** (apps/mobile's push notification pass): apps/worker's push-dispatch.ts sends through Firebase Cloud Messaging for these instead of Web Push |
 | subscription_ciphertext | bytea not null | Covers the whole `{endpoint, keys}` object, not just the endpoint — both are required together to actually send a push, so encrypting only one would be a half-measure. Encrypted with a server-held key (`PUSH_SUBSCRIPTION_ENC_KEY`, `packages/security`'s `encryptAtRest`/`decryptAtRest`) — **not** the user's KEK, which `apps/worker` (the only place this is ever decrypted) has no way to obtain |
 | created_at | timestamptz | |
 

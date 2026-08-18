@@ -1,6 +1,6 @@
-import { prisma } from '@comm/database';
+import { prisma, PushProvider } from '@comm/database';
 import { encryptAtRest } from '@comm/security';
-import type { PushSubscriptionRequest } from '@comm/types';
+import type { AnyPushSubscriptionRequest } from '@comm/types';
 
 /**
  * Push subscription storage (docs/13-roadmap.md's push notification pass) — the
@@ -20,14 +20,18 @@ function encKey(): string {
 
 /** Upserts by `deviceId` — a device only ever has one live subscription
  * (docs/02-database-schema.md's `push_subscriptions` note); re-subscribing (browser
- * rotation, re-enabling) replaces the old row rather than accumulating stale ones. */
-export async function savePushSubscription(deviceId: string, subscription: PushSubscriptionRequest): Promise<void> {
+ * rotation, re-enabling, apps/mobile's token-refresh handler) replaces the old row
+ * rather than accumulating stale ones. `provider` is stored alongside the ciphertext
+ * (not just inferred from its shape at send time) so apps/worker can route to the
+ * right send path without decrypting first. */
+export async function savePushSubscription(deviceId: string, subscription: AnyPushSubscriptionRequest): Promise<void> {
+  const provider: PushProvider = subscription.provider === 'fcm' ? PushProvider.fcm : PushProvider.web_push;
   const plaintext = Buffer.from(JSON.stringify(subscription), 'utf8');
   const ciphertext = encryptAtRest(encKey(), plaintext);
   await prisma.pushSubscription.upsert({
     where: { deviceId },
-    create: { deviceId, subscriptionCiphertext: ciphertext },
-    update: { subscriptionCiphertext: ciphertext },
+    create: { deviceId, provider, subscriptionCiphertext: ciphertext },
+    update: { provider, subscriptionCiphertext: ciphertext },
   });
 }
 

@@ -81,3 +81,49 @@ export const IceServersResponse = z.object({
   iceServers: z.array(IceServer),
 });
 export type IceServersResponse = z.infer<typeof IceServersResponse>;
+
+/**
+ * `GET /calls/pending` response (apps/mobile's push notification pass) — the durable
+ * counterpart to `CallEvent`'s `call.ring` variant (realtime.ts), for a call this
+ * device's socket wasn't connected to receive live: `publishCallRing` is a bare
+ * Redis pub/sub publish with no subscriber-side durability, so a device that was
+ * fully closed/backgrounded when it fired never gets a second chance at it over WS —
+ * this is that second chance, checked once after reconnecting (server/modules/calls/
+ * pending.ts stores it with a TTL matching the ring timeout, same window the caller's
+ * own client gives up waiting after). Same field shape as `call.ring` on purpose, so
+ * a client can feed either straight into the same "start ringing" handler. `null`
+ * (not a 404) when there's nothing pending — the normal case, not an error.
+ */
+/** `GET /calls/history` response entry (apps/mobile's Calls tab) — see
+ * server/modules/calls/history.ts's own docstring for exactly how `direction` and
+ * `otherUser` get derived. `status` mirrors the `CallStatus` Prisma enum
+ * (schema.prisma's `Call` model) exactly, not redefined here as a Zod enum, to
+ * avoid the two silently drifting apart. */
+export const CallHistoryEntry = z.object({
+  id: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  otherUser: z
+    .object({
+      id: z.string().uuid(),
+      username: z.string(),
+      displayName: z.string(),
+    })
+    .nullable(),
+  direction: z.enum(['incoming', 'outgoing']),
+  status: z.enum(['answered', 'missed', 'declined']),
+  startedAt: z.string().nullable(),
+  endedAt: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type CallHistoryEntry = z.infer<typeof CallHistoryEntry>;
+
+export const PendingCallResponse = z
+  .object({
+    conversationId: z.string().uuid(),
+    callId: z.string().uuid(),
+    fromUserId: z.string().uuid(),
+    fromDisplayName: z.string(),
+    sdp: CallSessionDescription,
+  })
+  .nullable();
+export type PendingCallResponse = z.infer<typeof PendingCallResponse>;

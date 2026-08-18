@@ -130,4 +130,10 @@ export const RATE_LIMIT_RULES = {
   // WS group.key-share relay — as generous as callSignal, since a member-removal
   // rotation fans out one key-share per remaining member in a burst.
   groupKeyShare: { namespace: 'groups:key-share', windowSeconds: 60, max: 120 } satisfies RateLimitRule,
+  // Checked once on every WS reconnect/app-resume (apps/mobile's push notification
+  // pass — see server/modules/calls/pending.ts), not per-keystroke traffic like most
+  // of the rest of this table, but a flaky connection can still reconnect several
+  // times a minute, so this stays generous rather than tight.
+  callPendingCheck: { namespace: 'calls:pending-check', windowSeconds: 60, max: 60 } satisfies RateLimitRule,
+  callHistory: { namespace: 'calls:history', windowSeconds: 60, max: 30 } satisfies RateLimitRule,
 } as const;

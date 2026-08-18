@@ -1,21 +1,41 @@
 /**
  * Push notification dispatch (docs/13-roadmap.md's push notification pass, shipped
- * ahead of the rest of Phase 7) — subscribes to the same `MESSAGE_EVENTS_CHANNEL`
- * `apps/web`'s WS layer already publishes onto (docs/04-websocket-realtime.md), the
- * same shared-channel pattern `jobs/cleanup.ts` already established for `deleted`
- * events. Deliberately NOT a BullMQ consumer (see index.ts's note on why that
- * infrastructure isn't adopted yet) — Redis pub/sub is already the right shape for
- * "react to an event," no queue/retry semantics needed for a best-effort push.
+ * ahead of the rest of Phase 7; extended for apps/mobile's FCM path) — subscribes to
+ * the same `MESSAGE_EVENTS_CHANNEL`/`CALL_EVENTS_CHANNEL` `apps/web`'s WS layer
+ * already publishes onto (docs/04-websocket-realtime.md), the same shared-channel
+ * pattern `jobs/cleanup.ts` already established for `deleted` events. Deliberately
+ * NOT a BullMQ consumer (see index.ts's note on why that infrastructure isn't
+ * adopted yet) — Redis pub/sub is already the right shape for "react to an event,"
+ * no queue/retry semantics needed for a best-effort push.
  *
  * This is the one place `push_subscriptions.subscription_ciphertext` is ever
  * decrypted (docs/02-database-schema.md) — kept out of apps/web's hot request path
  * entirely, so a slow/failing push provider can never add latency to sending a
- * message.
+ * message or ringing a call.
+ *
+ * Two independent providers, chosen per-subscription by its stored `provider`
+ * column (never inferred from the decrypted shape — see push/service.ts's
+ * `savePushSubscription`): `web_push` (existing browser clients, VAPID) and `fcm`
+ * (apps/mobile — Firebase Cloud Messaging, the one delivery layer that can wake a
+ * fully-closed Android app; see .env.example's `FCM_SERVICE_ACCOUNT_JSON`). Either
+ * can be unconfigured independently — a deployment with only VAPID keys set still
+ * pushes to browsers, one with only the FCM credential still pushes to phones.
  */
 import webpush from 'web-push';
-import { prisma } from '@comm/database';
+import { cert, getApps, initializeApp } from 'firebase-admin/app';
+import { getMessaging } from 'firebase-admin/messaging';
+import { prisma, PushProvider } from '@comm/database';
 import { createRedisSubscriber, decryptAtRest } from '@comm/security';
-import { MESSAGE_EVENTS_CHANNEL, type MessageEvent, type PushSubscriptionRequest } from '@comm/types';
+import {
+  MESSAGE_EVENTS_CHANNEL,
+  CALL_EVENTS_CHANNEL,
+  type MessageEvent,
+  type CallEvent,
+  type PushSubscriptionRequest,
+  type FcmPushSubscriptionRequest,
+} from '@comm/types';
+
+type AnyStoredSubscription = PushSubscriptionRequest | FcmPushSubscriptionRequest;
 
 function pushEncKey(): string {
   const key = process.env.PUSH_SUBSCRIPTION_ENC_KEY;
@@ -23,9 +43,9 @@ function pushEncKey(): string {
   return key;
 }
 
-function decodeSubscription(ciphertext: Buffer): PushSubscriptionRequest {
+function decodeSubscription(ciphertext: Buffer): AnyStoredSubscription {
   const plaintext = decryptAtRest(pushEncKey(), ciphertext);
-  return JSON.parse(plaintext.toString('utf8')) as PushSubscriptionRequest;
+  return JSON.parse(plaintext.toString('utf8')) as AnyStoredSubscription;
 }
 
 /** Mirrors the sidebar/reply preview labels components/chat/conversation-list.tsx
@@ -39,10 +59,66 @@ function bodyFor(contentTypeHint: string, senderName: string): string {
   return `New message from ${senderName}`;
 }
 
-async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): Promise<void> {
-  const subRow = await prisma.pushSubscription.findUnique({ where: { deviceId: event.targetDeviceId } });
+async function sendWebPush(subscription: PushSubscriptionRequest, payload: unknown): Promise<void> {
+  await webpush.sendNotification(subscription, JSON.stringify(payload));
+}
+
+/**
+ * Data-only (no top-level `notification` key), deliberately — an FCM message that
+ * includes one is auto-displayed by the OS while this app is backgrounded and never
+ * reaches Dart at all, which is exactly wrong for the call case (needs code to run,
+ * not just a tray icon) and only accidentally right for messages. Sending both
+ * message and call pushes as data-only keeps one code path
+ * (firebaseMessagingBackgroundHandler / the foreground listener,
+ * push_notifications.dart) responsible for turning either into an actual system
+ * notification via flutter_local_notifications, matching how the message
+ * notification already looks whether it came live over WS or cold via push.
+ */
+async function sendFcm(token: string, data: Record<string, string>): Promise<void> {
+  await getMessaging().send({
+    token,
+    data,
+    android: { priority: 'high' },
+    apns: { headers: { 'apns-priority': '10' }, payload: { aps: { contentAvailable: true } } },
+  });
+}
+
+/** `statusCode`/`code` shapes differ between web-push (HTTP-status-like) and
+ * firebase-admin (its own string error codes) — both funnel through here so both
+ * dispatch functions below share one "this subscription is dead, stop trying it"
+ * cleanup instead of duplicating the try/catch twice. */
+async function isGoneError(err: unknown): Promise<boolean> {
+  const statusCode = (err as { statusCode?: number }).statusCode;
+  if (statusCode === 404 || statusCode === 410) return true;
+  const code = (err as { code?: string }).code;
+  return code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token';
+}
+
+async function dispatchTo(deviceId: string, payload: { messagePayload?: unknown; fcmData?: Record<string, string> }): Promise<void> {
+  const subRow = await prisma.pushSubscription.findUnique({ where: { deviceId } });
   if (!subRow) return; // most devices won't have push enabled at all — normal, not an error
 
+  const subscription = decodeSubscription(subRow.subscriptionCiphertext);
+  try {
+    if (subRow.provider === PushProvider.fcm) {
+      if (!fcmConfigured || !payload.fcmData) return;
+      await sendFcm((subscription as FcmPushSubscriptionRequest).token, payload.fcmData);
+    } else {
+      if (!vapidConfigured || !payload.messagePayload) return;
+      await sendWebPush(subscription as PushSubscriptionRequest, payload.messagePayload);
+    }
+  } catch (err) {
+    if (await isGoneError(err)) {
+      // Subscription expired/was revoked/uninstalled on the client's end — clean it
+      // up rather than retrying a dead target on every future event.
+      await prisma.pushSubscription.deleteMany({ where: { deviceId } });
+    } else {
+      console.error('[worker] push dispatch failed', err);
+    }
+  }
+}
+
+async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): Promise<void> {
   const device = await prisma.device.findUnique({ where: { id: event.targetDeviceId }, select: { userId: true } });
   if (!device) return; // device was revoked/deleted between the message being sent and this running
 
@@ -58,27 +134,32 @@ async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): 
     where: { id: event.message.senderUserId },
     select: { displayName: true },
   });
+  const senderName = sender?.displayName ?? 'someone';
+  const body = bodyFor(event.message.contentTypeHint, senderName);
 
-  const subscription = decodeSubscription(subRow.subscriptionCiphertext);
-  const payload = JSON.stringify({
-    title: 'Comm',
-    body: bodyFor(event.message.contentTypeHint, sender?.displayName ?? 'someone'),
-    conversationId: event.message.conversationId,
+  await dispatchTo(event.targetDeviceId, {
+    messagePayload: { title: 'Comm', body, conversationId: event.message.conversationId },
+    fcmData: { type: 'message', conversationId: event.message.conversationId, title: 'Comm', body },
   });
-
-  try {
-    await webpush.sendNotification(subscription, payload);
-  } catch (err) {
-    const statusCode = (err as { statusCode?: number }).statusCode;
-    if (statusCode === 404 || statusCode === 410) {
-      // Subscription expired/was revoked on the browser's end — clean it up rather
-      // than retrying a dead endpoint on every future message.
-      await prisma.pushSubscription.deleteMany({ where: { deviceId: event.targetDeviceId } });
-    } else {
-      console.error('[worker] push dispatch failed', err);
-    }
-  }
 }
+
+/** No web_push equivalent — browsers ringing from a fully-closed tab was never in
+ * scope (docs/13-roadmap.md), only apps/mobile asked for this. `messagePayload` is
+ * left unset in the `dispatchTo` call below on purpose: a `web_push`-provider
+ * subscription simply gets nothing for a call event, same as it always has. */
+async function handleCallRing(event: Extract<CallEvent, { type: 'call.ring' }>): Promise<void> {
+  await dispatchTo(event.targetDeviceId, {
+    fcmData: {
+      type: 'call',
+      conversationId: event.conversationId,
+      callId: event.callId,
+      fromDisplayName: event.fromDisplayName,
+    },
+  });
+}
+
+let vapidConfigured = false;
+let fcmConfigured = false;
 
 function configureVapid(): boolean {
   const publicKey = process.env.VAPID_PUBLIC_KEY;
@@ -91,34 +172,82 @@ function configureVapid(): boolean {
   return true;
 }
 
-export function startPushDispatcher(): void {
-  if (!configureVapid()) {
-    console.log('[worker] VAPID keys not configured — push notification dispatch disabled (see .env.example)');
-    return;
+/** `FCM_SERVICE_ACCOUNT_JSON` is the *entire* service-account credential file's
+ * contents as one env var (Firebase console → Project settings → Service accounts
+ * → Generate new private key), not a file path — same "everything through env vars,
+ * nothing read from a mounted file" convention `PUSH_SUBSCRIPTION_ENC_KEY`/VAPID
+ * keys above already use, and it means this deploys the same way on any host
+ * without also having to manage a secret file's filesystem permissions. */
+function configureFcm(): boolean {
+  const raw = process.env.FCM_SERVICE_ACCOUNT_JSON;
+  if (!raw) return false;
+  try {
+    const serviceAccount = JSON.parse(raw) as Record<string, unknown>;
+    if (getApps().length === 0) {
+      initializeApp({ credential: cert(serviceAccount) });
+    }
+    return true;
+  } catch (err) {
+    console.error('[worker] FCM_SERVICE_ACCOUNT_JSON is set but not valid JSON — FCM push disabled', err);
+    return false;
   }
+}
 
+export function startPushDispatcher(): void {
+  vapidConfigured = configureVapid();
+  fcmConfigured = configureFcm();
+  if (!vapidConfigured) {
+    console.log('[worker] VAPID keys not configured — web push dispatch disabled (see .env.example)');
+  }
+  if (!fcmConfigured) {
+    console.log('[worker] FCM_SERVICE_ACCOUNT_JSON not configured — FCM push dispatch disabled (see .env.example)');
+  }
+  if (!vapidConfigured && !fcmConfigured) return; // nothing to subscribe for
+
+  // One connection, both channels — ioredis multiplexes fine over a single
+  // subscriber, and the `channel` check in the shared 'message' handler below
+  // already routes each event to the right side, so there's no need for two.
+  // Calls only ever push via FCM (see handleCallRing's docstring), so the call
+  // channel is only subscribed when FCM is actually configured — subscribing to it
+  // with only VAPID set would just mean every event routes to a no-op.
   const subscriber = createRedisSubscriber();
-  subscriber.subscribe(MESSAGE_EVENTS_CHANNEL).catch((err) => {
+  const channels = fcmConfigured ? [MESSAGE_EVENTS_CHANNEL, CALL_EVENTS_CHANNEL] : [MESSAGE_EVENTS_CHANNEL];
+  subscriber.subscribe(...channels).catch((err) => {
     console.error('[worker] failed to subscribe for push dispatch', err);
   });
-
   subscriber.on('message', (channel, raw) => {
-    if (channel !== MESSAGE_EVENTS_CHANNEL) return;
-    void (async () => {
-      let event: MessageEvent;
-      try {
-        event = JSON.parse(raw) as MessageEvent;
-      } catch {
-        return;
-      }
-      if (event.type !== 'new') return; // only new-message arrival triggers a push, not delivered/read/typing/deleted
-      try {
-        await handleNewMessage(event);
-      } catch (err) {
-        console.error('[worker] push dispatch error', err);
-      }
-    })();
+    if (channel === MESSAGE_EVENTS_CHANNEL) {
+      void (async () => {
+        let event: MessageEvent;
+        try {
+          event = JSON.parse(raw) as MessageEvent;
+        } catch {
+          return;
+        }
+        if (event.type !== 'new') return; // only new-message arrival triggers a push, not delivered/read/typing/deleted
+        try {
+          await handleNewMessage(event);
+        } catch (err) {
+          console.error('[worker] push dispatch error', err);
+        }
+      })();
+    } else if (channel === CALL_EVENTS_CHANNEL) {
+      void (async () => {
+        let event: CallEvent;
+        try {
+          event = JSON.parse(raw) as CallEvent;
+        } catch {
+          return;
+        }
+        if (event.type !== 'call.ring') return; // only the initial invite needs to wake a closed app
+        try {
+          await handleCallRing(event);
+        } catch (err) {
+          console.error('[worker] call push dispatch error', err);
+        }
+      })();
+    }
   });
 
-  console.log('[worker] push dispatcher subscribed to message events');
+  console.log('[worker] push dispatcher subscribed to message/call events');
 }

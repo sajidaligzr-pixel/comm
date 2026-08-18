@@ -2,7 +2,7 @@
 
 **Revision note**: the API is implemented as Next.js App Router Route Handlers inside `apps/web` (no separate NestJS service) — see [00-overview](00-overview.md) and [01-folder-structure](01-folder-structure.md). Route paths below map to Next.js's file-based dynamic segments (e.g. `/devices/:id` is the folder `app/api/devices/[id]/route.ts`); the `:param` notation is kept here as the framework-agnostic way to describe the contract.
 
-**Shipped status**: `/auth`, `/users`, `/devices`, `/admin`, `/audit` (Phase 2), `/keys`, `/conversations`, `/messages` sans reactions (Phase 3), `/calls/turn-credentials` (a Phase 6 slice shipped early), `/push/subscribe`+`/push/unsubscribe` (a Phase 7 slice shipped early), `/media` (the rest of Phase 4 shipped early), and most of `/groups` (Phase 5 shipped early — see below) are implemented and tested. `/contacts`, `/calls/:id/history`, `/privacy`, and the remaining `/groups` routes (invite links, role changes) are forward design for their respective later phases ([13-roadmap](13-roadmap.md)) — not built yet, called out inline.
+**Shipped status**: `/auth`, `/users`, `/devices`, `/admin`, `/audit` (Phase 2), `/keys`, `/conversations`, `/messages` sans reactions (Phase 3), `/calls/turn-credentials`+`/calls/history`+`/calls/pending` (a Phase 6 slice shipped early), `/push/subscribe`+`/push/unsubscribe` (a Phase 7 slice shipped early, later extended with an FCM path for apps/mobile), `/media` (the rest of Phase 4 shipped early), and most of `/groups` (Phase 5 shipped early — see below) are implemented and tested. `/contacts`, `/privacy`, and the remaining `/groups` routes (invite links, role changes) are forward design for their respective later phases ([13-roadmap](13-roadmap.md)) — not built yet, called out inline.
 
 ## Contract approach
 
@@ -98,11 +98,12 @@ Differs slightly from this section's original sketch: the request that actually 
 | `/contacts/report` | POST | Maps to `reports` table, requires explicit `user_submitted_evidence` payload the client attaches from its own decrypted view |
 
 ### `/calls`
-**Live signaling shipped (1:1 audio) — see [04-websocket-realtime](04-websocket-realtime.md#call-signaling) for the actual call setup/teardown, which rides the WS channel, not REST.** This section is just the one REST endpoint calling needs.
+**Live signaling shipped (1:1 audio) — see [04-websocket-realtime](04-websocket-realtime.md#call-signaling) for the actual call setup/teardown, which rides the WS channel, not REST.** The REST endpoints below are the catch-up/history layer around that signaling, not the calling itself.
 | Route | Method | Notes | Status |
 |---|---|---|---|
 | `/calls/turn-credentials` | POST | Mints a short-lived coturn credential (HMAC `use-auth-secret`, 10-minute TTL), not a static secret — see [11-deployment-architecture](11-deployment-architecture.md). Returns an empty `iceServers` list (not an error) if `TURN_SHARED_SECRET`/`TURN_URLS` aren't configured yet, which is enough for same-network/localhost testing but not real-world NAT traversal | **Shipped** |
-| `/calls/:id/history` | GET | Metadata only (duration, participants), never media — waits on the `calls`/`call_participants` tables (docs/02-database-schema.md), not built yet | Not yet shipped |
+| `/calls/history` | GET | `?limit=` (default 50, capped 100). Every call across every conversation this user is in, newest first — backs apps/mobile's "Calls" tab. See `server/modules/calls/history.ts` | **Shipped** |
+| `/calls/pending` | GET | The durable counterpart to a live `call.ring` WS event — apps/mobile checks this on every WS reconnect, since a device that was closed/backgrounded when a call rang has no way to receive that event a second time. `null` (not 404) when nothing's pending — the normal case. See `server/modules/calls/pending.ts` | **Shipped** |
 
 ### `/admin`, `/audit` — shipped (Phase 2)
 `POST /admin/users` (provision + generate invite), `POST /admin/users/:id/suspend`, `GET /audit/security-events` (self-scoped) — **no route in `/admin` reads message content, by construction there is no service method that could return it.** `GET /admin/reports` waits on the `reports` table (Phase 9).
@@ -113,7 +114,7 @@ Schema (`user_privacy_settings`) exists and is seeded with defaults on invite re
 ### `/push` — **shipped** (docs/13-roadmap.md's push notification pass, ahead of the rest of Phase 7)
 | Route | Method | Notes |
 |---|---|---|
-| `/push/subscribe` | POST | Body: `{ endpoint, keys: { p256dh, auth } }` (the Web Push API's own `PushSubscriptionJSON` shape). Stored against `ctx.deviceId` from the authenticated session — never a client-claimed device id. Upserts: a device only ever has one live subscription |
+| `/push/subscribe` | POST | Body is either `{ endpoint, keys: { p256dh, auth } }` (the Web Push API's own `PushSubscriptionJSON` shape — `provider` optional, defaults to `web_push`, so the existing web client's request body needs no change) or `{ provider: 'fcm', token }` (apps/mobile's FCM registration token). Stored against `ctx.deviceId` from the authenticated session — never a client-claimed device id. Upserts: a device only ever has one live subscription |
 | `/push/unsubscribe` | POST | Removes this device's subscription row |
 
 No `/notifications` (preferences) CRUD route yet — `notification_preferences` is read (not written) by `apps/worker`'s dispatch, seeded with defaults on invite redemption, but there's no UI or API to change it post-signup. Changing `conversations_default`/`show_preview` today means editing the row directly; a real settings route is still open, same "straightforward once scheduled" framing as `/privacy` above.

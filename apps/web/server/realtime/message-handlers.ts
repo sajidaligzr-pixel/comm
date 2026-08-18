@@ -23,6 +23,8 @@ import { prisma } from '@comm/database';
 import { sendMessage, acknowledgeDelivered, markConversationRead, getMessageSenderDeviceId } from '../modules/messages/service';
 import { getAllOtherMembersActiveDeviceIds, requireConversationMembership, getPrimaryRecipientDevice } from '../modules/conversations/service';
 import { createGroupKeyShare } from '../modules/groups/key-share-service';
+import { setPendingCall, clearPendingCall } from '../modules/calls/pending';
+import { recordCallInvited, recordCallAnswered, recordCallDeclined, recordCallEnded } from '../modules/calls/history';
 import {
   publishNewMessage,
   publishDelivered,
@@ -156,14 +158,13 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
         if (recipient) {
           const caller = await prisma.user.findUnique({ where: { id: ctx.userId }, select: { displayName: true } });
-          await publishCallRing(
-            recipient.deviceId,
-            body.conversationId,
-            body.callId,
-            ctx.userId,
-            caller?.displayName ?? 'Unknown',
-            body.sdp,
-          );
+          const fromDisplayName = caller?.displayName ?? 'Unknown';
+          // Stored BEFORE the pub/sub publish below, not after — a device that
+          // reconnects and checks GET /calls/pending in the narrow window between
+          // these two calls should already find it, not race an empty result.
+          await setPendingCall(recipient.deviceId, body.conversationId, body.callId, ctx.userId, fromDisplayName, body.sdp);
+          await recordCallInvited(body.callId, body.conversationId, ctx.userId);
+          await publishCallRing(recipient.deviceId, body.conversationId, body.callId, ctx.userId, fromDisplayName, body.sdp);
         }
         return null;
       }
@@ -173,6 +174,13 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         const body = CallAnswerEnvelope.parse(parsed);
         const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
         if (recipient) {
+          // A pending-call entry is always keyed by the CALLEE's device id (see
+          // call.invite above) — the caller of THIS handler is the callee
+          // answering, so that's `ctx.deviceId` here, not `recipient.deviceId`
+          // (which — same "other conversation member" resolution every case in
+          // this block uses — is the *caller's* device from this side).
+          await clearPendingCall(ctx.deviceId);
+          await recordCallAnswered(body.callId);
           await publishCallAnswered(recipient.deviceId, body.conversationId, body.callId, body.sdp);
         }
         return null;
@@ -193,6 +201,11 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         const body = CallRejectEnvelope.parse(parsed);
         const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
         if (recipient) {
+          // call.reject is always sent by the callee (declining, or auto-busy from
+          // call_controller.dart's `_onRing`) — same `ctx.deviceId` reasoning as
+          // call.answer above.
+          await clearPendingCall(ctx.deviceId);
+          await recordCallDeclined(body.callId);
           await publishCallRejected(recipient.deviceId, body.conversationId, body.callId, body.reason);
         }
         return null;
@@ -203,6 +216,16 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         const body = CallEndEnvelope.parse(parsed);
         const recipient = await getPrimaryRecipientDevice(body.conversationId, ctx.userId);
         if (recipient) {
+          // Unlike answer/reject, call.end can come from either side (the caller's
+          // own ring-timeout giving up with "no answer" — call_controller.dart's
+          // `startCall` — as well as a normal post-connect hangup from either end),
+          // so `ctx.deviceId` isn't reliably "the callee" here the way it is above.
+          // `recipient.deviceId` is: for the no-answer-timeout case it resolves to
+          // the callee (the pending entry's actual key, so this is the case that
+          // matters); for every other case the entry is already gone by now (answer
+          // already cleared it), so this DEL is just a harmless no-op.
+          await clearPendingCall(recipient.deviceId);
+          await recordCallEnded(body.callId);
           await publishCallEnded(recipient.deviceId, body.conversationId, body.callId);
         }
         return null;
