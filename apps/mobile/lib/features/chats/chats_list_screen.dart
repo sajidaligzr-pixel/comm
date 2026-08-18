@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../api/api_client.dart';
 import '../../api/dtos.dart';
+import '../../app/app.dart' show WhatsAppColors;
 import '../../app/providers.dart';
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
@@ -171,7 +172,11 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
             title: Text(c.displayTitle()),
             subtitle: c.type == 'group' ? Text('${c.groupMemberCount ?? 0} members') : null,
             trailing: c.unreadCount > 0
-                ? CircleAvatar(radius: 11, child: Text('${c.unreadCount}', style: const TextStyle(fontSize: 11)))
+                ? CircleAvatar(
+                    radius: 11,
+                    backgroundColor: WhatsAppColors.green,
+                    child: Text('${c.unreadCount}', style: const TextStyle(fontSize: 11, color: Colors.white)),
+                  )
                 : null,
             onTap: () => context.push('/chats/${c.id}'),
           );

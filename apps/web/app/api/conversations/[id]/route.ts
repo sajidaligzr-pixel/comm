@@ -3,7 +3,18 @@ import { UpdateConversationRequest } from '@comm/types';
 import { handleRoute, jsonOk } from '@/server/common/errors';
 import { requireAuth, requireCsrf } from '@/server/common/auth';
 import { parseBody } from '@/server/common/validate';
-import { updateConversationSettings } from '@/server/modules/conversations/service';
+import { getConversation, updateConversationSettings } from '@/server/modules/conversations/service';
+
+// Single-conversation fetch, membership-gated in the service. Read-only, so no
+// requireCsrf — same convention GET /api/conversations already follows.
+export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  return handleRoute(async () => {
+    const ctx = await requireAuth(req);
+    const { id: conversationId } = await params;
+    const conversation = await getConversation(ctx.userId, conversationId);
+    return jsonOk(conversation);
+  });
+}
 
 // Two mutable conversation settings today: the disappearing-message timer (shared)
 // and the archived flag (per-caller) — see UpdateConversationRequest's docstring.

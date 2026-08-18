@@ -109,6 +109,23 @@ export async function listConversations(callerUserId: string): Promise<Conversat
 }
 
 /**
+ * Single-conversation fetch, membership-gated. The web client has never needed
+ * this as a REST route — `(app)/chats/[id]/page.tsx` is server-rendered and reads
+ * straight from `listConversations`/the DB — but the mobile client (lib/features/
+ * chats/thread_screen.dart) has no server-rendered middle step and fetches a
+ * conversation's summary directly on opening a thread. Was missing entirely until
+ * a real device test surfaced it: the route file existed for PATCH already, so a
+ * GET there 405'd instead of 404'ing, and the mobile client's generic
+ * "malformed response" handling (it expects every response to be this app's own
+ * `{ok, data}` JSON envelope, which a framework-generated 405 page isn't) is what
+ * actually surfaced as "malformed response from server (405)" on the phone.
+ */
+export async function getConversation(callerUserId: string, conversationId: string): Promise<ConversationSummary> {
+  await requireConversationMembership(callerUserId, conversationId);
+  return toSummary(conversationId, callerUserId);
+}
+
+/**
  * `disappearingTimer` is a shared conversation setting — either member can change
  * it, same as WhatsApp (not owned by whoever last touched it); enforcement of the
  * timer itself is `apps/worker`'s expiry sweep (jobs/cleanup.ts), this just persists

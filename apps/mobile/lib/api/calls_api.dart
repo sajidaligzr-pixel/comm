@@ -27,6 +27,7 @@ class CallsApi {
     try {
       return await _client.request(
         '/api/calls/turn-credentials',
+        method: 'POST',
         parse: (data) => ((data as Map<String, dynamic>)['iceServers'] as List)
             .map((e) => IceServer.fromJson(e as Map<String, dynamic>))
             .toList(),

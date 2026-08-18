@@ -20,6 +20,7 @@ class DevicesApi {
   Future<LinkDeviceStartResponse> startLink() {
     return _client.request(
       '/api/devices/link/start',
+      method: 'POST',
       parse: (data) => LinkDeviceStartResponse.fromJson(data as Map<String, dynamic>),
     );
   }

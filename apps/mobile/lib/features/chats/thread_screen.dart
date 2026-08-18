@@ -23,6 +23,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../api/api_client.dart';
 import '../../api/dtos.dart';
+import '../../app/app.dart' show WhatsAppColors;
 import '../../app/providers.dart';
 import '../../crypto/attachment_crypto.dart' as attach_crypto;
 import '../../crypto/conversation_crypto.dart' as convo;
@@ -396,6 +397,10 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
             IconButton(icon: const Icon(Icons.info_outline), tooltip: 'Group info', onPressed: () => context.push('/groups/${conversation.groupId}/info')),
         ],
       ),
+      // WhatsApp's chat-thread background is a flat tan/beige behind the bubbles,
+      // distinct from the white chat-list/app-shell background — Scaffold's own
+      // backgroundColor is set per-screen here rather than globally for that reason.
+      backgroundColor: WhatsAppColors.chatBackground,
       body: SafeArea(child: _buildBody()),
     );
   }
@@ -417,39 +422,65 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                       _MessageBubble(message: _messages[index], onDownload: _downloadAttachment),
                 ),
         ),
-        SafeArea(
-          top: false,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: Row(
-              children: [
-                PopupMenuButton<String>(
-                  enabled: !_sending,
-                  icon: const Icon(Icons.add_circle_outline),
-                  onSelected: (choice) => choice == 'photo' ? _pickAndSendPhoto() : _pickAndSendFile(),
-                  itemBuilder: (context) => const [
-                    PopupMenuItem(value: 'photo', child: ListTile(leading: Icon(Icons.photo), title: Text('Photo'))),
-                    PopupMenuItem(value: 'file', child: ListTile(leading: Icon(Icons.attach_file), title: Text('File'))),
-                  ],
-                ),
-                Expanded(
-                  child: TextField(
-                    controller: _textController,
-                    decoration: const InputDecoration(hintText: 'Message', border: OutlineInputBorder()),
-                    minLines: 1,
-                    maxLines: 5,
-                    textInputAction: TextInputAction.send,
-                    onSubmitted: (_) => _send(),
+        // The compose bar sits on its own white strip above the keyboard, same as
+        // WhatsApp — distinct from the beige thread background behind it.
+        Container(
+          color: WhatsAppColors.listBackground,
+          child: SafeArea(
+            top: false,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  PopupMenuButton<String>(
+                    enabled: !_sending,
+                    icon: const Icon(Icons.attach_file, color: WhatsAppColors.tealAccent),
+                    onSelected: (choice) => choice == 'photo' ? _pickAndSendPhoto() : _pickAndSendFile(),
+                    itemBuilder: (context) => const [
+                      PopupMenuItem(value: 'photo', child: ListTile(leading: Icon(Icons.photo), title: Text('Photo'))),
+                      PopupMenuItem(value: 'file', child: ListTile(leading: Icon(Icons.attach_file), title: Text('File'))),
+                    ],
                   ),
-                ),
-                const SizedBox(width: 8),
-                IconButton.filled(
-                  onPressed: _sending ? null : _send,
-                  icon: _sending
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.send),
-                ),
-              ],
+                  Expanded(
+                    child: Container(
+                      constraints: const BoxConstraints(minHeight: 44),
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: BoxDecoration(color: const Color(0xFFF0F0F0), borderRadius: BorderRadius.circular(24)),
+                      child: TextField(
+                        controller: _textController,
+                        decoration: const InputDecoration(hintText: 'Message', border: InputBorder.none, isCollapsed: true),
+                        style: const TextStyle(color: WhatsAppColors.bubbleText),
+                        minLines: 1,
+                        maxLines: 5,
+                        textInputAction: TextInputAction.send,
+                        onSubmitted: (_) => _send(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Round green send button — WhatsApp's own shape, not the
+                  // square filled-icon-button Material default.
+                  Material(
+                    color: WhatsAppColors.green,
+                    shape: const CircleBorder(),
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: _sending ? null : _send,
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: _sending
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              )
+                            : const Icon(Icons.send, color: Colors.white, size: 20),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
@@ -465,19 +496,29 @@ class _MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final fgColor = message.isOwn ? scheme.onPrimary : scheme.onSurface;
+    // WhatsApp uses the same near-black text on both bubble colors — never a
+    // light-on-primary combination the way a generic Material bubble would.
+    const fgColor = WhatsAppColors.bubbleText;
     final attachment = message.attachment;
 
     return Align(
       alignment: message.isOwn ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.75),
+        margin: const EdgeInsets.symmetric(vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
         decoration: BoxDecoration(
-          color: message.isOwn ? scheme.primary : scheme.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(16),
+          color: message.isOwn ? WhatsAppColors.outgoingBubble : WhatsAppColors.incomingBubble,
+          // The pinched corner on the side nearest the sender approximates
+          // WhatsApp's speech-bubble tail — a plain uniform radius reads as a
+          // generic chat bubble, not specifically WhatsApp's.
+          borderRadius: BorderRadius.only(
+            topLeft: const Radius.circular(8),
+            topRight: const Radius.circular(8),
+            bottomLeft: Radius.circular(message.isOwn ? 8 : 0),
+            bottomRight: Radius.circular(message.isOwn ? 0 : 8),
+          ),
+          boxShadow: const [BoxShadow(color: Color(0x14000000), blurRadius: 1, offset: Offset(0, 1))],
         ),
         child: attachment != null
             ? InkWell(

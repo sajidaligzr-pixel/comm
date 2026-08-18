@@ -28,7 +28,8 @@ class MessagesApi {
     );
   }
 
-  Future<void> markDelivered(String messageId) => _client.requestVoid('/api/messages/$messageId/delivered');
+  Future<void> markDelivered(String messageId) =>
+      _client.requestVoid('/api/messages/$messageId/delivered', method: 'POST');
 
   Future<void> delete(String messageId) => _client.requestVoid('/api/messages/$messageId', method: 'DELETE');
 }
