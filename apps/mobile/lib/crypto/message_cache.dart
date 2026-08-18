@@ -21,7 +21,7 @@ import 'dart:typed_data';
 import '../api/dtos.dart' show AttachmentDescriptor;
 import 'encoding.dart';
 import 'storage/wrap.dart';
-import '../storage/blob_store.dart';
+import '../storage/blob_store.dart' show deleteBlob, getBlob, putBlob;
 
 class CachedMessage {
   final String id;
@@ -109,3 +109,14 @@ Future<void> appendCachedMessage(Uint8List kek, CachedMessage message) async {
   final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
   await putBlob(_cacheKey(message.conversationId), await wrapBytes(kek, utf8ToBytes(json)));
 }
+
+/// "Delete chat" (chats_list_screen.dart's long-press menu) — wipes this device's
+/// own local decrypted history for one conversation. Deliberately NOT a server-side
+/// delete: no such route exists (only `archived`, a per-caller view preference —
+/// see conversations_api.dart), and WhatsApp's own "Delete chat" has the same
+/// scope: it clears your device's view, not the other person's copy, and the
+/// conversation reappears if they message you again. Since a Double Ratchet
+/// ciphertext can only ever be decrypted once (this cache's own docstring above),
+/// this history is not recoverable afterward even from the server's stored
+/// ciphertext.
+Future<void> clearCachedMessages(String conversationId) => deleteBlob(_cacheKey(conversationId));

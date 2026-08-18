@@ -25,6 +25,8 @@ import '../../api/api_client.dart';
 import '../../api/dtos.dart';
 import '../../app/app.dart' show WhatsAppColors;
 import '../../app/providers.dart';
+import '../notifications/conversation_titles.dart';
+import '../notifications/local_notifications.dart' show clearNotificationFor;
 import '../../crypto/attachment_crypto.dart' as attach_crypto;
 import '../../crypto/conversation_crypto.dart' as convo;
 import '../../crypto/encoding.dart';
@@ -67,6 +69,22 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   ConversationSummary? _conversation;
   final List<CachedMessage> _messages = [];
   final _textController = TextEditingController();
+
+  /// Resolved once when the thread opens, reused for every send — mirrors
+  /// apps/web's `recipientDeviceIdRef` (message-thread.tsx) exactly, including WHY:
+  /// re-resolving this on every single send was a real, found regression (each send
+  /// paid a full network round trip before encryption could even start, on top of
+  /// the actual send request). A device change mid-conversation-view is rare enough
+  /// that "resolved once per thread visit" is the right tradeoff, same call the web
+  /// client already made.
+  ({String userId, String deviceId})? _recipientDevice;
+
+  /// Delivered/read status for messages THIS device sent, keyed by message id —
+  /// deliberately NOT part of `CachedMessage`/the persistent local cache, mirroring
+  /// web's separate ephemeral `status` state map (message-thread.tsx): re-seeded
+  /// from `MessageDto.deliveredAt`/`readAt` on load, updated live via the
+  /// `delivered`/`read` WS events, never itself persisted.
+  final Map<String, ({bool delivered, bool read})> _status = {};
   final _scrollController = ScrollController();
   String? _error;
   bool _loading = true;
@@ -81,12 +99,27 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   void initState() {
     super.initState();
     _load();
-    ref.read(realtimeClientProvider).on('new', _onRealtimeNew);
+    final realtime = ref.read(realtimeClientProvider);
+    realtime.on('new', _onRealtimeNew);
+    realtime.on('delivered', _onRealtimeDelivered);
+    realtime.on('read', _onRealtimeRead);
+
+    // Tells messageNotifierProvider not to pop a redundant system notification for
+    // whatever's already visible on screen right now, and clears any notification
+    // already showing for this conversation (e.g. from before the app was opened).
+    Future.microtask(() => ref.read(currentOpenConversationIdProvider.notifier).state = widget.conversationId);
+    clearNotificationFor(widget.conversationId);
   }
 
   @override
   void dispose() {
-    ref.read(realtimeClientProvider).off('new', _onRealtimeNew);
+    final realtime = ref.read(realtimeClientProvider);
+    realtime.off('new', _onRealtimeNew);
+    realtime.off('delivered', _onRealtimeDelivered);
+    realtime.off('read', _onRealtimeRead);
+    if (ref.read(currentOpenConversationIdProvider) == widget.conversationId) {
+      ref.read(currentOpenConversationIdProvider.notifier).state = null;
+    }
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -97,12 +130,28 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     if (raw is! Map<String, dynamic>) return;
     final dto = MessageDto.fromJson(raw);
     if (dto.conversationId != widget.conversationId) return;
-    _ingestIncoming(dto);
+    _ingestIncoming(dto, isLive: true);
+  }
+
+  void _onRealtimeDelivered(Map<String, dynamic> payload) {
+    final messageId = payload['messageId'] as String?;
+    if (messageId == null) return;
+    if (!mounted) return;
+    setState(() => _status[messageId] = (delivered: true, read: _status[messageId]?.read ?? false));
+  }
+
+  void _onRealtimeRead(Map<String, dynamic> payload) {
+    if (payload['conversationId'] != widget.conversationId) return;
+    final upToMessageId = payload['upToMessageId'] as String?;
+    if (upToMessageId == null) return;
+    if (!mounted) return;
+    setState(() => _status[upToMessageId] = (delivered: true, read: true));
   }
 
   Future<void> _load() async {
     try {
       final conversation = await ref.read(conversationsApiProvider).get(widget.conversationId);
+      conversationTitles[conversation.id] = conversation.displayTitle();
       final kek = getCurrentKek();
       if (kek == null) throw StateError('Local keys are locked.');
 
@@ -120,6 +169,9 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         final groupController = ref.read(groupSessionControllerProvider);
         await groupController.registerGroupMembership(conversation.groupId!);
         await groupController.ensureGroupKeysUpToDate(conversation.groupId!);
+      } else if (conversation.type == 'direct') {
+        // Resolved once here, not per-send — see _recipientDevice's own docstring.
+        _recipientDevice = await ref.read(conversationsApiProvider).recipientDevice(widget.conversationId);
       }
 
       final page = await ref.read(messagesApiProvider).list(widget.conversationId, limit: 100);
@@ -144,9 +196,18 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// device) — those ciphertexts can never be decrypted (a sending chain is
   /// one-directional), so they're shown as a placeholder rather than silently
   /// dropped or crashing the load.
-  Future<void> _ingestIncoming(MessageDto dto, {bool alreadyMine = false, bool retriedAfterKeySync = false}) async {
+  Future<void> _ingestIncoming(
+    MessageDto dto, {
+    bool alreadyMine = false,
+    bool retriedAfterKeySync = false,
+    bool isLive = false,
+  }) async {
     final kek = getCurrentKek();
     if (kek == null) return;
+
+    if (dto.senderUserId == _myUserId) {
+      _status[dto.id] = (delivered: dto.deliveredAt != null, read: dto.readAt != null);
+    }
 
     final isOwn = dto.senderUserId == _myUserId;
     String text = '';
@@ -210,7 +271,19 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       _scrollToBottom();
     }
     if (!isOwn) {
-      await ref.read(messagesApiProvider).markDelivered(dto.id).catchError((_) {});
+      // Deliberately NOT awaited — a best-effort receipt ping, same as
+      // apps/web's own fire-and-forget call (message-thread.tsx). Awaiting this
+      // was a real, found regression: it serialized one network round trip per
+      // message while catching up a thread's history, one at a time.
+      ref.read(messagesApiProvider).markDelivered(dto.id).catchError((_) {});
+      if (isLive) {
+        // The thread is actively open right now, so a live incoming message is
+        // presumed read the instant it's ingested — matches web's message-thread.tsx
+        // firing both /delivered and /read for a live 'new' event. The initial
+        // history catch-up in _load() already sends ONE bulk markRead covering the
+        // whole loaded page instead of repeating this per historical message.
+        ref.read(conversationsApiProvider).markRead(widget.conversationId, dto.id).catchError((_) {});
+      }
     }
   }
 
@@ -298,7 +371,10 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           attachment: attachmentRef,
         );
       } else {
-        final target = await ref.read(conversationsApiProvider).recipientDevice(widget.conversationId);
+        // Falls back to a fresh fetch only if the cached value is somehow missing
+        // (e.g. a send racing the very first _load()) — the normal path reuses what
+        // _load() already resolved, see _recipientDevice's docstring.
+        final target = _recipientDevice ??= await ref.read(conversationsApiProvider).recipientDevice(widget.conversationId);
         if (target == null) throw StateError('The other person has no reachable device right now.');
 
         final outgoing = await convo.encryptForDevice(ref.read(keysApiProvider), target.userId, target.deviceId, plaintext);
@@ -418,8 +494,11 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                   controller: _scrollController,
                   padding: const EdgeInsets.all(12),
                   itemCount: _messages.length,
-                  itemBuilder: (context, index) =>
-                      _MessageBubble(message: _messages[index], onDownload: _downloadAttachment),
+                  itemBuilder: (context, index) => _MessageBubble(
+                    message: _messages[index],
+                    onDownload: _downloadAttachment,
+                    status: _status[_messages[index].id],
+                  ),
                 ),
         ),
         // The compose bar sits on its own white strip above the keyboard, same as
@@ -489,10 +568,33 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   }
 }
 
+/// Which tick to show on an OWN message — sent (single check, not yet delivered),
+/// delivered (double check), or read (double check, blue). Pulled out of the
+/// widget as a pure function specifically so the precedence rule (read implies
+/// delivered even if a `delivered` event was somehow missed/reordered — the read
+/// receipt is the stronger signal) is unit-testable without pumping a widget tree.
+enum TickState { sent, delivered, read }
+
+TickState tickStateFor(({bool delivered, bool read})? status) {
+  if (status == null) return TickState.sent;
+  if (status.read) return TickState.read;
+  if (status.delivered) return TickState.delivered;
+  return TickState.sent;
+}
+
+String _formatBubbleTime(String iso) {
+  final dt = DateTime.tryParse(iso)?.toLocal();
+  if (dt == null) return '';
+  final h = dt.hour.toString().padLeft(2, '0');
+  final m = dt.minute.toString().padLeft(2, '0');
+  return '$h:$m';
+}
+
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.onDownload});
+  const _MessageBubble({required this.message, required this.onDownload, this.status});
   final CachedMessage message;
   final void Function(AttachmentDescriptor) onDownload;
+  final ({bool delivered, bool read})? status;
 
   @override
   Widget build(BuildContext context) {
@@ -505,7 +607,7 @@ class _MessageBubble extends StatelessWidget {
       alignment: message.isOwn ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.symmetric(vertical: 2),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
         decoration: BoxDecoration(
           color: message.isOwn ? WhatsAppColors.outgoingBubble : WhatsAppColors.incomingBubble,
@@ -520,30 +622,63 @@ class _MessageBubble extends StatelessWidget {
           ),
           boxShadow: const [BoxShadow(color: Color(0x14000000), blurRadius: 1, offset: Offset(0, 1))],
         ),
-        child: attachment != null
-            ? InkWell(
-                onTap: () => onDownload(attachment),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.insert_drive_file, color: fgColor),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 2),
+              child: attachment != null
+                  ? InkWell(
+                      onTap: () => onDownload(attachment),
+                      child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Text(attachment.fileName, style: TextStyle(color: fgColor), overflow: TextOverflow.ellipsis),
-                          Text(_formatBytes(attachment.sizeBytes), style: TextStyle(color: fgColor.withValues(alpha: 0.75), fontSize: 12)),
+                          Icon(Icons.insert_drive_file, color: fgColor),
+                          const SizedBox(width: 8),
+                          Flexible(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(attachment.fileName, style: TextStyle(color: fgColor), overflow: TextOverflow.ellipsis),
+                                Text(
+                                  _formatBytes(attachment.sizeBytes),
+                                  style: TextStyle(color: fgColor.withValues(alpha: 0.75), fontSize: 12),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Icon(Icons.download, color: fgColor, size: 18),
                         ],
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Icon(Icons.download, color: fgColor, size: 18),
-                  ],
-                ),
-              )
-            : Text(message.text, style: TextStyle(color: fgColor)),
+                    )
+                  : Text(message.text, style: TextStyle(color: fgColor)),
+            ),
+            // Timestamp + delivery/read tick, bottom-right inside the bubble —
+            // WhatsApp's own placement. Ticks only ever appear on OWN messages
+            // (they show what happened to a message you sent); an incoming message
+            // never carries them, on WhatsApp or here.
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(_formatBubbleTime(message.sentAt), style: TextStyle(color: fgColor.withValues(alpha: 0.6), fontSize: 11)),
+                if (message.isOwn) ...[
+                  const SizedBox(width: 4),
+                  Builder(builder: (context) {
+                    final tick = tickStateFor(status);
+                    return Icon(
+                      tick == TickState.sent ? Icons.done : Icons.done_all,
+                      size: 15,
+                      color: tick == TickState.read ? const Color(0xFF34B7F1) : fgColor.withValues(alpha: 0.6),
+                    );
+                  }),
+                ],
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

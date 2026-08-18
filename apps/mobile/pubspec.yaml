@@ -52,6 +52,15 @@ dependencies:
   # --- Biometric unlock (mirrors lib/crypto/biometric-unlock.ts) -------------
   local_auth: ^2.3.0
 
+  # --- Local (foreground/backgrounded, not killed-app) notifications ---------
+  # A real push path (delivery while the app is fully killed) needs FCM/APNs —
+  # a separate, larger addition needing Firebase/Apple credentials this app
+  # doesn't have yet (see README's "Not built yet"). This covers what's real right
+  # now: a system notification the instant a `new` WS event arrives for a
+  # conversation that isn't the one currently open, so the user isn't only finding
+  # out about a message by reopening the app.
+  flutter_local_notifications: ^18.0.1
+
   # --- Misc -------------------------------------------------------------------
   # Models (api/dtos.dart) are hand-written, not codegen'd (see that file's own
   # docstring) — freezed_annotation/json_annotation/intl were scaffold defaults

@@ -292,6 +292,23 @@ class ConversationSummary {
 
   /// What to show in a conversation list/header regardless of type.
   String displayTitle() => type == 'direct' ? (otherDisplayName ?? otherUsername ?? 'Unknown') : (groupName ?? 'Group');
+
+  /// Only the field chats_list_screen.dart's optimistic archive toggle actually
+  /// needs to change — not a general-purpose copyWith over every field.
+  ConversationSummary copyWith({bool? archived}) => ConversationSummary(
+    id: id,
+    type: type,
+    disappearingTimer: disappearingTimer,
+    lastMessageAt: lastMessageAt,
+    unreadCount: unreadCount,
+    archived: archived ?? this.archived,
+    otherUserId: otherUserId,
+    otherUsername: otherUsername,
+    otherDisplayName: otherDisplayName,
+    groupId: groupId,
+    groupName: groupName,
+    groupMemberCount: groupMemberCount,
+  );
 }
 
 class MessageAttachmentRef {

@@ -30,3 +30,17 @@
 -keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite {
     <fields>;
 }
+
+# - flutter_local_notifications (features/notifications/) uses GSON internally to
+#   persist scheduled-notification state; its own README explicitly calls out that
+#   R8 needs these standard GSON rules added by the CONSUMING app (not bundled as a
+#   consumerProguardFiles the way flutter_webrtc's are) — the canonical rule set
+#   from GSON's own proguard example, not something specific to this app.
+-keepattributes Signature
+-keepattributes *Annotation*
+-dontwarn sun.misc.**
+-keep class * implements com.google.gson.TypeAdapterFactory
+-keep class * implements com.google.gson.JsonSerializer
+-keep class * implements com.google.gson.JsonDeserializer
+-keep,allowobfuscation,allowshrinking class com.google.gson.reflect.TypeToken
+-keep,allowobfuscation,allowshrinking class * extends com.google.gson.reflect.TypeToken

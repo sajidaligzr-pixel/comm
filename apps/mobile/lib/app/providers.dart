@@ -19,6 +19,7 @@ import '../api/calls_api.dart';
 import '../api/groups_api.dart';
 import '../api/admin_api.dart';
 import '../features/groups/group_session_controller.dart';
+import '../features/notifications/message_notifier.dart';
 import '../realtime/ws_client.dart';
 
 /// Set once in main.dart after `ApiClient.initialize()` resolves — every other
@@ -58,4 +59,23 @@ final realtimeClientProvider = Provider<RealtimeClient>((ref) {
   final client = RealtimeClient(ref.watch(apiClientProvider).cookieJar);
   ref.onDispose(client.disconnect);
   return client;
+});
+
+/// Which conversation's thread is on screen right now, if any — set/cleared by
+/// thread_screen.dart's own initState/dispose. Read by `messageNotifierProvider`
+/// so a live message for the conversation the user is already looking at doesn't
+/// also pop a redundant system notification.
+final currentOpenConversationIdProvider = StateProvider<String?>((ref) => null);
+
+/// Mounted once for the app's lifetime, same placement reasoning as
+/// `groupSessionControllerProvider` above — see message_notifier.dart's own
+/// docstring for what this does and deliberately does not do.
+final messageNotifierProvider = Provider<MessageNotifier>((ref) {
+  final notifier = MessageNotifier(
+    realtime: ref.watch(realtimeClientProvider),
+    getOpenConversationId: () => ref.read(currentOpenConversationIdProvider),
+  );
+  notifier.start();
+  ref.onDispose(notifier.dispose);
+  return notifier;
 });

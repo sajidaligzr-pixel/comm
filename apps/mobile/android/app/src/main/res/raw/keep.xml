@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Resource-shrinking keep list (isShrinkResources in build.gradle.kts). Currently
+     just the notification icon (features/notifications/local_notifications.dart
+     passes '@mipmap/ic_launcher' as a runtime string, which the shrinker's static
+     analysis can't trace the way it can a compile-time R.mipmap reference) — it's
+     also directly referenced from AndroidManifest.xml's android:icon, so almost
+     certainly safe either way, but flutter_local_notifications' own README calls
+     this out explicitly enough to keep it as a zero-cost safety net rather than
+     assume the manifest reference alone is guaranteed to save it. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:keep="@mipmap/ic_launcher" />

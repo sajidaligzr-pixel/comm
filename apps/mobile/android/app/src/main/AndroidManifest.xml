@@ -18,6 +18,11 @@
          BiometricPrompt integration needs this declared or the prompt silently
          refuses to show on API 28+. -->
     <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <!-- Local message notifications (features/notifications/) — required at
+         runtime on Android 13+ (API 33), requested explicitly in
+         local_notifications.dart's initLocalNotifications; this declaration alone
+         only states intent, same as RECORD_AUDIO above. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="Comm"
         android:name="${applicationName}"
