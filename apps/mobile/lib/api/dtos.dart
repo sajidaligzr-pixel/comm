@@ -13,16 +13,30 @@ library;
 class IdentityKeyUpload {
   final String signingPublicKey; // base64
   final String agreementPublicKey; // base64
-  const IdentityKeyUpload({required this.signingPublicKey, required this.agreementPublicKey});
-  Map<String, dynamic> toJson() => {'signingPublicKey': signingPublicKey, 'agreementPublicKey': agreementPublicKey};
+  const IdentityKeyUpload({
+    required this.signingPublicKey,
+    required this.agreementPublicKey,
+  });
+  Map<String, dynamic> toJson() => {
+    'signingPublicKey': signingPublicKey,
+    'agreementPublicKey': agreementPublicKey,
+  };
 }
 
 class SignedPreKeyUpload {
   final int keyId;
   final String publicKey; // base64
   final String signature; // base64
-  const SignedPreKeyUpload({required this.keyId, required this.publicKey, required this.signature});
-  Map<String, dynamic> toJson() => {'keyId': keyId, 'publicKey': publicKey, 'signature': signature};
+  const SignedPreKeyUpload({
+    required this.keyId,
+    required this.publicKey,
+    required this.signature,
+  });
+  Map<String, dynamic> toJson() => {
+    'keyId': keyId,
+    'publicKey': publicKey,
+    'signature': signature,
+  };
 }
 
 class OneTimePreKeyUpload {
@@ -36,7 +50,11 @@ class DeviceKeyBundle {
   final IdentityKeyUpload identityKey;
   final SignedPreKeyUpload signedPreKey;
   final List<OneTimePreKeyUpload> oneTimePreKeys;
-  const DeviceKeyBundle({required this.identityKey, required this.signedPreKey, required this.oneTimePreKeys});
+  const DeviceKeyBundle({
+    required this.identityKey,
+    required this.signedPreKey,
+    required this.oneTimePreKeys,
+  });
   Map<String, dynamic> toJson() => {
     'identityKey': identityKey.toJson(),
     'signedPreKey': signedPreKey.toJson(),
@@ -78,14 +96,23 @@ class KeyBundleResponse {
   }
 }
 
-const deviceTypeMobile = 'android'; // DeviceType enum on the server: web | android | desktop
+const deviceTypeMobile =
+    'android'; // DeviceType enum on the server: web | android | desktop
 
 class NewDeviceRegistration {
   final String name;
   final String deviceType;
   final DeviceKeyBundle keyBundle;
-  const NewDeviceRegistration({required this.name, required this.deviceType, required this.keyBundle});
-  Map<String, dynamic> toJson() => {'name': name, 'deviceType': deviceType, 'keyBundle': keyBundle.toJson()};
+  const NewDeviceRegistration({
+    required this.name,
+    required this.deviceType,
+    required this.keyBundle,
+  });
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'deviceType': deviceType,
+    'keyBundle': keyBundle.toJson(),
+  };
 }
 
 class DeviceSummary {
@@ -126,11 +153,13 @@ class LinkDeviceStartResponse {
     required this.expiresAt,
     required this.primaryDeviceIdentityPublicKey,
   });
-  static LinkDeviceStartResponse fromJson(Map<String, dynamic> json) => LinkDeviceStartResponse(
-    linkingToken: json['linkingToken'] as String,
-    expiresAt: json['expiresAt'] as String,
-    primaryDeviceIdentityPublicKey: json['primaryDeviceIdentityPublicKey'] as String,
-  );
+  static LinkDeviceStartResponse fromJson(Map<String, dynamic> json) =>
+      LinkDeviceStartResponse(
+        linkingToken: json['linkingToken'] as String,
+        expiresAt: json['expiresAt'] as String,
+        primaryDeviceIdentityPublicKey:
+            json['primaryDeviceIdentityPublicKey'] as String,
+      );
 }
 
 // ── Auth (packages/types/src/auth.ts) ──────────────────────────────────────────────
@@ -148,25 +177,31 @@ class AuthSessionResponse {
     required this.displayName,
     required this.mustChangePassword,
   });
-  static AuthSessionResponse fromJson(Map<String, dynamic> json) => AuthSessionResponse(
-    userId: json['userId'] as String,
-    deviceId: json['deviceId'] as String,
-    username: json['username'] as String,
-    displayName: json['displayName'] as String,
-    mustChangePassword: json['mustChangePassword'] as bool,
-  );
+  static AuthSessionResponse fromJson(Map<String, dynamic> json) =>
+      AuthSessionResponse(
+        userId: json['userId'] as String,
+        deviceId: json['deviceId'] as String,
+        username: json['username'] as String,
+        displayName: json['displayName'] as String,
+        mustChangePassword: json['mustChangePassword'] as bool,
+      );
 }
 
 class InviteInfoResponse {
   final String username;
   final String displayName;
   final String expiresAt;
-  const InviteInfoResponse({required this.username, required this.displayName, required this.expiresAt});
-  static InviteInfoResponse fromJson(Map<String, dynamic> json) => InviteInfoResponse(
-    username: json['username'] as String,
-    displayName: json['displayName'] as String,
-    expiresAt: json['expiresAt'] as String,
-  );
+  const InviteInfoResponse({
+    required this.username,
+    required this.displayName,
+    required this.expiresAt,
+  });
+  static InviteInfoResponse fromJson(Map<String, dynamic> json) =>
+      InviteInfoResponse(
+        username: json['username'] as String,
+        displayName: json['displayName'] as String,
+        expiresAt: json['expiresAt'] as String,
+      );
 }
 
 // ── Users (packages/types/src/users.ts) ────────────────────────────────────────────
@@ -207,7 +242,10 @@ class MessageEnvelopeUpload {
   const MessageEnvelopeUpload({required this.header, required this.ciphertext});
   Map<String, dynamic> toJson() => {'header': header, 'ciphertext': ciphertext};
   static MessageEnvelopeUpload fromJson(Map<String, dynamic> json) =>
-      MessageEnvelopeUpload(header: json['header'] as String, ciphertext: json['ciphertext'] as String);
+      MessageEnvelopeUpload(
+        header: json['header'] as String,
+        ciphertext: json['ciphertext'] as String,
+      );
 }
 
 class X3dhInitPayload {
@@ -291,31 +329,41 @@ class ConversationSummary {
   }
 
   /// What to show in a conversation list/header regardless of type.
-  String displayTitle() => type == 'direct' ? (otherDisplayName ?? otherUsername ?? 'Unknown') : (groupName ?? 'Group');
+  String displayTitle() => type == 'direct'
+      ? (otherDisplayName ?? otherUsername ?? 'Unknown')
+      : (groupName ?? 'Group');
 
-  /// Only the field chats_list_screen.dart's optimistic archive toggle actually
-  /// needs to change — not a general-purpose copyWith over every field.
-  ConversationSummary copyWith({bool? archived}) => ConversationSummary(
-    id: id,
-    type: type,
-    disappearingTimer: disappearingTimer,
-    lastMessageAt: lastMessageAt,
-    unreadCount: unreadCount,
-    archived: archived ?? this.archived,
-    otherUserId: otherUserId,
-    otherUsername: otherUsername,
-    otherDisplayName: otherDisplayName,
-    groupId: groupId,
-    groupName: groupName,
-    groupMemberCount: groupMemberCount,
-  );
+  /// Only the fields chats_list_screen.dart's optimistic archive toggle and
+  /// thread_screen.dart's disappearing-timer menu actually need to change —
+  /// not a general-purpose copyWith over every field.
+  ConversationSummary copyWith({bool? archived, String? disappearingTimer}) =>
+      ConversationSummary(
+        id: id,
+        type: type,
+        disappearingTimer: disappearingTimer ?? this.disappearingTimer,
+        lastMessageAt: lastMessageAt,
+        unreadCount: unreadCount,
+        archived: archived ?? this.archived,
+        otherUserId: otherUserId,
+        otherUsername: otherUsername,
+        otherDisplayName: otherDisplayName,
+        groupId: groupId,
+        groupName: groupName,
+        groupMemberCount: groupMemberCount,
+      );
 }
 
 class MessageAttachmentRef {
   final String objectKey;
   final int encryptedSizeBytes;
-  const MessageAttachmentRef({required this.objectKey, required this.encryptedSizeBytes});
-  Map<String, dynamic> toJson() => {'objectKey': objectKey, 'encryptedSizeBytes': encryptedSizeBytes};
+  const MessageAttachmentRef({
+    required this.objectKey,
+    required this.encryptedSizeBytes,
+  });
+  Map<String, dynamic> toJson() => {
+    'objectKey': objectKey,
+    'encryptedSizeBytes': encryptedSizeBytes,
+  };
 }
 
 class SendMessageRequest {
@@ -394,8 +442,12 @@ class MessageDto {
     senderDeviceId: json['senderDeviceId'] as String,
     recipientDeviceId: json['recipientDeviceId'] as String,
     envelopeType: json['envelopeType'] as String,
-    envelope: MessageEnvelopeUpload.fromJson(json['envelope'] as Map<String, dynamic>),
-    x3dhInit: json['x3dhInit'] != null ? X3dhInitPayload.fromJson(json['x3dhInit'] as Map<String, dynamic>) : null,
+    envelope: MessageEnvelopeUpload.fromJson(
+      json['envelope'] as Map<String, dynamic>,
+    ),
+    x3dhInit: json['x3dhInit'] != null
+        ? X3dhInitPayload.fromJson(json['x3dhInit'] as Map<String, dynamic>)
+        : null,
     contentTypeHint: json['contentTypeHint'] as String,
     replyToMessageId: json['replyToMessageId'] as String?,
     sentAt: json['sentAt'] as String,
@@ -413,7 +465,13 @@ class GroupMemberDto {
   final String displayName;
   final String role; // 'member' | 'admin'
   final String joinedAt;
-  const GroupMemberDto({required this.userId, required this.username, required this.displayName, required this.role, required this.joinedAt});
+  const GroupMemberDto({
+    required this.userId,
+    required this.username,
+    required this.displayName,
+    required this.role,
+    required this.joinedAt,
+  });
   static GroupMemberDto fromJson(Map<String, dynamic> json) => GroupMemberDto(
     userId: json['userId'] as String,
     username: json['username'] as String,
@@ -449,7 +507,9 @@ class GroupSummary {
     description: json['description'] as String?,
     onlyAdminsCanMessage: json['onlyAdminsCanMessage'] as bool,
     callerRole: json['callerRole'] as String,
-    members: (json['members'] as List).map((e) => GroupMemberDto.fromJson(e as Map<String, dynamic>)).toList(),
+    members: (json['members'] as List)
+        .map((e) => GroupMemberDto.fromJson(e as Map<String, dynamic>))
+        .toList(),
     createdAt: json['createdAt'] as String,
   );
 }
@@ -459,7 +519,10 @@ class GroupMemberTarget {
   final String deviceId;
   const GroupMemberTarget({required this.userId, required this.deviceId});
   static GroupMemberTarget fromJson(Map<String, dynamic> json) =>
-      GroupMemberTarget(userId: json['userId'] as String, deviceId: json['deviceId'] as String);
+      GroupMemberTarget(
+        userId: json['userId'] as String,
+        deviceId: json['deviceId'] as String,
+      );
 }
 
 class GroupKeyShareDto {
@@ -481,16 +544,21 @@ class GroupKeyShareDto {
     required this.x3dhInit,
     required this.createdAt,
   });
-  static GroupKeyShareDto fromJson(Map<String, dynamic> json) => GroupKeyShareDto(
-    id: json['id'] as String,
-    groupId: json['groupId'] as String,
-    epoch: json['epoch'] as int,
-    fromDeviceId: json['fromDeviceId'] as String,
-    fromUserId: json['fromUserId'] as String,
-    envelope: MessageEnvelopeUpload.fromJson(json['envelope'] as Map<String, dynamic>),
-    x3dhInit: json['x3dhInit'] != null ? X3dhInitPayload.fromJson(json['x3dhInit'] as Map<String, dynamic>) : null,
-    createdAt: json['createdAt'] as String,
-  );
+  static GroupKeyShareDto fromJson(Map<String, dynamic> json) =>
+      GroupKeyShareDto(
+        id: json['id'] as String,
+        groupId: json['groupId'] as String,
+        epoch: json['epoch'] as int,
+        fromDeviceId: json['fromDeviceId'] as String,
+        fromUserId: json['fromUserId'] as String,
+        envelope: MessageEnvelopeUpload.fromJson(
+          json['envelope'] as Map<String, dynamic>,
+        ),
+        x3dhInit: json['x3dhInit'] != null
+            ? X3dhInitPayload.fromJson(json['x3dhInit'] as Map<String, dynamic>)
+            : null,
+        createdAt: json['createdAt'] as String,
+      );
 }
 
 // ── Media (packages/types/src/media.ts) ────────────────────────────────────────────
@@ -502,24 +570,31 @@ const mediaClientSoftCapBytes = 25 * 1024 * 1024;
 class UploadTarget {
   final String method; // 'PUT' | 'POST'
   final String url;
-  final Map<String, String>? fields; // present only for POST (presigned-POST form fields)
+  final Map<String, String>?
+  fields; // present only for POST (presigned-POST form fields)
   const UploadTarget({required this.method, required this.url, this.fields});
 
   static UploadTarget fromJson(Map<String, dynamic> json) => UploadTarget(
     method: json['method'] as String,
     url: json['url'] as String,
-    fields: (json['fields'] as Map<String, dynamic>?)?.map((k, v) => MapEntry(k, v as String)),
+    fields: (json['fields'] as Map<String, dynamic>?)?.map(
+      (k, v) => MapEntry(k, v as String),
+    ),
   );
 }
 
 class CreateUploadUrlResponse {
   final String objectKey;
   final UploadTarget target;
-  const CreateUploadUrlResponse({required this.objectKey, required this.target});
-  static CreateUploadUrlResponse fromJson(Map<String, dynamic> json) => CreateUploadUrlResponse(
-    objectKey: json['objectKey'] as String,
-    target: UploadTarget.fromJson(json['target'] as Map<String, dynamic>),
-  );
+  const CreateUploadUrlResponse({
+    required this.objectKey,
+    required this.target,
+  });
+  static CreateUploadUrlResponse fromJson(Map<String, dynamic> json) =>
+      CreateUploadUrlResponse(
+        objectKey: json['objectKey'] as String,
+        target: UploadTarget.fromJson(json['target'] as Map<String, dynamic>),
+      );
 }
 
 /// This is the actual "plaintext" of a `contentTypeHint: 'media'` message: a small
@@ -550,25 +625,30 @@ class AttachmentDescriptor {
     'fileName': fileName,
     'sizeBytes': sizeBytes,
   };
-  static AttachmentDescriptor fromJson(Map<String, dynamic> json) => AttachmentDescriptor(
-    objectKey: json['objectKey'] as String,
-    key: json['key'] as String,
-    nonce: json['nonce'] as String,
-    mimeType: json['mimeType'] as String,
-    fileName: json['fileName'] as String,
-    sizeBytes: json['sizeBytes'] as int,
-  );
+  static AttachmentDescriptor fromJson(Map<String, dynamic> json) =>
+      AttachmentDescriptor(
+        objectKey: json['objectKey'] as String,
+        key: json['key'] as String,
+        nonce: json['nonce'] as String,
+        mimeType: json['mimeType'] as String,
+        fileName: json['fileName'] as String,
+        sizeBytes: json['sizeBytes'] as int,
+      );
 }
 
 class CursorPage<T> {
   final List<T> items;
   final String? nextCursor;
   const CursorPage({required this.items, required this.nextCursor});
-  static CursorPage<T> fromJson<T>(Map<String, dynamic> json, T Function(Map<String, dynamic>) itemFromJson) =>
-      CursorPage<T>(
-        items: (json['items'] as List).map((e) => itemFromJson(e as Map<String, dynamic>)).toList(),
-        nextCursor: json['nextCursor'] as String?,
-      );
+  static CursorPage<T> fromJson<T>(
+    Map<String, dynamic> json,
+    T Function(Map<String, dynamic>) itemFromJson,
+  ) => CursorPage<T>(
+    items: (json['items'] as List)
+        .map((e) => itemFromJson(e as Map<String, dynamic>))
+        .toList(),
+    nextCursor: json['nextCursor'] as String?,
+  );
 }
 
 // --- Admin (mirrors packages/types/src/admin.ts) ---------------------------------
@@ -586,13 +666,14 @@ class ProvisionedUserSummary {
     required this.status,
     required this.createdAt,
   });
-  static ProvisionedUserSummary fromJson(Map<String, dynamic> json) => ProvisionedUserSummary(
-    id: json['id'] as String,
-    username: json['username'] as String,
-    displayName: json['displayName'] as String,
-    status: json['status'] as String,
-    createdAt: json['createdAt'] as String,
-  );
+  static ProvisionedUserSummary fromJson(Map<String, dynamic> json) =>
+      ProvisionedUserSummary(
+        id: json['id'] as String,
+        username: json['username'] as String,
+        displayName: json['displayName'] as String,
+        status: json['status'] as String,
+        createdAt: json['createdAt'] as String,
+      );
 }
 
 class ProvisionUserResult {
@@ -600,11 +681,17 @@ class ProvisionUserResult {
   final String username;
   final String inviteUrl;
   final String expiresAt;
-  const ProvisionUserResult({required this.userId, required this.username, required this.inviteUrl, required this.expiresAt});
-  static ProvisionUserResult fromJson(Map<String, dynamic> json) => ProvisionUserResult(
-    userId: json['userId'] as String,
-    username: json['username'] as String,
-    inviteUrl: json['inviteUrl'] as String,
-    expiresAt: json['expiresAt'] as String,
-  );
+  const ProvisionUserResult({
+    required this.userId,
+    required this.username,
+    required this.inviteUrl,
+    required this.expiresAt,
+  });
+  static ProvisionUserResult fromJson(Map<String, dynamic> json) =>
+      ProvisionUserResult(
+        userId: json['userId'] as String,
+        username: json['username'] as String,
+        inviteUrl: json['inviteUrl'] as String,
+        expiresAt: json['expiresAt'] as String,
+      );
 }

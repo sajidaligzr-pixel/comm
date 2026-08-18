@@ -55,6 +55,21 @@ class CachedMessage {
   /// doesn't have this until its own player loads the audio, same as web.
   final int? mediaDurationSec;
 
+  /// Tombstone fields — mirrors apps/web's own `CachedMessage.deleted`/
+  /// `deletedReason` (lib/crypto/message-cache.ts) exactly, including WHY
+  /// these are local-only, never part of the wire `MessageDto`: the server's
+  /// `listMessages` filters `deletedAt: null` (server/modules/messages/
+  /// service.ts), so a deleted message is simply absent from a fresh history
+  /// fetch — it never comes back with a "deleted" flag to react to. This
+  /// cache is the only place a tombstone placeholder can be shown at all: for
+  /// this device's OWN delete action (applied immediately, optimistically —
+  /// see thread_screen.dart's `_confirmAndDelete`) or a live `deleted` WS
+  /// event from another member's device. A device that was offline when a
+  /// deletion happened has no catch-up path for it — same accepted gap as
+  /// apps/web; there is no "list of recently deleted message ids" endpoint.
+  final bool deleted;
+  final String? deletedReason;
+
   const CachedMessage({
     required this.id,
     required this.conversationId,
@@ -67,6 +82,8 @@ class CachedMessage {
     this.attachment,
     this.mediaBase64,
     this.mediaDurationSec,
+    this.deleted = false,
+    this.deletedReason,
   });
 
   Map<String, dynamic> toJson() => {
@@ -81,6 +98,8 @@ class CachedMessage {
     if (attachment != null) 'attachment': attachment!.toJson(),
     if (mediaBase64 != null) 'mediaBase64': mediaBase64,
     if (mediaDurationSec != null) 'mediaDurationSec': mediaDurationSec,
+    if (deleted) 'deleted': deleted,
+    if (deletedReason != null) 'deletedReason': deletedReason,
   };
 
   static CachedMessage fromJson(Map<String, dynamic> json) => CachedMessage(
@@ -97,6 +116,8 @@ class CachedMessage {
             json['attachment'] as Map<String, dynamic>,
           )
         : null,
+    deleted: json['deleted'] as bool? ?? false,
+    deletedReason: json['deletedReason'] as String?,
     mediaBase64: json['mediaBase64'] as String?,
     mediaDurationSec: json['mediaDurationSec'] as int?,
   );
@@ -198,6 +219,56 @@ Future<void> removeCachedMessage(
     _cacheKey(conversationId),
     await wrapBytes(kek, utf8ToBytes(json)),
   );
+}
+
+/// Tombstones a message locally — mirrors apps/web's own `markCachedMessageDeleted`
+/// (lib/crypto/message-cache.ts) exactly: clears `text`/`mediaBase64`/`attachment`
+/// (the whole point of "delete for everyone" is that the content itself is gone,
+/// not just hidden) and sets `deleted`/`deletedReason`, leaving everything else
+/// (id, sentAt, isOwn, replyToMessageId — so a reply pointing at this message can
+/// still resolve it and show the tombstone text) intact. A no-op, returning the
+/// list unchanged, if the message isn't cached on this device at all (e.g. it was
+/// deleted before this device ever decrypted it). Returns the whole updated list
+/// so the caller can `setState` directly with it, same shape web returns.
+///
+/// Same read-modify-write-the-whole-blob shape every function in this file uses —
+/// no per-conversation lock exists here (unlike web's `withConversationLock`), so
+/// a delete racing a live incoming message for the exact same conversation at the
+/// exact same instant could in principle clobber one or the other. Not solved in
+/// this pass; flagged rather than silently accepted, matching every other function
+/// in this file's own scope.
+Future<List<CachedMessage>> markCachedMessageDeleted(
+  Uint8List kek,
+  String conversationId,
+  String messageId,
+  String reason,
+) async {
+  final existing = await loadCachedMessages(kek, conversationId);
+  if (!existing.any((m) => m.id == messageId)) return existing;
+  final updated = existing
+      .map(
+        (m) => m.id == messageId
+            ? CachedMessage(
+                id: m.id,
+                conversationId: m.conversationId,
+                senderUserId: m.senderUserId,
+                isOwn: m.isOwn,
+                contentTypeHint: m.contentTypeHint,
+                text: '',
+                sentAt: m.sentAt,
+                replyToMessageId: m.replyToMessageId,
+                deleted: true,
+                deletedReason: reason,
+              )
+            : m,
+      )
+      .toList();
+  final json = jsonEncode(updated.map((m) => m.toJson()).toList());
+  await putBlob(
+    _cacheKey(conversationId),
+    await wrapBytes(kek, utf8ToBytes(json)),
+  );
+  return updated;
 }
 
 /// "Delete chat" (chats_list_screen.dart's long-press menu) — wipes this device's

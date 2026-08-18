@@ -132,6 +132,19 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   int _recordingSeconds = 0;
   Timer? _recordingTimer;
 
+  // --- Typing indicator (direct conversations only — matches web's own scope,
+  // see group-message-thread.tsx's own docstring: "no reply-to, no typing
+  // indicator, no read-receipt ticks" for groups) ------------------------------
+  bool _otherTyping = false;
+  Timer? _typingStopTimer;
+
+  // --- Disappearing messages ---------------------------------------------------
+  // Local, immediate enforcement — mirrors web's own periodic prune
+  // (message-thread.tsx/group-message-thread.tsx). apps/worker's hourly sweep is
+  // what actually erases the ciphertext server-side and reaches devices that
+  // don't have this thread open; this is what makes it feel instant on this one.
+  Timer? _disappearingPruneTimer;
+
   String get _myUserId {
     final state = ref.read(authControllerProvider);
     return state is AuthSignedIn ? state.profile.id : '';
@@ -145,6 +158,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     realtime.on('new', _onRealtimeNew);
     realtime.on('delivered', _onRealtimeDelivered);
     realtime.on('read', _onRealtimeRead);
+    realtime.on('deleted', _onRealtimeDeletedMessage);
+    realtime.on('typing', _onRealtimeTyping);
 
     // Tells messageNotifierProvider not to pop a redundant system notification for
     // whatever's already visible on screen right now, and clears any notification
@@ -162,6 +177,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     realtime.off('new', _onRealtimeNew);
     realtime.off('delivered', _onRealtimeDelivered);
     realtime.off('read', _onRealtimeRead);
+    realtime.off('deleted', _onRealtimeDeletedMessage);
+    realtime.off('typing', _onRealtimeTyping);
     if (ref.read(currentOpenConversationIdProvider) == widget.conversationId) {
       ref.read(currentOpenConversationIdProvider.notifier).state = null;
     }
@@ -169,6 +186,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     _scrollController.dispose();
     _recordingTimer?.cancel();
     _voiceRecorder.dispose();
+    _typingStopTimer?.cancel();
+    _disappearingPruneTimer?.cancel();
     super.dispose();
   }
 
@@ -200,6 +219,48 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     setState(() => _status[upToMessageId] = (delivered: true, read: true));
   }
 
+  /// Another member deleted one of their own messages (or the worker's
+  /// disappearing-timer/media-retention sweep expired one) — mirrors web's own
+  /// `deleted` listener exactly: not gated on `isOwn` here, since this fires for
+  /// deletions this device didn't itself initiate (the initiating device applies
+  /// its own tombstone immediately in `_confirmAndDelete`, before any event
+  /// round-trips back — same "optimistic local update, not dependent on the
+  /// event" pattern every other mutation in this file already uses).
+  void _onRealtimeDeletedMessage(Map<String, dynamic> payload) {
+    if (payload['conversationId'] != widget.conversationId) return;
+    final messageId = payload['messageId'] as String?;
+    if (messageId == null) return;
+    _applyDeletion(messageId, payload['reason'] as String? ?? 'manual');
+  }
+
+  Future<void> _applyDeletion(String messageId, String reason) async {
+    final kek = getCurrentKek();
+    if (kek == null) return;
+    final updated = await markCachedMessageDeleted(
+      kek,
+      widget.conversationId,
+      messageId,
+      reason,
+    );
+    if (mounted) {
+      setState(() {
+        _messages
+          ..clear()
+          ..addAll(updated);
+      });
+    }
+  }
+
+  /// 1:1 only — matches web's own scope (group-message-thread.tsx's docstring:
+  /// "no reply-to, no typing indicator, no read-receipt ticks" for groups).
+  void _onRealtimeTyping(Map<String, dynamic> payload) {
+    if (payload['conversationId'] != widget.conversationId) return;
+    if (payload['fromUserId'] != _conversation?.otherUserId) return;
+    if (!mounted) return;
+    setState(() => _otherTyping = payload['state'] == 'start');
+    _scrollToBottom();
+  }
+
   Future<void> _load() async {
     try {
       final kek = getCurrentKek();
@@ -228,6 +289,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
             ..addAll(cached);
         });
       }
+      _restartDisappearingPruneTimer(conversation.disappearingTimer);
 
       if (conversation.type == 'group' && conversation.groupId != null) {
         final groupController = ref.read(groupSessionControllerProvider);
@@ -291,6 +353,81 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       _loading = true;
     });
     _load();
+  }
+
+  /// (Re)starts the periodic local-pruning timer for the conversation's current
+  /// disappearing-message setting — called on load and whenever the setting
+  /// changes. Cancels any previous timer first so changing 'off' -> '24 hours'
+  /// (or vice versa) never leaves two timers running or an old one lingering.
+  void _restartDisappearingPruneTimer(String timer) {
+    _disappearingPruneTimer?.cancel();
+    _disappearingPruneTimer = null;
+    final ms = disappearingTimerToMs(timer);
+    if (ms == null) return;
+    _pruneExpiredMessages(ms);
+    _disappearingPruneTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => _pruneExpiredMessages(ms),
+    );
+  }
+
+  Future<void> _pruneExpiredMessages(int ms) async {
+    final kek = getCurrentKek();
+    if (kek == null) return;
+    final now = DateTime.now().toUtc();
+    final expiredIds = _messages
+        .where(
+          (m) =>
+              !m.deleted &&
+              now.difference(DateTime.parse(m.sentAt).toUtc()).inMilliseconds >
+                  ms,
+        )
+        .map((m) => m.id)
+        .toList();
+    if (expiredIds.isEmpty) return;
+    List<CachedMessage> updated = _messages;
+    for (final id in expiredIds) {
+      updated = await markCachedMessageDeleted(
+        kek,
+        widget.conversationId,
+        id,
+        'disappearing_timer',
+      );
+    }
+    if (mounted) {
+      setState(() {
+        _messages
+          ..clear()
+          ..addAll(updated);
+      });
+    }
+  }
+
+  Future<void> _setDisappearingTimer(String value) async {
+    final conversation = _conversation;
+    if (conversation == null || value == conversation.disappearingTimer) return;
+    final previous = conversation.disappearingTimer;
+    setState(
+      () => _conversation = conversation.copyWith(disappearingTimer: value),
+    );
+    _restartDisappearingPruneTimer(value);
+    try {
+      await ref
+          .read(conversationsApiProvider)
+          .updateSettings(widget.conversationId, disappearingTimer: value);
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(
+          () => _conversation = conversation.copyWith(
+            disappearingTimer: previous,
+          ),
+        );
+        _restartDisappearingPruneTimer(previous);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    }
   }
 
   /// `alreadyMine` covers REST history backfill for this device's OWN earlier sent
@@ -448,6 +585,9 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
     _textController.clear();
+    _notifyTyping(
+      'stop',
+    ); // matches web's handleSend — sending counts as "done typing"
     await _sendEnvelope(
       contentTypeHint: 'text',
       plaintext: utf8ToBytes(text),
@@ -456,12 +596,114 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     );
   }
 
+  /// Direct conversations only (see this file's typing-indicator section
+  /// docstring). Fires 'start' on every keystroke and resets a 2-second
+  /// inactivity timer that fires 'stop' — matches web's `notifyTyping`/
+  /// `handleInputChange` (message-thread.tsx) exactly, including re-sending
+  /// 'start' on every single change rather than throttling it further; the
+  /// server itself is the one place this gets deduplicated/rate-limited if
+  /// that ever matters (server/realtime/message-handlers.ts).
+  void _notifyTyping(String state) {
+    if (_conversation?.type != 'direct') return;
+    ref.read(realtimeClientProvider).send({
+      'type': 'typing.$state',
+      'conversationId': widget.conversationId,
+    });
+  }
+
+  void _onComposerTextChanged(String value) {
+    _typingStopTimer?.cancel();
+    _notifyTyping('start');
+    _typingStopTimer = Timer(
+      const Duration(seconds: 2),
+      () => _notifyTyping('stop'),
+    );
+  }
+
   void _startReply(CachedMessage message) {
-    HapticFeedback.selectionClick();
     setState(() => _replyingTo = message);
   }
 
   void _cancelReply() => setState(() => _replyingTo = null);
+
+  /// Long-press a bubble — Reply (any message) + Delete (own messages only,
+  /// "delete for everyone," matching web's own `m.isOwn` gate on showing the
+  /// button at all). Uses the same bottom-sheet pattern chats_list_screen.dart's
+  /// own long-press menu already established, rather than a different one-off
+  /// interaction just for this screen.
+  void _showMessageActions(CachedMessage message) {
+    HapticFeedback.selectionClick();
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.reply),
+              title: const Text('Reply'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _startReply(message);
+              },
+            ),
+            if (message.isOwn)
+              ListTile(
+                leading: Icon(
+                  Icons.delete_outline,
+                  color: Theme.of(context).colorScheme.error,
+                ),
+                title: Text(
+                  'Delete',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _confirmAndDelete(message);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmAndDelete(CachedMessage message) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete this message?'),
+        content: const Text(
+          'This removes it for everyone in this conversation.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await ref.read(messagesApiProvider).delete(message.id);
+      await _applyDeletion(message.id, 'manual');
+    } on ApiException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    }
+  }
 
   /// Auto-stops (and sends) a recording at this length — mirrors web's own
   /// `MAX_RECORDING_SECONDS` (message-thread.tsx) exactly, keeping a voice note
@@ -828,15 +1070,72 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         conversation != null &&
         conversation.type == 'group' &&
         conversation.groupId != null;
+    // Mirrors apps/web's own subtitle exactly (app/(app)/chats/[id]/page.tsx):
+    // the disappearing-timer state takes over the normal @username/member-count
+    // line whenever it's active, rather than being shown alongside it.
+    final subtitle = conversation == null
+        ? null
+        : conversation.disappearingTimer != 'off'
+        ? 'Disappearing: ${_disappearingTimerLabel(conversation.disappearingTimer)}'
+        : (conversation.type == 'direct'
+              ? (conversation.otherUsername != null
+                    ? '@${conversation.otherUsername}'
+                    : null)
+              : '${conversation.groupMemberCount ?? 0} member${conversation.groupMemberCount == 1 ? '' : 's'}');
     return Scaffold(
       appBar: AppBar(
         title: InkWell(
           onTap: isGroup
               ? () => context.push('/groups/${conversation.groupId}/info')
               : null,
-          child: Text(conversation?.displayTitle() ?? 'Chat'),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(conversation?.displayTitle() ?? 'Chat'),
+              if (subtitle != null)
+                Text(
+                  subtitle,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.normal,
+                    color: Colors.white70,
+                  ),
+                ),
+            ],
+          ),
         ),
         actions: [
+          if (conversation != null)
+            PopupMenuButton<String>(
+              tooltip: 'Disappearing messages',
+              icon: Icon(
+                Icons.timer_outlined,
+                color: conversation.disappearingTimer != 'off'
+                    ? WhatsAppColors.green
+                    : Colors.white,
+              ),
+              onSelected: _setDisappearingTimer,
+              itemBuilder: (context) => _disappearingTimerOptions
+                  .map(
+                    (opt) => PopupMenuItem(
+                      value: opt.$1,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(opt.$2),
+                          if (conversation.disappearingTimer == opt.$1)
+                            const Icon(
+                              Icons.check,
+                              size: 18,
+                              color: WhatsAppColors.tealAccent,
+                            ),
+                        ],
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
           if (conversation != null &&
               conversation.type == 'direct' &&
               conversation.otherUserId != null)
@@ -877,10 +1176,16 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     // list itself — cheap given the 500-message-per-conversation cache cap.
     final messagesById = {for (final m in _messages) m.id: m};
 
+    // Typing indicator renders as a trailing list item, not a widget bolted on
+    // outside the ListView — that keeps it scrolling into view with everything
+    // else instead of needing its own separate layout/visibility logic.
+    final showTyping = _otherTyping && _conversation?.type == 'direct';
+    final itemCount = _messages.length + (showTyping ? 1 : 0);
+
     return Column(
       children: [
         Expanded(
-          child: _messages.isEmpty
+          child: _messages.isEmpty && !showTyping
               ? const EmptyState(
                   icon: Icons.chat_bubble_outline,
                   message: 'No messages yet — say hello.',
@@ -888,8 +1193,11 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
               : ListView.builder(
                   controller: _scrollController,
                   padding: const EdgeInsets.all(12),
-                  itemCount: _messages.length,
+                  itemCount: itemCount,
                   itemBuilder: (context, index) {
+                    if (index == _messages.length) {
+                      return const _TypingIndicatorBubble();
+                    }
                     final message = _messages[index];
                     return _MessageBubble(
                       message: message,
@@ -899,7 +1207,9 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                       replySource: message.replyToMessageId != null
                           ? messagesById[message.replyToMessageId]
                           : null,
-                      onLongPress: () => _startReply(message),
+                      onLongPress: message.deleted
+                          ? null
+                          : () => _showMessageActions(message),
                     );
                   },
                 ),
@@ -982,6 +1292,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                                   minLines: 1,
                                   maxLines: 5,
                                   textInputAction: TextInputAction.send,
+                                  onChanged: _onComposerTextChanged,
                                   onSubmitted: (_) => _send(),
                                 ),
                               ),
@@ -1132,6 +1443,47 @@ String _formatBubbleTime(String iso) {
   return '$h:$m';
 }
 
+/// Mirrors web's own `OPTIONS` (disappearing-timer-menu.tsx) — 'off' first
+/// (the default/most common state), then ascending duration.
+const _disappearingTimerOptions = [
+  ('off', 'Off'),
+  ('h24', '24 hours'),
+  ('d7', '7 days'),
+  ('d30', '30 days'),
+];
+
+String _disappearingTimerLabel(String value) => _disappearingTimerOptions
+    .firstWhere((o) => o.$1 == value, orElse: () => (value, value))
+    .$2;
+
+/// The one place "h24 means 24 hours" is spelled out on this client — mirrors
+/// `packages/types/src/messages.ts`'s `disappearingTimerToMs` exactly (mobile
+/// has no shared-types package to import from, unlike web/worker, so this is
+/// duplicated deliberately rather than left to drift silently: any change to
+/// the enum's meaning needs updating here too). `null` = never expires.
+int? disappearingTimerToMs(String timer) {
+  switch (timer) {
+    case 'h24':
+      return 24 * 60 * 60 * 1000;
+    case 'd7':
+      return 7 * 24 * 60 * 60 * 1000;
+    case 'd30':
+      return 30 * 24 * 60 * 60 * 1000;
+    default:
+      return null; // 'off', or anything unrecognized — fail closed to "never expires"
+  }
+}
+
+/// Mirrors web's `deletedPlaceholderText` (lib/message-content.ts) exactly,
+/// adapted to mobile's own content-type vocabulary (see _replyPreviewText's
+/// docstring on why there's no separate 'image' case here).
+String deletedPlaceholderText(String contentTypeHint, String? deletedReason) {
+  if (deletedReason != 'media_retention') return 'This message was deleted';
+  if (contentTypeHint == 'voice') return 'This voice message has expired';
+  if (contentTypeHint == 'media') return 'This file has expired';
+  return 'This message was deleted';
+}
+
 /// Short one-line label for a message being quoted — as a reply target in the
 /// composer preview, or as the quoted snippet inside a bubble that's itself a
 /// reply. Mirrors web's inline switch on `contentTypeHint` in message-thread.tsx
@@ -1140,6 +1492,9 @@ String _formatBubbleTime(String iso) {
 /// content type — a photo sent from the gallery picker is still 'media' with an
 /// image/* attachment mimeType, so that's sniffed here instead.
 String _replyPreviewText(CachedMessage m) {
+  if (m.deleted) {
+    return deletedPlaceholderText(m.contentTypeHint, m.deletedReason);
+  }
   if (m.contentTypeHint == 'voice') return '🎤 Voice message';
   if (m.contentTypeHint == 'media') {
     final mime = m.attachment?.mimeType ?? '';
@@ -1252,6 +1607,55 @@ class _MessageBubble extends StatelessWidget {
     // WhatsApp uses the same near-black text on both bubble colors — never a
     // light-on-primary combination the way a generic Material bubble would.
     const fgColor = WhatsAppColors.bubbleText;
+
+    // A tombstoned message — content is genuinely gone (see
+    // markCachedMessageDeleted's docstring), rendered as a muted placeholder
+    // with no long-press menu (matches web's own `!m.deleted` gate on even
+    // showing the "..." actions button at all — there's nothing left to reply
+    // to or delete twice).
+    if (message.deleted) {
+      return Align(
+        alignment: message.isOwn ? Alignment.centerRight : Alignment.centerLeft,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.78,
+          ),
+          decoration: BoxDecoration(
+            color: message.isOwn
+                ? WhatsAppColors.outgoingBubble.withValues(alpha: 0.5)
+                : WhatsAppColors.incomingBubble,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.block,
+                size: 15,
+                color: fgColor.withValues(alpha: 0.55),
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  deletedPlaceholderText(
+                    message.contentTypeHint,
+                    message.deletedReason,
+                  ),
+                  style: TextStyle(
+                    color: fgColor.withValues(alpha: 0.55),
+                    fontStyle: FontStyle.italic,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     final attachment = message.attachment;
 
     return Align(
@@ -1415,6 +1819,90 @@ class _MessageBubble extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// "... is typing" — three dots pulsing in sequence, styled as an incoming
+/// bubble (left-aligned, white) — the mobile counterpart to web's own
+/// animated-dot indicator (message-thread.tsx's `animate-typing-dot`).
+class _TypingIndicatorBubble extends StatefulWidget {
+  const _TypingIndicatorBubble();
+
+  @override
+  State<_TypingIndicatorBubble> createState() => _TypingIndicatorBubbleState();
+}
+
+class _TypingIndicatorBubbleState extends State<_TypingIndicatorBubble>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: WhatsAppColors.incomingBubble,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(8),
+            topRight: Radius.circular(8),
+            bottomRight: Radius.circular(8),
+          ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x14000000),
+              blurRadius: 1,
+              offset: Offset(0, 1),
+            ),
+          ],
+        ),
+        child: AnimatedBuilder(
+          animation: _controller,
+          builder: (context, _) {
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: List.generate(3, (i) {
+                // Each dot staggered a third of the cycle behind the last —
+                // a simple sine bounce rather than a discrete on/off blink.
+                final phase = (_controller.value - i * 0.2) % 1.0;
+                final scale = 0.5 + 0.5 * (0.5 - (phase - 0.5).abs()) * 2;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2),
+                  child: Transform.scale(
+                    scale: 0.6 + 0.4 * scale,
+                    child: Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        color: WhatsAppColors.bubbleText.withValues(alpha: 0.4),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            );
+          },
         ),
       ),
     );
