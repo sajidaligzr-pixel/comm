@@ -40,9 +40,12 @@ function registerSocket(deviceId: string, socket: WebSocket): void {
   const set = socketsByDevice.get(deviceId) ?? new Set<WebSocket>();
   set.add(socket);
   socketsByDevice.set(deviceId, set);
+  // TEMPORARY diagnostic — remove alongside the call-debug lines elsewhere.
+  console.log(`[call-debug] socket OPEN device=${deviceId} liveSocketsForDevice=${set.size}`);
   socket.once('close', () => {
     set.delete(socket);
     if (set.size === 0) socketsByDevice.delete(deviceId);
+    console.log(`[call-debug] socket CLOSE device=${deviceId} remainingForDevice=${set.size}`);
   });
 }
 
@@ -66,6 +69,9 @@ function sendJson(socket: WebSocket, payload: unknown): void {
 
 function forwardToDevice(deviceId: string, payload: unknown): void {
   const sockets = socketsByDevice.get(deviceId);
+  // TEMPORARY diagnostic — remove alongside the call-debug lines elsewhere.
+  const type = (payload as { type?: string } | null)?.type;
+  console.log(`[call-debug] forwardToDevice device=${deviceId} type=${type} liveSockets=${sockets?.size ?? 0}`);
   if (!sockets) return;
   for (const socket of sockets) sendJson(socket, payload);
 }
