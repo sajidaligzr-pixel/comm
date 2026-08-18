@@ -22,6 +22,7 @@ import '../features/devices/devices_screen.dart';
 import '../features/groups/new_group_screen.dart';
 import '../features/groups/group_info_screen.dart';
 import '../features/admin/admin_screen.dart';
+import 'splash_screen.dart';
 
 /// Pure redirect logic, factored out of the `GoRouter` construction below purely so
 /// it's unit-testable without spinning up navigation/platform-channel machinery
@@ -32,14 +33,23 @@ String? computeAuthRedirect(AuthState auth, String path) {
 
   switch (auth) {
     case AuthChecking():
-      return null; // stay put — splash/loading is rendered by the shell itself
+      // Force every path to the splash screen until it's known whether this
+      // device needs to unlock, log in, or is already signed in — /chats and
+      // /chats/:id show real account content (conversation names, fetched live)
+      // that must never render even briefly before authentication is resolved.
+      // Found live: this used to return null with initialLocation pointed at
+      // /chats, so the chats list rendered — and fired its own network fetch —
+      // for a moment before bootstrap() resolved and forced /unlock.
+      return path == '/splash' ? null : '/splash';
     case AuthSignedOut():
       return onInvite || path == '/login' ? null : '/login';
     case AuthNeedsUnlock():
       return path == '/unlock' ? null : '/unlock';
     case AuthSignedIn(mustChangePassword: final must):
       if (must) return path == '/change-password' ? null : '/change-password';
-      if (path == '/login' || path == '/unlock' || path == '/change-password' || onInvite) return '/chats';
+      if (path == '/login' || path == '/unlock' || path == '/change-password' || path == '/splash' || onInvite) {
+        return '/chats';
+      }
       return null;
   }
 }
@@ -48,9 +58,10 @@ final routerProvider = Provider<GoRouter>((ref) {
   final auth = ref.watch(authControllerProvider);
 
   return GoRouter(
-    initialLocation: '/chats',
+    initialLocation: '/splash',
     redirect: (context, state) => computeAuthRedirect(auth, state.matchedLocation),
     routes: [
+      GoRoute(path: '/splash', builder: (context, state) => const SplashScreen()),
       GoRoute(path: '/login', builder: (context, state) => const LoginScreen()),
       GoRoute(path: '/unlock', builder: (context, state) => const UnlockScreen()),
       GoRoute(

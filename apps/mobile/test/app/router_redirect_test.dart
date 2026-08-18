@@ -21,9 +21,11 @@ const _profile = UserProfile(
 
 void main() {
   group('computeAuthRedirect', () {
-    test('AuthChecking never redirects — the shell itself renders a loading state', () {
-      expect(computeAuthRedirect(const AuthChecking(), '/chats'), isNull);
-      expect(computeAuthRedirect(const AuthChecking(), '/login'), isNull);
+    test('AuthChecking forces /splash from anywhere — real content must never render before auth resolves', () {
+      expect(computeAuthRedirect(const AuthChecking(), '/splash'), isNull);
+      expect(computeAuthRedirect(const AuthChecking(), '/chats'), '/splash');
+      expect(computeAuthRedirect(const AuthChecking(), '/chats/some-conversation-id'), '/splash');
+      expect(computeAuthRedirect(const AuthChecking(), '/login'), '/splash');
     });
 
     test('AuthSignedOut allows /login and /invite/:token, redirects everything else to /login', () {
@@ -31,12 +33,14 @@ void main() {
       expect(computeAuthRedirect(const AuthSignedOut(), '/invite/abc123'), isNull);
       expect(computeAuthRedirect(const AuthSignedOut(), '/chats'), '/login');
       expect(computeAuthRedirect(const AuthSignedOut(), '/chats/xyz'), '/login');
+      expect(computeAuthRedirect(const AuthSignedOut(), '/splash'), '/login');
     });
 
     test('AuthNeedsUnlock forces /unlock from anywhere else', () {
       expect(computeAuthRedirect(const AuthNeedsUnlock(_profile), '/unlock'), isNull);
       expect(computeAuthRedirect(const AuthNeedsUnlock(_profile), '/chats'), '/unlock');
       expect(computeAuthRedirect(const AuthNeedsUnlock(_profile), '/login'), '/unlock');
+      expect(computeAuthRedirect(const AuthNeedsUnlock(_profile), '/splash'), '/unlock');
     });
 
     test('AuthSignedIn with mustChangePassword forces /change-password from anywhere else', () {
@@ -44,6 +48,7 @@ void main() {
       expect(computeAuthRedirect(state, '/change-password'), isNull);
       expect(computeAuthRedirect(state, '/chats'), '/change-password');
       expect(computeAuthRedirect(state, '/chats/xyz'), '/change-password');
+      expect(computeAuthRedirect(state, '/splash'), '/change-password');
     });
 
     test('AuthSignedIn (password OK) bounces away from auth screens, allows everything else', () {
@@ -51,6 +56,7 @@ void main() {
       expect(computeAuthRedirect(state, '/login'), '/chats');
       expect(computeAuthRedirect(state, '/unlock'), '/chats');
       expect(computeAuthRedirect(state, '/change-password'), '/chats');
+      expect(computeAuthRedirect(state, '/splash'), '/chats');
       expect(computeAuthRedirect(state, '/invite/abc123'), '/chats');
       expect(computeAuthRedirect(state, '/chats'), isNull);
       expect(computeAuthRedirect(state, '/chats/some-conversation-id'), isNull);

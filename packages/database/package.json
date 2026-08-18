@@ -12,6 +12,7 @@
     "migrate:deploy": "prisma migrate deploy",
     "studio": "prisma studio",
     "bootstrap-admin": "tsx scripts/bootstrap-admin.ts",
+    "reset-messages": "tsx scripts/reset-messages.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint ."
   },
