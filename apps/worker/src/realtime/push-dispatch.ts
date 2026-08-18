@@ -139,7 +139,14 @@ async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): 
 
   await dispatchTo(event.targetDeviceId, {
     messagePayload: { title: 'Comm', body, conversationId: event.message.conversationId },
-    fcmData: { type: 'message', conversationId: event.message.conversationId, title: 'Comm', body },
+    // `messageId` lets the receiving client fire a delivered-ack the instant the push
+    // itself arrives (apps/mobile's push_notifications.dart `_ackDelivered`) rather
+    // than waiting for a screen with a live WS listener to eventually open — closes
+    // the gap where a message delivered only via push (app closed/backgrounded) left
+    // the sender's tick stuck on "sent" until the recipient happened to open the app.
+    // No web_push equivalent needed: `messagePayload` already goes through
+    // chats-shell.tsx's live 'new' handler, which acks delivery itself once decrypted.
+    fcmData: { type: 'message', conversationId: event.message.conversationId, messageId: event.message.id, title: 'Comm', body },
   });
 }
 

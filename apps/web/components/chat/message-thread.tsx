@@ -134,10 +134,14 @@ export function MessageThread({
   const recordingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const skipNextAutoScrollRef = useRef(false);
   const messagesRef = useRef(messages);
+  const statusRef = useRef(status);
 
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   // Local, immediate enforcement of the disappearing-message timer — checked on
   // mount/timer-change and then periodically, not just once, since a message can
@@ -168,6 +172,44 @@ export function MessageThread({
     const interval = setInterval(pruneExpired, 30_000);
     return () => clearInterval(interval);
   }, [disappearingTimerMs, conversationId]);
+
+  // Belt-and-suspenders for the live 'delivered'/'read' WS listeners below — found
+  // live, reported directly: both the mobile and web clients open on the same
+  // conversation, a message sent from this device sat on a single tick with no
+  // live update at all, only catching up once the thread was closed and reopened
+  // (which forces the full `load()` above, reseeding `status` from a fresh REST
+  // fetch). Whatever gap let that one WS frame go missing, this guarantees
+  // convergence within one poll interval regardless — a light re-check of just
+  // this device's own messages' delivered/read flags, not a full reload (decrypt
+  // included) of the whole thread. Skips the network round trip entirely once
+  // there's nothing left to wait on (every own message already read), so an
+  // idle-but-open thread doesn't poll forever for no reason.
+  useEffect(() => {
+    // Sync wrapper around the actual async work — same idiom as pruneExpired above
+    // (setInterval's callback type is void-returning; an async function handed to
+    // it directly trips @typescript-eslint/no-misused-promises).
+    function poll() {
+      const hasPending = messagesRef.current.some((m) => m.isOwn && !statusRef.current[m.id]?.read);
+      if (!hasPending) return;
+      void (async () => {
+        try {
+          const page = await apiFetch<{ items: MessageDto[]; nextCursor: string | null }>(
+            `/api/conversations/${conversationId}/messages?limit=50`,
+          );
+          const next: Record<string, DeliveryStatus> = {};
+          for (const item of page.items) {
+            if (item.senderUserId !== currentUserId) continue;
+            next[item.id] = { delivered: !!item.deliveredAt, read: !!item.readAt };
+          }
+          setStatus((prev) => ({ ...prev, ...next }));
+        } catch {
+          // Best-effort — the next tick, a live WS event, or a full reload catches up.
+        }
+      })();
+    }
+    const interval = setInterval(poll, 8_000);
+    return () => clearInterval(interval);
+  }, [conversationId, currentUserId]);
 
   useEffect(() => {
     let cancelled = false;

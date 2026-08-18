@@ -160,6 +160,22 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   // don't have this thread open; this is what makes it feel instant on this one.
   Timer? _disappearingPruneTimer;
 
+  // --- Delivered/read status poll (belt-and-suspenders) ------------------------
+  // The live 'delivered'/'read' WS events (registered in initState below) are the
+  // primary path and normally all that's needed — but found live, reported
+  // directly: both apps open, a message sent from this device sat on a single
+  // tick with no live update at all, only turning into a double blue tick after
+  // the thread was manually closed and reopened (which forces a fresh `_load()`,
+  // reseeding `_status` from a REST fetch — see that reseed loop's own comment).
+  // Whatever gap let that one WS frame (or its round trip through the other
+  // side's own ack calls) go missing, this is the fallback that guarantees
+  // convergence within one poll interval regardless: a light, decrypt-free
+  // re-check of just the delivered/read flags for this device's own messages,
+  // not a full `_load()` (which also re-fetches conversation state, restarts the
+  // disappearing-prune timer, and re-runs group key sync — far more than this
+  // needs and disruptive to call repeatedly on a timer).
+  Timer? _statusPollTimer;
+
   String get _myUserId {
     final state = ref.read(authControllerProvider);
     return state is AuthSignedIn ? state.profile.id : '';
@@ -199,6 +215,41 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           widget.conversationId,
     );
     clearNotificationFor(widget.conversationId);
+
+    _statusPollTimer = Timer.periodic(
+      const Duration(seconds: 8),
+      (_) => _pollDeliveryStatus(),
+    );
+  }
+
+  /// See `_statusPollTimer`'s own docstring for why this exists at all. Skips the
+  /// network round trip entirely once there's nothing left to wait on (every own
+  /// message already showing read), so an idle-but-open thread doesn't poll
+  /// forever for no reason.
+  Future<void> _pollDeliveryStatus() async {
+    final hasPending = _messages.any(
+      (m) => m.isOwn && !(_status[m.id]?.read ?? false),
+    );
+    if (!hasPending) return;
+    try {
+      final page = await ref
+          .read(messagesApiProvider)
+          .list(widget.conversationId, limit: 100);
+      if (!mounted) return;
+      setState(() {
+        for (final dto in page.items) {
+          if (dto.senderUserId != _myUserId) continue;
+          _status[dto.id] = (
+            delivered: dto.deliveredAt != null,
+            read: dto.readAt != null,
+          );
+        }
+      });
+    } catch (_) {
+      // Best-effort — same as every other background receipt/status ping in this
+      // file; the next tick (or a live WS event, or the next full `_load()`)
+      // tries again.
+    }
   }
 
   @override
@@ -213,6 +264,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     if (ref.read(currentOpenConversationIdProvider) == widget.conversationId) {
       ref.read(currentOpenConversationIdProvider.notifier).state = null;
     }
+    _statusPollTimer?.cancel();
     _textController.dispose();
     _scrollController.dispose();
     _recordingTimer?.cancel();
