@@ -7,6 +7,7 @@ import '../../api/dtos.dart';
 import '../../app/app.dart' show WhatsAppColors;
 import '../../app/providers.dart';
 import '../../crypto/message_cache.dart' show clearCachedMessages;
+import '../../shared/widgets/error_state.dart';
 import '../notifications/conversation_titles.dart';
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
@@ -68,9 +69,15 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
       for (final c in list) {
         conversationTitles[c.id] = c.displayTitle();
       }
-      if (mounted) setState(() => _conversations = list);
+      if (mounted) setState(() { _conversations = list; _error = null; });
     } on ApiException catch (e) {
-      if (mounted) setState(() => _error = e.message);
+      // Only surface a full error screen when there's nothing on screen yet.
+      // `_load()` also re-runs on every live 'new' WS event (see
+      // _onRealtimeMessage below) — a transient failure on one of those
+      // background refreshes shouldn't blow away an already-loaded chat list
+      // and replace it with an error page; worst case this refresh is just
+      // silently skipped and the next one catches up.
+      if (mounted && _conversations == null) setState(() => _error = e.message);
     }
   }
 
@@ -267,14 +274,17 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
 
   Widget _buildBody() {
     if (_error != null) {
-      return Center(child: Text(_error!));
+      return ErrorState(message: _error!, onRetry: _load);
     }
     final conversations = _conversations;
     if (conversations == null) {
       return const Center(child: CircularProgressIndicator());
     }
     if (conversations.isEmpty) {
-      return const Center(child: Text('No conversations yet — tap the compose button to message someone.'));
+      return const EmptyState(
+        icon: Icons.chat_bubble_outline,
+        message: 'No conversations yet — tap the compose button to message someone.',
+      );
     }
 
     final active = conversations.where((c) => !c.archived).toList();
@@ -287,7 +297,10 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen> {
           if (active.isEmpty && archived.isNotEmpty)
             const Padding(
               padding: EdgeInsets.all(24),
-              child: Center(child: Text('No conversations yet — tap the compose button to message someone.')),
+              child: EmptyState(
+                icon: Icons.chat_bubble_outline,
+                message: 'No active chats — tap the compose button to message someone.',
+              ),
             ),
           for (var i = 0; i < active.length; i++) ...[
             if (i > 0) const Divider(height: 1),

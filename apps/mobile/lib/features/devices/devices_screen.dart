@@ -12,6 +12,7 @@ import '../../api/api_client.dart';
 import '../../api/dtos.dart';
 import '../../app/providers.dart';
 import '../../crypto/kek_holder.dart';
+import '../../shared/widgets/error_state.dart';
 import '../auth/auth_controller.dart';
 import '../auth/biometric_unlock.dart' as biometric;
 
@@ -195,7 +196,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   }
 
   Widget _buildBody() {
-    if (_error != null) return Center(child: Text(_error!));
+    if (_error != null) return ErrorState(message: _error!, onRetry: _load);
     final devices = _devices;
     if (devices == null) return const Center(child: CircularProgressIndicator());
 

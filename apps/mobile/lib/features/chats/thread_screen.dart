@@ -33,6 +33,7 @@ import '../../crypto/encoding.dart';
 import '../../crypto/kek_holder.dart';
 import '../../crypto/message_cache.dart';
 import '../../crypto/session/session.dart' show MessageEnvelope;
+import '../../shared/widgets/error_state.dart';
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 import '../calls/call_controller.dart';
@@ -180,7 +181,18 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         if (cachedIds.contains(dto.id)) continue;
         await _ingestIncoming(dto, alreadyMine: dto.senderUserId == _myUserId);
       }
-      await ref.read(conversationsApiProvider).markRead(widget.conversationId, page.items.isNotEmpty ? page.items.last.id : '');
+      if (page.items.isNotEmpty) {
+        // Fire-and-forget, same as every other receipt ping in this file (see
+        // _ingestIncoming's docstring on why awaiting these serializes network
+        // round trips) — and deliberately guarded on isNotEmpty: a brand-new,
+        // still-empty conversation has nothing to mark read, and sending ''
+        // as upToMessageId is not a valid message id. Found live: the server
+        // correctly rejected it, but because this call used to be awaited
+        // inside this same try, that rejection wiped out the whole loaded
+        // thread (composer included) and left this screen showing the raw
+        // validation message instead of any chat UI at all.
+        ref.read(conversationsApiProvider).markRead(widget.conversationId, page.items.last.id).catchError((_) {});
+      }
       _scrollToBottom();
     } on ApiException catch (e) {
       setState(() => _error = e.message);
@@ -189,6 +201,14 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  void _retry() {
+    setState(() {
+      _error = null;
+      _loading = true;
+    });
+    _load();
   }
 
   /// `alreadyMine` covers REST history backfill for this device's OWN earlier sent
@@ -483,13 +503,13 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
 
   Widget _buildBody() {
     if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_error != null) return Center(child: Text(_error!));
+    if (_error != null) return ErrorState(message: _error!, onRetry: _retry);
 
     return Column(
       children: [
         Expanded(
           child: _messages.isEmpty
-              ? const Center(child: Text('No messages yet — say hello.'))
+              ? const EmptyState(icon: Icons.chat_bubble_outline, message: 'No messages yet — say hello.')
               : ListView.builder(
                   controller: _scrollController,
                   padding: const EdgeInsets.all(12),

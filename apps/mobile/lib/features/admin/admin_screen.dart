@@ -21,6 +21,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../api/api_client.dart';
 import '../../api/dtos.dart';
 import '../../app/providers.dart';
+import '../../shared/widgets/error_state.dart';
 
 class AdminScreen extends ConsumerStatefulWidget {
   const AdminScreen({super.key});
@@ -143,7 +144,7 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
         ),
       );
     }
-    if (_error != null) return Center(child: Text(_error!));
+    if (_error != null) return ErrorState(message: _error!, onRetry: _load);
     final users = _users;
     if (users == null) return const Center(child: CircularProgressIndicator());
 

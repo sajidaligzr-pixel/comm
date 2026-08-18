@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../api/api_client.dart';
 import '../../api/dtos.dart';
 import '../../app/providers.dart';
+import '../../shared/widgets/error_state.dart';
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 
@@ -18,6 +19,7 @@ class GroupInfoScreen extends ConsumerStatefulWidget {
 class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
   GroupSummary? _group;
   String? _error;
+  bool _loading = true;
 
   @override
   void initState() {
@@ -26,11 +28,14 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
   }
 
   Future<void> _load() async {
+    setState(() { _loading = true; _error = null; });
     try {
       final group = await ref.read(groupsApiProvider).get(widget.groupId);
       if (mounted) setState(() => _group = group);
     } on ApiException catch (e) {
       if (mounted) setState(() => _error = e.message);
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -96,9 +101,13 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
     final group = _group;
     return Scaffold(
       appBar: AppBar(title: Text(group?.name ?? 'Group info')),
-      body: group == null
-          ? Center(child: Text(_error ?? '', style: const TextStyle()))
-          : ListView(
+      // Once a group has loaded once, a later refresh (after adding/removing a
+      // member) never tears the whole screen down over a transient failure —
+      // same "don't replace a working view with an error state" rule applied
+      // to chats_list_screen.dart's own _load. Only the very first load, before
+      // anything has rendered yet, shows the spinner/error in place of content.
+      body: group != null
+          ? ListView(
               children: [
                 Padding(
                   padding: const EdgeInsets.all(16),
@@ -136,7 +145,10 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
                   ),
                 ),
               ],
-            ),
+            )
+          : (_loading
+              ? const Center(child: CircularProgressIndicator())
+              : ErrorState(message: _error ?? 'Could not load this group.', onRetry: _load)),
     );
   }
 }
