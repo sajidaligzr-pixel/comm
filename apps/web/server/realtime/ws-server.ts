@@ -40,12 +40,9 @@ function registerSocket(deviceId: string, socket: WebSocket): void {
   const set = socketsByDevice.get(deviceId) ?? new Set<WebSocket>();
   set.add(socket);
   socketsByDevice.set(deviceId, set);
-  // TEMPORARY diagnostic — remove alongside the call-debug lines elsewhere.
-  console.log(`[call-debug] socket OPEN device=${deviceId} liveSocketsForDevice=${set.size}`);
   socket.once('close', () => {
     set.delete(socket);
     if (set.size === 0) socketsByDevice.delete(deviceId);
-    console.log(`[call-debug] socket CLOSE device=${deviceId} remainingForDevice=${set.size}`);
   });
 }
 
@@ -69,9 +66,6 @@ function sendJson(socket: WebSocket, payload: unknown): void {
 
 function forwardToDevice(deviceId: string, payload: unknown): void {
   const sockets = socketsByDevice.get(deviceId);
-  // TEMPORARY diagnostic — remove alongside the call-debug lines elsewhere.
-  const type = (payload as { type?: string } | null)?.type;
-  console.log(`[call-debug] forwardToDevice device=${deviceId} type=${type} liveSockets=${sockets?.size ?? 0}`);
   if (!sockets) return;
   for (const socket of sockets) sendJson(socket, payload);
 }
@@ -207,12 +201,28 @@ wss.on('connection', (socket: AuthenticatedSocket) => {
  * this-point connection. Checking the handshake's `Origin` header against the
  * configured `WEB_ORIGIN` is the same "don't rely on a single mechanism" posture this
  * codebase already applies elsewhere (e.g. local-fs-storage.ts's belt-and-suspenders
- * objectKey format check on top of its own UUID-generation invariant). A browser
- * always sends `Origin` on a WebSocket handshake, so this rejects nothing a real
- * client would ever trigger.
+ * objectKey format check on top of its own UUID-generation invariant).
+ *
+ * A MISSING Origin header is allowed, not rejected — this was a real, severe bug
+ * (found live, traced all the way through with temporary connection-level logging
+ * after days of reports that looked like a dozen unrelated small bugs): a browser
+ * always sends `Origin` on a WebSocket handshake, but apps/mobile's ws_client.dart
+ * is a native Dart WebSocket client with no such concept, so it never has and never
+ * will send one — `if (!origin) return false` silently 401'd EVERY mobile WS
+ * connection attempt, forever, with `ws_client.dart`'s own reconnect-with-backoff
+ * masking it as "just" occasional flakiness. That's the actual root cause behind an
+ * entire session's worth of "message/tick/call doesn't show up live, only after I
+ * reopen the app" reports across every realtime feature — mobile was never actually
+ * holding a live socket at all, only ever catching up after the fact through REST
+ * fallbacks. The Origin check's real job is stopping a BROWSER from being tricked
+ * into riding its own ambient cookies against this endpoint from a hostile page — a
+ * client that was never a browser to begin with was never that threat model, so
+ * letting a missing Origin through gives up nothing; a PRESENT-but-wrong Origin (an
+ * actual hostile page, which — being a browser — always sends one) is still
+ * rejected exactly as before.
  */
 function isAllowedOrigin(origin: string | undefined): boolean {
-  if (!origin) return false;
+  if (!origin) return true;
   const allowed = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
   return origin === allowed;
 }

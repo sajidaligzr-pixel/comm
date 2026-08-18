@@ -170,10 +170,6 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         await enforceRateLimit(RATE_LIMIT_RULES.callInvite, ctx.userId);
         const body = CallInviteEnvelope.parse(parsed);
         const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
-        // TEMPORARY diagnostic — remove once the multi-device fan-out is confirmed
-        // live against a real call. No secrets, just ids already visible to anyone
-        // with DB access.
-        console.log(`[call-debug] invite callId=${body.callId} fromDevice=${ctx.deviceId} targets=${JSON.stringify(targets.map((t) => t.deviceId))}`);
         if (targets.length > 0) {
           const caller = await prisma.user.findUnique({ where: { id: ctx.userId }, select: { displayName: true } });
           const fromDisplayName = caller?.displayName ?? 'Unknown';
