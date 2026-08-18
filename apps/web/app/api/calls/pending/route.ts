@@ -19,6 +19,10 @@ export async function GET(req: NextRequest) {
     const ctx = await requireAuth(req);
     await enforceRateLimit(RATE_LIMIT_RULES.callPendingCheck, ctx.userId);
     const pending: PendingCallResponse = await getPendingCall(ctx.deviceId);
+    // TEMPORARY diagnostic — remove once the multi-device fan-out is confirmed live
+    // against a real call. No secrets, just ids already visible to anyone with DB
+    // access.
+    console.log(`[call-debug] pending check device=${ctx.deviceId} -> ${pending ? `FOUND callId=${pending.callId}` : 'null'}`);
     return jsonOk(pending);
   });
 }
