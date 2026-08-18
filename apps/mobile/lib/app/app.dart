@@ -17,8 +17,12 @@ class WhatsAppColors {
   static const green = Color(0xFF25D366); // FAB / send button / unread badge
   static const outgoingBubble = Color(0xFFDCF8C6); // sent-message bubble
   static const incomingBubble = Color(0xFFFFFFFF); // received-message bubble
-  static const chatBackground = Color(0xFFECE5DD); // chat-thread background tone
-  static const bubbleText = Color(0xFF111B21); // WhatsApp's near-black bubble text
+  static const chatBackground = Color(
+    0xFFECE5DD,
+  ); // chat-thread background tone
+  static const bubbleText = Color(
+    0xFF111B21,
+  ); // WhatsApp's near-black bubble text
   static const listBackground = Color(0xFFFFFFFF);
 }
 
@@ -29,11 +33,15 @@ class CommApp extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final router = ref.watch(routerProvider);
 
-    final colorScheme = ColorScheme.fromSeed(seedColor: WhatsAppColors.tealAccent, brightness: Brightness.light).copyWith(
-      primary: WhatsAppColors.tealAccent,
-      secondary: WhatsAppColors.green,
-      surface: WhatsAppColors.listBackground,
-    );
+    final colorScheme =
+        ColorScheme.fromSeed(
+          seedColor: WhatsAppColors.tealAccent,
+          brightness: Brightness.light,
+        ).copyWith(
+          primary: WhatsAppColors.tealAccent,
+          secondary: WhatsAppColors.green,
+          surface: WhatsAppColors.listBackground,
+        );
 
     return MaterialApp.router(
       title: 'Comm',
@@ -55,22 +63,50 @@ class CommApp extends ConsumerWidget {
           centerTitle: false,
           iconTheme: IconThemeData(color: Colors.white),
           actionsIconTheme: IconThemeData(color: Colors.white),
-          titleTextStyle: TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w500),
+          titleTextStyle: TextStyle(
+            color: Colors.white,
+            fontSize: 20,
+            fontWeight: FontWeight.w500,
+          ),
         ),
         floatingActionButtonTheme: const FloatingActionButtonThemeData(
           backgroundColor: WhatsAppColors.green,
           foregroundColor: Colors.white,
         ),
         iconTheme: const IconThemeData(color: WhatsAppColors.tealAccent),
-        progressIndicatorTheme: const ProgressIndicatorThemeData(color: WhatsAppColors.tealAccent),
-        textSelectionTheme: const TextSelectionThemeData(cursorColor: WhatsAppColors.tealAccent, selectionHandleColor: WhatsAppColors.tealAccent),
-        switchTheme: SwitchThemeData(thumbColor: WidgetStateProperty.resolveWith((s) => s.contains(WidgetState.selected) ? WhatsAppColors.green : null)),
+        progressIndicatorTheme: const ProgressIndicatorThemeData(
+          color: WhatsAppColors.tealAccent,
+        ),
+        textSelectionTheme: const TextSelectionThemeData(
+          cursorColor: WhatsAppColors.tealAccent,
+          selectionHandleColor: WhatsAppColors.tealAccent,
+        ),
+        switchTheme: SwitchThemeData(
+          thumbColor: WidgetStateProperty.resolveWith(
+            (s) =>
+                s.contains(WidgetState.selected) ? WhatsAppColors.green : null,
+          ),
+        ),
       ),
       routerConfig: router,
       // Mounted once, above every route, exactly like CallProvider's placement in
       // apps/web's (app)/layout.tsx — an incoming call has to ring no matter which
       // screen is open, not just while a specific chat thread is on screen.
-      builder: (context, child) => Stack(children: [if (child != null) child, const CallOverlay()]),
+      //
+      // Positioned.fill is load-bearing, not decorative: a bare Stack sizes each
+      // non-positioned child by its own natural size, and CallOverlay's content
+      // (an avatar + a couple of lines of text + a button row, in a Column that
+      // defaults to CrossAxisAlignment.center) shrink-wraps to the width of its
+      // widest line — found live as the call screen rendering as a narrow column
+      // pinned to the left third of the screen with the chat thread still visible
+      // through the rest of it. Positioned.fill forces tight, full-screen
+      // constraints down through Material → Column regardless of content width.
+      builder: (context, child) => Stack(
+        children: [
+          if (child != null) child,
+          const Positioned.fill(child: CallOverlay()),
+        ],
+      ),
     );
   }
 }

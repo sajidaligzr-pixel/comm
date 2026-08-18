@@ -33,5 +33,15 @@ void main() {
     test('read:true wins even if delivered is (incorrectly) false', () {
       expect(tickStateFor((delivered: false, read: true)), TickState.read);
     });
+
+    // pending is the optimistic-render window between "rendered locally" and
+    // "server confirmed the POST" (thread_screen.dart's `_pendingIds`) — it must
+    // win over whatever `status` says, since an optimistic bubble's `status` is
+    // always null anyway (nothing server-confirmed has happened yet) but the
+    // precedence is worth pinning down explicitly rather than left implicit.
+    test('pending:true is sending, regardless of status', () {
+      expect(tickStateFor(null, pending: true), TickState.sending);
+      expect(tickStateFor((delivered: true, read: true), pending: true), TickState.sending);
+    });
   });
 }

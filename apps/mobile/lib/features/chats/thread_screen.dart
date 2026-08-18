@@ -15,6 +15,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show HapticFeedback;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -50,7 +51,12 @@ class _DecodedContent {
 _DecodedContent _decodeContent(String contentTypeHint, Uint8List plaintext) {
   if (contentTypeHint == 'media') {
     try {
-      return _DecodedContent(text: '', attachment: AttachmentDescriptor.fromJson(jsonDecode(bytesToUtf8(plaintext)) as Map<String, dynamic>));
+      return _DecodedContent(
+        text: '',
+        attachment: AttachmentDescriptor.fromJson(
+          jsonDecode(bytesToUtf8(plaintext)) as Map<String, dynamic>,
+        ),
+      );
     } catch (_) {
       return const _DecodedContent(text: '[Malformed attachment]');
     }
@@ -86,6 +92,19 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// from `MessageDto.deliveredAt`/`readAt` on load, updated live via the
   /// `delivered`/`read` WS events, never itself persisted.
   final Map<String, ({bool delivered, bool read})> _status = {};
+
+  /// Message ids currently between "rendered locally" and "server confirmed the
+  /// POST" — drives the clock/pending tick in `_MessageBubble`. Mirrors web's
+  /// `pendingIds` (message-thread.tsx) exactly; see `_sendEnvelope`'s docstring
+  /// for why this exists at all.
+  final Set<String> _pendingIds = {};
+
+  /// The message a long-press has staged to reply to — mirrors web's
+  /// `replyingTo` (message-thread.tsx) exactly: shown as a preview strip above
+  /// the composer, cleared the instant a send actually starts (not after it
+  /// completes — see `_sendEnvelope`), and carried as `replyToMessageId` on
+  /// the outgoing request.
+  CachedMessage? _replyingTo;
   final _scrollController = ScrollController();
   String? _error;
   bool _loading = true;
@@ -108,7 +127,10 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     // Tells messageNotifierProvider not to pop a redundant system notification for
     // whatever's already visible on screen right now, and clears any notification
     // already showing for this conversation (e.g. from before the app was opened).
-    Future.microtask(() => ref.read(currentOpenConversationIdProvider.notifier).state = widget.conversationId);
+    Future.microtask(
+      () => ref.read(currentOpenConversationIdProvider.notifier).state =
+          widget.conversationId,
+    );
     clearNotificationFor(widget.conversationId);
   }
 
@@ -138,7 +160,12 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final messageId = payload['messageId'] as String?;
     if (messageId == null) return;
     if (!mounted) return;
-    setState(() => _status[messageId] = (delivered: true, read: _status[messageId]?.read ?? false));
+    setState(
+      () => _status[messageId] = (
+        delivered: true,
+        read: _status[messageId]?.read ?? false,
+      ),
+    );
   }
 
   void _onRealtimeRead(Map<String, dynamic> payload) {
@@ -151,12 +178,24 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
 
   Future<void> _load() async {
     try {
-      final conversation = await ref.read(conversationsApiProvider).get(widget.conversationId);
-      conversationTitles[conversation.id] = conversation.displayTitle();
       final kek = getCurrentKek();
       if (kek == null) throw StateError('Local keys are locked.');
 
+      // The conversation summary and the message history don't depend on each
+      // other — both requests fire the instant these Futures are created, so
+      // this is one round trip's worth of wall-clock time instead of two paid
+      // back to back. (Found live, alongside the cache-batching fix below, while
+      // chasing "opening a chat takes a while.")
+      final conversationFuture = ref
+          .read(conversationsApiProvider)
+          .get(widget.conversationId);
+      final pageFuture = ref
+          .read(messagesApiProvider)
+          .list(widget.conversationId, limit: 100);
+
       final cached = await loadCachedMessages(kek, widget.conversationId);
+      final conversation = await conversationFuture;
+      conversationTitles[conversation.id] = conversation.displayTitle();
       if (mounted) {
         setState(() {
           _conversation = conversation;
@@ -172,14 +211,30 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         await groupController.ensureGroupKeysUpToDate(conversation.groupId!);
       } else if (conversation.type == 'direct') {
         // Resolved once here, not per-send — see _recipientDevice's own docstring.
-        _recipientDevice = await ref.read(conversationsApiProvider).recipientDevice(widget.conversationId);
+        _recipientDevice = await ref
+            .read(conversationsApiProvider)
+            .recipientDevice(widget.conversationId);
       }
 
-      final page = await ref.read(messagesApiProvider).list(widget.conversationId, limit: 100);
+      final page = await pageFuture;
       final cachedIds = cached.map((m) => m.id).toSet();
+      // Decrypted in order (each message still renders the instant it's ready,
+      // via _ingestIncoming's own setState), but NOT persisted to disk one at a
+      // time — persist:false defers that to a single batched write below. See
+      // appendCachedMessages's docstring for why the per-message version of this
+      // was quietly O(n²) for a conversation with real history.
+      final newlyIngested = <CachedMessage>[];
       for (final dto in page.items) {
         if (cachedIds.contains(dto.id)) continue;
-        await _ingestIncoming(dto, alreadyMine: dto.senderUserId == _myUserId);
+        final result = await _ingestIncoming(
+          dto,
+          alreadyMine: dto.senderUserId == _myUserId,
+          persist: false,
+        );
+        if (result != null) newlyIngested.add(result);
+      }
+      if (newlyIngested.isNotEmpty) {
+        await appendCachedMessages(kek, widget.conversationId, newlyIngested);
       }
       if (page.items.isNotEmpty) {
         // Fire-and-forget, same as every other receipt ping in this file (see
@@ -191,7 +246,10 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         // inside this same try, that rejection wiped out the whole loaded
         // thread (composer included) and left this screen showing the raw
         // validation message instead of any chat UI at all.
-        ref.read(conversationsApiProvider).markRead(widget.conversationId, page.items.last.id).catchError((_) {});
+        ref
+            .read(conversationsApiProvider)
+            .markRead(widget.conversationId, page.items.last.id)
+            .catchError((_) {});
       }
       _scrollToBottom();
     } on ApiException catch (e) {
@@ -216,17 +274,28 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// device) — those ciphertexts can never be decrypted (a sending chain is
   /// one-directional), so they're shown as a placeholder rather than silently
   /// dropped or crashing the load.
-  Future<void> _ingestIncoming(
+  ///
+  /// `persist: false` skips the individual disk write and just returns the
+  /// decrypted [CachedMessage] instead — `_load()`'s history catch-up uses this
+  /// to batch every message from one page into a single write via
+  /// `appendCachedMessages` rather than one read-modify-write per message (see
+  /// that function's docstring). The live single-message path (`_onRealtimeNew`)
+  /// leaves `persist` at its default; there's nothing to batch for one message.
+  Future<CachedMessage?> _ingestIncoming(
     MessageDto dto, {
     bool alreadyMine = false,
     bool retriedAfterKeySync = false,
     bool isLive = false,
+    bool persist = true,
   }) async {
     final kek = getCurrentKek();
-    if (kek == null) return;
+    if (kek == null) return null;
 
     if (dto.senderUserId == _myUserId) {
-      _status[dto.id] = (delivered: dto.deliveredAt != null, read: dto.readAt != null);
+      _status[dto.id] = (
+        delivered: dto.deliveredAt != null,
+        read: dto.readAt != null,
+      );
     }
 
     final isOwn = dto.senderUserId == _myUserId;
@@ -241,9 +310,18 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         text = '[Could not decrypt this message]';
       } else {
         try {
-          final envelope = EncryptedGroupEnvelope(header: dto.envelope.header, ciphertext: dto.envelope.ciphertext);
-          final plaintext =
-              await ref.read(groupSessionControllerProvider).decryptGroupMessageOnce(dto.id, groupId, dto.senderUserId, envelope);
+          final envelope = EncryptedGroupEnvelope(
+            header: dto.envelope.header,
+            ciphertext: dto.envelope.ciphertext,
+          );
+          final plaintext = await ref
+              .read(groupSessionControllerProvider)
+              .decryptGroupMessageOnce(
+                dto.id,
+                groupId,
+                dto.senderUserId,
+                envelope,
+              );
           final decoded = _decodeContent(dto.contentTypeHint, plaintext);
           text = decoded.text;
           attachment = decoded.attachment;
@@ -253,16 +331,32 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
             // key-share that hasn't landed) — sync once and retry before giving up,
             // mirroring the TS provider's documented "try ensureGroupKeysUpToDate
             // and retry once" contract.
-            await ref.read(groupSessionControllerProvider).ensureGroupKeysUpToDate(groupId);
-            return _ingestIncoming(dto, alreadyMine: alreadyMine, retriedAfterKeySync: true);
+            await ref
+                .read(groupSessionControllerProvider)
+                .ensureGroupKeysUpToDate(groupId);
+            return _ingestIncoming(
+              dto,
+              alreadyMine: alreadyMine,
+              retriedAfterKeySync: true,
+              isLive: isLive,
+              persist: persist,
+            );
           }
           text = '[Could not decrypt this message]';
         }
       }
     } else {
       try {
-        final envelope = MessageEnvelope(header: dto.envelope.header, ciphertext: dto.envelope.ciphertext);
-        final plaintext = await convo.decryptFromDeviceOnce(dto.id, dto.senderDeviceId, envelope, dto.x3dhInit);
+        final envelope = MessageEnvelope(
+          header: dto.envelope.header,
+          ciphertext: dto.envelope.ciphertext,
+        );
+        final plaintext = await convo.decryptFromDeviceOnce(
+          dto.id,
+          dto.senderDeviceId,
+          envelope,
+          dto.x3dhInit,
+        );
         final decoded = _decodeContent(dto.contentTypeHint, plaintext);
         text = decoded.text;
         attachment = decoded.attachment;
@@ -282,7 +376,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       replyToMessageId: dto.replyToMessageId,
       attachment: attachment,
     );
-    await appendCachedMessage(kek, cached);
+    if (persist) await appendCachedMessage(kek, cached);
     if (mounted) {
       setState(() {
         if (!_messages.any((m) => m.id == cached.id)) _messages.add(cached);
@@ -302,9 +396,13 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         // firing both /delivered and /read for a live 'new' event. The initial
         // history catch-up in _load() already sends ONE bulk markRead covering the
         // whole loaded page instead of repeating this per historical message.
-        ref.read(conversationsApiProvider).markRead(widget.conversationId, dto.id).catchError((_) {});
+        ref
+            .read(conversationsApiProvider)
+            .markRead(widget.conversationId, dto.id)
+            .catchError((_) {});
       }
     }
+    return cached;
   }
 
   void _scrollToBottom() {
@@ -323,14 +421,32 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final text = _textController.text.trim();
     if (text.isEmpty) return;
     _textController.clear();
-    await _sendEnvelope(contentTypeHint: 'text', plaintext: utf8ToBytes(text), cacheText: text);
+    await _sendEnvelope(
+      contentTypeHint: 'text',
+      plaintext: utf8ToBytes(text),
+      cacheText: text,
+      restoreDraftOnFailure: text,
+    );
   }
 
-  Future<void> _sendFile(Uint8List bytes, String fileName, String mimeType) async {
+  void _startReply(CachedMessage message) {
+    HapticFeedback.selectionClick();
+    setState(() => _replyingTo = message);
+  }
+
+  void _cancelReply() => setState(() => _replyingTo = null);
+
+  Future<void> _sendFile(
+    Uint8List bytes,
+    String fileName,
+    String mimeType,
+  ) async {
     setState(() => _sending = true);
     try {
       final encrypted = await attach_crypto.encryptAttachment(bytes);
-      final uploaded = await ref.read(mediaApiProvider).uploadAttachmentCiphertext(encrypted.ciphertext);
+      final uploaded = await ref
+          .read(mediaApiProvider)
+          .uploadAttachmentCiphertext(encrypted.ciphertext);
       final descriptor = AttachmentDescriptor(
         objectKey: uploaded.objectKey,
         key: bytesToBase64(encrypted.key),
@@ -344,12 +460,23 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         plaintext: utf8ToBytes(jsonEncode(descriptor.toJson())),
         cacheText: '',
         cacheAttachment: descriptor,
-        attachmentRef: MessageAttachmentRef(objectKey: uploaded.objectKey, encryptedSizeBytes: uploaded.encryptedSizeBytes),
+        attachmentRef: MessageAttachmentRef(
+          objectKey: uploaded.objectKey,
+          encryptedSizeBytes: uploaded.encryptedSizeBytes,
+        ),
       );
     } on ApiException catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not send that file: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Could not send that file: $e')));
+      }
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -357,20 +484,35 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
 
   /// Shared by `_send`/`_sendFile` — resolves the recipient(s), runs the real
   /// encrypt (X3DH/Double Ratchet for a direct conversation, the group ratchet via
-  /// `GroupSessionController` for a group one), sends via REST, and echoes the
-  /// result into the local cache immediately (this device already has the
-  /// plaintext; no need to wait for a round trip through decrypt to display it).
+  /// `GroupSessionController` for a group one), renders the message locally the
+  /// instant the envelope is ready, THEN sends via REST in the background.
+  ///
+  /// That ordering is the fix for "sending feels slow, not instant like the
+  /// website": this used to await the full POST round trip before the message
+  /// ever appeared in `_messages` at all, so every send paid a full network
+  /// round trip of visible latency. apps/web's own `sendEncrypted`
+  /// (message-thread.tsx) never did that — it renders an optimistic bubble
+  /// (with a clock/pending tick) the moment encryption finishes, then sends, and
+  /// only rolls the bubble back out if the send actually fails. This mirrors
+  /// that exactly: this device already holds the plaintext post-encryption,
+  /// there's nothing left to wait on before showing it.
   Future<void> _sendEnvelope({
     required String contentTypeHint,
     required Uint8List plaintext,
     required String cacheText,
     AttachmentDescriptor? cacheAttachment,
     MessageAttachmentRef? attachmentRef,
+    String? restoreDraftOnFailure,
   }) async {
     final conversation = _conversation;
     if (conversation == null) return;
     final kek = getCurrentKek();
     if (kek == null) return;
+
+    final messageId = _uuid.v4();
+    final sentAt = DateTime.now().toUtc().toIso8601String();
+    final replyToMessageId = _replyingTo?.id;
+    if (_replyingTo != null) setState(() => _replyingTo = null);
 
     setState(() => _sending = true);
     try {
@@ -378,67 +520,129 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       if (conversation.type == 'group') {
         final groupId = conversation.groupId;
         if (groupId == null) throw StateError('Missing group id.');
-        final encrypted = await ref.read(groupSessionControllerProvider).encryptForGroup(groupId, _myUserId, plaintext);
+        final encrypted = await ref
+            .read(groupSessionControllerProvider)
+            .encryptForGroup(groupId, _myUserId, plaintext);
         req = SendMessageRequest(
-          messageId: _uuid.v4(),
-          recipientDeviceId: null, // the server resolves every current member's primary device itself
+          messageId: messageId,
+          recipientDeviceId:
+              null, // the server resolves every current member's primary device itself
           envelopeType: 'megolm_group',
-          envelope: MessageEnvelopeUpload(header: encrypted.header, ciphertext: encrypted.ciphertext),
-          x3dhInit: null, // group key material moves via the separate key-share channel, not per-message
+          envelope: MessageEnvelopeUpload(
+            header: encrypted.header,
+            ciphertext: encrypted.ciphertext,
+          ),
+          x3dhInit:
+              null, // group key material moves via the separate key-share channel, not per-message
           contentTypeHint: contentTypeHint,
-          replyToMessageId: null,
-          sentAt: DateTime.now().toUtc().toIso8601String(),
+          replyToMessageId: replyToMessageId,
+          sentAt: sentAt,
           attachment: attachmentRef,
         );
       } else {
         // Falls back to a fresh fetch only if the cached value is somehow missing
         // (e.g. a send racing the very first _load()) — the normal path reuses what
         // _load() already resolved, see _recipientDevice's docstring.
-        final target = _recipientDevice ??= await ref.read(conversationsApiProvider).recipientDevice(widget.conversationId);
-        if (target == null) throw StateError('The other person has no reachable device right now.');
+        final target = _recipientDevice ??= await ref
+            .read(conversationsApiProvider)
+            .recipientDevice(widget.conversationId);
+        if (target == null) {
+          throw StateError(
+            'The other person has no reachable device right now.',
+          );
+        }
 
-        final outgoing = await convo.encryptForDevice(ref.read(keysApiProvider), target.userId, target.deviceId, plaintext);
+        final outgoing = await convo.encryptForDevice(
+          ref.read(keysApiProvider),
+          target.userId,
+          target.deviceId,
+          plaintext,
+        );
         req = SendMessageRequest(
-          messageId: _uuid.v4(),
+          messageId: messageId,
           recipientDeviceId: target.deviceId,
           envelopeType: 'x3dh_ratchet_1to1',
-          envelope: MessageEnvelopeUpload(header: outgoing.envelope.header, ciphertext: outgoing.envelope.ciphertext),
+          envelope: MessageEnvelopeUpload(
+            header: outgoing.envelope.header,
+            ciphertext: outgoing.envelope.ciphertext,
+          ),
           x3dhInit: outgoing.x3dhInit,
           contentTypeHint: contentTypeHint,
-          replyToMessageId: null,
-          sentAt: DateTime.now().toUtc().toIso8601String(),
+          replyToMessageId: replyToMessageId,
+          sentAt: sentAt,
           attachment: attachmentRef,
         );
       }
-      final sent = await ref.read(messagesApiProvider).send(widget.conversationId, req);
 
+      // Render now — see this method's own docstring for why this happens
+      // before the POST, not after.
       final cached = CachedMessage(
-        id: sent.id,
+        id: messageId,
         conversationId: widget.conversationId,
         senderUserId: _myUserId,
         isOwn: true,
         contentTypeHint: contentTypeHint,
         text: cacheText,
-        sentAt: sent.sentAt,
-        replyToMessageId: null,
+        sentAt: sentAt,
+        replyToMessageId: replyToMessageId,
         attachment: cacheAttachment,
       );
       await appendCachedMessage(kek, cached);
       if (mounted) {
-        setState(() => _messages.add(cached));
+        setState(() {
+          _messages.add(cached);
+          _pendingIds.add(messageId);
+        });
         _scrollToBottom();
       }
+
+      await ref.read(messagesApiProvider).send(widget.conversationId, req);
+      if (mounted) setState(() => _pendingIds.remove(messageId));
     } on ApiException catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      await _rollbackFailedSend(kek, messageId, restoreDraftOnFailure);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not send: $e')));
+      await _rollbackFailedSend(kek, messageId, restoreDraftOnFailure);
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Could not send: $e')));
+      }
     } finally {
       if (mounted) setState(() => _sending = false);
     }
   }
 
+  /// Takes back an optimistically-rendered bubble that turned out to have never
+  /// actually sent — see [_sendEnvelope]. A no-op if the failure happened before
+  /// the optimistic render (e.g. no reachable recipient device), same as web's
+  /// equivalent rollback.
+  Future<void> _rollbackFailedSend(
+    Uint8List kek,
+    String messageId,
+    String? restoreDraftOnFailure,
+  ) async {
+    await removeCachedMessage(kek, widget.conversationId, messageId);
+    if (mounted) {
+      setState(() {
+        _messages.removeWhere((m) => m.id == messageId);
+        _pendingIds.remove(messageId);
+      });
+    }
+    if (restoreDraftOnFailure != null && mounted) {
+      _textController.text = restoreDraftOnFailure;
+    }
+  }
+
   Future<void> _pickAndSendPhoto() async {
-    final picked = await ImagePicker().pickImage(source: ImageSource.gallery, imageQuality: 90);
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 90,
+    );
     if (picked == null) return;
     final bytes = await picked.readAsBytes();
     await _sendFile(bytes, picked.name, picked.mimeType ?? 'image/jpeg');
@@ -452,45 +656,78 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   }
 
   Future<void> _downloadAttachment(AttachmentDescriptor descriptor) async {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Downloading ${descriptor.fileName}…')));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Downloading ${descriptor.fileName}…')),
+    );
     try {
-      final ciphertext = await ref.read(mediaApiProvider).downloadAttachmentCiphertext(descriptor.objectKey);
-      final plaintext = await attach_crypto.decryptAttachment(ciphertext, base64ToBytes(descriptor.key), base64ToBytes(descriptor.nonce));
+      final ciphertext = await ref
+          .read(mediaApiProvider)
+          .downloadAttachmentCiphertext(descriptor.objectKey);
+      final plaintext = await attach_crypto.decryptAttachment(
+        ciphertext,
+        base64ToBytes(descriptor.key),
+        base64ToBytes(descriptor.nonce),
+      );
 
       final dir = await getApplicationDocumentsDirectory();
-      final savedDir = Directory('${dir.path}/comm-downloads')..createSync(recursive: true);
+      final savedDir = Directory('${dir.path}/comm-downloads')
+        ..createSync(recursive: true);
       final file = File('${savedDir.path}/${descriptor.fileName}');
       await file.writeAsBytes(plaintext);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved ${descriptor.fileName} to app storage')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Saved ${descriptor.fileName} to app storage'),
+          ),
+        );
       }
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not download: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Could not download: $e')));
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final conversation = _conversation;
-    final isGroup = conversation != null && conversation.type == 'group' && conversation.groupId != null;
+    final isGroup =
+        conversation != null &&
+        conversation.type == 'group' &&
+        conversation.groupId != null;
     return Scaffold(
       appBar: AppBar(
         title: InkWell(
-          onTap: isGroup ? () => context.push('/groups/${conversation.groupId}/info') : null,
+          onTap: isGroup
+              ? () => context.push('/groups/${conversation.groupId}/info')
+              : null,
           child: Text(conversation?.displayTitle() ?? 'Chat'),
         ),
         actions: [
-          if (conversation != null && conversation.type == 'direct' && conversation.otherUserId != null)
+          if (conversation != null &&
+              conversation.type == 'direct' &&
+              conversation.otherUserId != null)
             IconButton(
               icon: const Icon(Icons.call),
               tooltip: 'Call',
               onPressed: () => ref
                   .read(callControllerProvider.notifier)
-                  .startCall(widget.conversationId, conversation.otherUserId!, conversation.displayTitle()),
+                  .startCall(
+                    widget.conversationId,
+                    conversation.otherUserId!,
+                    conversation.displayTitle(),
+                  ),
             ),
           if (isGroup)
-            IconButton(icon: const Icon(Icons.info_outline), tooltip: 'Group info', onPressed: () => context.push('/groups/${conversation.groupId}/info')),
+            IconButton(
+              icon: const Icon(Icons.info_outline),
+              tooltip: 'Group info',
+              onPressed: () =>
+                  context.push('/groups/${conversation.groupId}/info'),
+            ),
         ],
       ),
       // WhatsApp's chat-thread background is a flat tan/beige behind the bubbles,
@@ -505,20 +742,36 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     if (_loading) return const Center(child: CircularProgressIndicator());
     if (_error != null) return ErrorState(message: _error!, onRetry: _retry);
 
+    // Keyed once per build so `_MessageBubble` can render a quoted snippet for
+    // any message that's a reply, without every bubble re-scanning the whole
+    // list itself — cheap given the 500-message-per-conversation cache cap.
+    final messagesById = {for (final m in _messages) m.id: m};
+
     return Column(
       children: [
         Expanded(
           child: _messages.isEmpty
-              ? const EmptyState(icon: Icons.chat_bubble_outline, message: 'No messages yet — say hello.')
+              ? const EmptyState(
+                  icon: Icons.chat_bubble_outline,
+                  message: 'No messages yet — say hello.',
+                )
               : ListView.builder(
                   controller: _scrollController,
                   padding: const EdgeInsets.all(12),
                   itemCount: _messages.length,
-                  itemBuilder: (context, index) => _MessageBubble(
-                    message: _messages[index],
-                    onDownload: _downloadAttachment,
-                    status: _status[_messages[index].id],
-                  ),
+                  itemBuilder: (context, index) {
+                    final message = _messages[index];
+                    return _MessageBubble(
+                      message: message,
+                      onDownload: _downloadAttachment,
+                      status: _status[message.id],
+                      pending: _pendingIds.contains(message.id),
+                      replySource: message.replyToMessageId != null
+                          ? messagesById[message.replyToMessageId]
+                          : null,
+                      onLongPress: () => _startReply(message),
+                    );
+                  },
                 ),
         ),
         // The compose bar sits on its own white strip above the keyboard, same as
@@ -527,59 +780,108 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           color: WhatsAppColors.listBackground,
           child: SafeArea(
             top: false,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  PopupMenuButton<String>(
-                    enabled: !_sending,
-                    icon: const Icon(Icons.attach_file, color: WhatsAppColors.tealAccent),
-                    onSelected: (choice) => choice == 'photo' ? _pickAndSendPhoto() : _pickAndSendFile(),
-                    itemBuilder: (context) => const [
-                      PopupMenuItem(value: 'photo', child: ListTile(leading: Icon(Icons.photo), title: Text('Photo'))),
-                      PopupMenuItem(value: 'file', child: ListTile(leading: Icon(Icons.attach_file), title: Text('File'))),
+            child: Column(
+              children: [
+                // Reply-in-progress preview — mirrors web's own strip above the
+                // composer (message-thread.tsx), cleared either by the X here or
+                // automatically the instant a send actually starts (_sendEnvelope).
+                if (_replyingTo != null)
+                  _ReplyPreview(
+                    message: _replyingTo!,
+                    otherName: _conversation?.displayTitle() ?? '',
+                    onCancel: _cancelReply,
+                  ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 8,
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      PopupMenuButton<String>(
+                        enabled: !_sending,
+                        icon: const Icon(
+                          Icons.attach_file,
+                          color: WhatsAppColors.tealAccent,
+                        ),
+                        onSelected: (choice) => choice == 'photo'
+                            ? _pickAndSendPhoto()
+                            : _pickAndSendFile(),
+                        itemBuilder: (context) => const [
+                          PopupMenuItem(
+                            value: 'photo',
+                            child: ListTile(
+                              leading: Icon(Icons.photo),
+                              title: Text('Photo'),
+                            ),
+                          ),
+                          PopupMenuItem(
+                            value: 'file',
+                            child: ListTile(
+                              leading: Icon(Icons.attach_file),
+                              title: Text('File'),
+                            ),
+                          ),
+                        ],
+                      ),
+                      Expanded(
+                        child: Container(
+                          constraints: const BoxConstraints(minHeight: 44),
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF0F0F0),
+                            borderRadius: BorderRadius.circular(24),
+                          ),
+                          child: TextField(
+                            controller: _textController,
+                            decoration: const InputDecoration(
+                              hintText: 'Message',
+                              border: InputBorder.none,
+                              isCollapsed: true,
+                            ),
+                            style: const TextStyle(
+                              color: WhatsAppColors.bubbleText,
+                            ),
+                            minLines: 1,
+                            maxLines: 5,
+                            textInputAction: TextInputAction.send,
+                            onSubmitted: (_) => _send(),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      // Round green send button — WhatsApp's own shape, not the
+                      // square filled-icon-button Material default.
+                      Material(
+                        color: WhatsAppColors.green,
+                        shape: const CircleBorder(),
+                        child: InkWell(
+                          customBorder: const CircleBorder(),
+                          onTap: _sending ? null : _send,
+                          child: Padding(
+                            padding: const EdgeInsets.all(10),
+                            child: _sending
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.send,
+                                    color: Colors.white,
+                                    size: 20,
+                                  ),
+                          ),
+                        ),
+                      ),
                     ],
                   ),
-                  Expanded(
-                    child: Container(
-                      constraints: const BoxConstraints(minHeight: 44),
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      decoration: BoxDecoration(color: const Color(0xFFF0F0F0), borderRadius: BorderRadius.circular(24)),
-                      child: TextField(
-                        controller: _textController,
-                        decoration: const InputDecoration(hintText: 'Message', border: InputBorder.none, isCollapsed: true),
-                        style: const TextStyle(color: WhatsAppColors.bubbleText),
-                        minLines: 1,
-                        maxLines: 5,
-                        textInputAction: TextInputAction.send,
-                        onSubmitted: (_) => _send(),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  // Round green send button — WhatsApp's own shape, not the
-                  // square filled-icon-button Material default.
-                  Material(
-                    color: WhatsAppColors.green,
-                    shape: const CircleBorder(),
-                    child: InkWell(
-                      customBorder: const CircleBorder(),
-                      onTap: _sending ? null : _send,
-                      child: Padding(
-                        padding: const EdgeInsets.all(10),
-                        child: _sending
-                            ? const SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                              )
-                            : const Icon(Icons.send, color: Colors.white, size: 20),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),
@@ -588,14 +890,19 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   }
 }
 
-/// Which tick to show on an OWN message — sent (single check, not yet delivered),
-/// delivered (double check), or read (double check, blue). Pulled out of the
-/// widget as a pure function specifically so the precedence rule (read implies
-/// delivered even if a `delivered` event was somehow missed/reordered — the read
-/// receipt is the stronger signal) is unit-testable without pumping a widget tree.
-enum TickState { sent, delivered, read }
+/// Which tick to show on an OWN message — sending (clock, still an optimistic
+/// local bubble with no server confirmation yet), sent (single check), delivered
+/// (double check), or read (double check, blue). Pulled out of the widget as a
+/// pure function specifically so the precedence rule (read implies delivered
+/// even if a `delivered` event was somehow missed/reordered — the read receipt
+/// is the stronger signal) is unit-testable without pumping a widget tree.
+enum TickState { sending, sent, delivered, read }
 
-TickState tickStateFor(({bool delivered, bool read})? status) {
+TickState tickStateFor(
+  ({bool delivered, bool read})? status, {
+  bool pending = false,
+}) {
+  if (pending) return TickState.sending;
   if (status == null) return TickState.sent;
   if (status.read) return TickState.read;
   if (status.delivered) return TickState.delivered;
@@ -610,11 +917,120 @@ String _formatBubbleTime(String iso) {
   return '$h:$m';
 }
 
+/// Short one-line label for a message being quoted — as a reply target in the
+/// composer preview, or as the quoted snippet inside a bubble that's itself a
+/// reply. Mirrors web's inline switch on `contentTypeHint` in message-thread.tsx
+/// (the `replySource`/`replyingTo` preview text), adapted to what mobile
+/// actually distinguishes: unlike web, mobile doesn't have a separate 'image'
+/// content type — a photo sent from the gallery picker is still 'media' with an
+/// image/* attachment mimeType, so that's sniffed here instead.
+String _replyPreviewText(CachedMessage m) {
+  if (m.contentTypeHint == 'voice') return '🎤 Voice message';
+  if (m.contentTypeHint == 'media') {
+    final mime = m.attachment?.mimeType ?? '';
+    if (mime.startsWith('image/')) return '📷 Photo';
+    return '📄 ${m.attachment?.fileName ?? 'File'}';
+  }
+  return m.text;
+}
+
+/// The "replying to ..." strip shown above the composer while `_replyingTo` is
+/// set — mirrors web's own preview (message-thread.tsx) exactly: a colored
+/// left rule, the target's sender + a one-line snippet, and a way to cancel.
+class _ReplyPreview extends StatelessWidget {
+  const _ReplyPreview({
+    required this.message,
+    required this.otherName,
+    required this.onCancel,
+  });
+  final CachedMessage message;
+  final String otherName;
+  final VoidCallback onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFE9E9E9))),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 3,
+            height: 34,
+            decoration: BoxDecoration(
+              color: WhatsAppColors.tealAccent,
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  message.isOwn
+                      ? 'Replying to yourself'
+                      : 'Replying to $otherName',
+                  style: const TextStyle(
+                    color: WhatsAppColors.tealAccent,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _replyPreviewText(message),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF667781),
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18, color: Color(0xFF667781)),
+            tooltip: 'Cancel reply',
+            onPressed: onCancel,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({required this.message, required this.onDownload, this.status});
+  const _MessageBubble({
+    required this.message,
+    required this.onDownload,
+    this.status,
+    this.pending = false,
+    this.replySource,
+    this.onLongPress,
+  });
   final CachedMessage message;
   final void Function(AttachmentDescriptor) onDownload;
   final ({bool delivered, bool read})? status;
+
+  /// True while this is an optimistically-rendered bubble still waiting on the
+  /// server to confirm the send — see thread_screen.dart's `_pendingIds`.
+  final bool pending;
+
+  /// The message this one is quoting, if any — resolved by the caller (already
+  /// has the full `_messages` list; this widget doesn't) via `replyToMessageId`.
+  /// Null either because this message isn't a reply, or because the original
+  /// has aged out of this device's local cache (Double Ratchet ciphertext can
+  /// only ever be decrypted once — see message_cache.dart's own docstring — so
+  /// there's genuinely nothing left to show in that case, not a bug).
+  final CachedMessage? replySource;
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -625,79 +1041,157 @@ class _MessageBubble extends StatelessWidget {
 
     return Align(
       alignment: message.isOwn ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 2),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
-        decoration: BoxDecoration(
-          color: message.isOwn ? WhatsAppColors.outgoingBubble : WhatsAppColors.incomingBubble,
-          // The pinched corner on the side nearest the sender approximates
-          // WhatsApp's speech-bubble tail — a plain uniform radius reads as a
-          // generic chat bubble, not specifically WhatsApp's.
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(8),
-            topRight: const Radius.circular(8),
-            bottomLeft: Radius.circular(message.isOwn ? 8 : 0),
-            bottomRight: Radius.circular(message.isOwn ? 0 : 8),
+      child: GestureDetector(
+        onLongPress: onLongPress,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          constraints: BoxConstraints(
+            maxWidth: MediaQuery.of(context).size.width * 0.78,
           ),
-          boxShadow: const [BoxShadow(color: Color(0x14000000), blurRadius: 1, offset: Offset(0, 1))],
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Padding(
-              padding: const EdgeInsets.only(bottom: 2),
-              child: attachment != null
-                  ? InkWell(
-                      onTap: () => onDownload(attachment),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.insert_drive_file, color: fgColor),
-                          const SizedBox(width: 8),
-                          Flexible(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(attachment.fileName, style: TextStyle(color: fgColor), overflow: TextOverflow.ellipsis),
-                                Text(
-                                  _formatBytes(attachment.sizeBytes),
-                                  style: TextStyle(color: fgColor.withValues(alpha: 0.75), fontSize: 12),
-                                ),
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Icon(Icons.download, color: fgColor, size: 18),
-                        ],
+          decoration: BoxDecoration(
+            color: message.isOwn
+                ? WhatsAppColors.outgoingBubble
+                : WhatsAppColors.incomingBubble,
+            // The pinched corner on the side nearest the sender approximates
+            // WhatsApp's speech-bubble tail — a plain uniform radius reads as a
+            // generic chat bubble, not specifically WhatsApp's.
+            borderRadius: BorderRadius.only(
+              topLeft: const Radius.circular(8),
+              topRight: const Radius.circular(8),
+              bottomLeft: Radius.circular(message.isOwn ? 8 : 0),
+              bottomRight: Radius.circular(message.isOwn ? 0 : 8),
+            ),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x14000000),
+                blurRadius: 1,
+                offset: Offset(0, 1),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (replySource != null)
+                Container(
+                  margin: const EdgeInsets.only(bottom: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border(
+                      left: BorderSide(
+                        color: WhatsAppColors.tealAccent,
+                        width: 3,
                       ),
-                    )
-                  : Text(message.text, style: TextStyle(color: fgColor)),
-            ),
-            // Timestamp + delivery/read tick, bottom-right inside the bubble —
-            // WhatsApp's own placement. Ticks only ever appear on OWN messages
-            // (they show what happened to a message you sent); an incoming message
-            // never carries them, on WhatsApp or here.
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(_formatBubbleTime(message.sentAt), style: TextStyle(color: fgColor.withValues(alpha: 0.6), fontSize: 11)),
-                if (message.isOwn) ...[
-                  const SizedBox(width: 4),
-                  Builder(builder: (context) {
-                    final tick = tickStateFor(status);
-                    return Icon(
-                      tick == TickState.sent ? Icons.done : Icons.done_all,
-                      size: 15,
-                      color: tick == TickState.read ? const Color(0xFF34B7F1) : fgColor.withValues(alpha: 0.6),
-                    );
-                  }),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        replySource!.isOwn ? 'You' : 'Them',
+                        style: const TextStyle(
+                          color: WhatsAppColors.tealAccent,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 12,
+                        ),
+                      ),
+                      Text(
+                        _replyPreviewText(replySource!),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: fgColor.withValues(alpha: 0.7),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: attachment != null
+                    ? InkWell(
+                        onTap: () => onDownload(attachment),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.insert_drive_file, color: fgColor),
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    attachment.fileName,
+                                    style: TextStyle(color: fgColor),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  Text(
+                                    _formatBytes(attachment.sizeBytes),
+                                    style: TextStyle(
+                                      color: fgColor.withValues(alpha: 0.75),
+                                      fontSize: 12,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Icon(Icons.download, color: fgColor, size: 18),
+                          ],
+                        ),
+                      )
+                    : Text(message.text, style: TextStyle(color: fgColor)),
+              ),
+              // Timestamp + delivery/read tick, bottom-right inside the bubble —
+              // WhatsApp's own placement. Ticks only ever appear on OWN messages
+              // (they show what happened to a message you sent); an incoming message
+              // never carries them, on WhatsApp or here.
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _formatBubbleTime(message.sentAt),
+                    style: TextStyle(
+                      color: fgColor.withValues(alpha: 0.6),
+                      fontSize: 11,
+                    ),
+                  ),
+                  if (message.isOwn) ...[
+                    const SizedBox(width: 4),
+                    Builder(
+                      builder: (context) {
+                        final tick = tickStateFor(status, pending: pending);
+                        if (tick == TickState.sending) {
+                          return Icon(
+                            Icons.access_time,
+                            size: 13,
+                            color: fgColor.withValues(alpha: 0.6),
+                          );
+                        }
+                        return Icon(
+                          tick == TickState.sent ? Icons.done : Icons.done_all,
+                          size: 15,
+                          color: tick == TickState.read
+                              ? const Color(0xFF34B7F1)
+                              : fgColor.withValues(alpha: 0.6),
+                        );
+                      },
+                    ),
+                  ],
                 ],
-              ],
-            ),
-          ],
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -32,6 +32,7 @@ class CachedMessage {
   final String text;
   final String sentAt;
   final String? replyToMessageId;
+
   /// Present when `contentTypeHint == 'media'` — the decrypted descriptor for a
   /// generic file attachment (see crypto/attachment_crypto.dart, api/media_api.dart).
   /// The actual bytes are fetched + decrypted on demand when the user taps
@@ -71,7 +72,11 @@ class CachedMessage {
     text: json['text'] as String,
     sentAt: json['sentAt'] as String,
     replyToMessageId: json['replyToMessageId'] as String?,
-    attachment: json['attachment'] != null ? AttachmentDescriptor.fromJson(json['attachment'] as Map<String, dynamic>) : null,
+    attachment: json['attachment'] != null
+        ? AttachmentDescriptor.fromJson(
+            json['attachment'] as Map<String, dynamic>,
+          )
+        : null,
   );
 }
 
@@ -84,13 +89,18 @@ const _maxCachedPerConversation = 500;
 
 String _cacheKey(String conversationId) => 'msgcache:$conversationId';
 
-Future<List<CachedMessage>> loadCachedMessages(Uint8List kek, String conversationId) async {
+Future<List<CachedMessage>> loadCachedMessages(
+  Uint8List kek,
+  String conversationId,
+) async {
   final wrapped = await getBlob(_cacheKey(conversationId));
   if (wrapped == null) return [];
   try {
     final plaintext = await unwrapBytes(kek, wrapped);
     final list = jsonDecode(bytesToUtf8(plaintext)) as List;
-    return list.map((e) => CachedMessage.fromJson(e as Map<String, dynamic>)).toList();
+    return list
+        .map((e) => CachedMessage.fromJson(e as Map<String, dynamic>))
+        .toList();
   } catch (_) {
     // A KEK mismatch (password changed elsewhere) is not a reason to crash the chat
     // UI — same reasoning as sessions.dart#loadSession. The cache is just empty
@@ -101,13 +111,71 @@ Future<List<CachedMessage>> loadCachedMessages(Uint8List kek, String conversatio
 
 Future<void> appendCachedMessage(Uint8List kek, CachedMessage message) async {
   final existing = await loadCachedMessages(kek, message.conversationId);
-  if (existing.any((m) => m.id == message.id)) return; // idempotent — a duplicate WS/REST delivery is a no-op
+  if (existing.any((m) => m.id == message.id)) {
+    return; // idempotent — a duplicate WS/REST delivery is a no-op
+  }
   final updated = [...existing, message];
   final trimmed = updated.length > _maxCachedPerConversation
       ? updated.sublist(updated.length - _maxCachedPerConversation)
       : updated;
   final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
-  await putBlob(_cacheKey(message.conversationId), await wrapBytes(kek, utf8ToBytes(json)));
+  await putBlob(
+    _cacheKey(message.conversationId),
+    await wrapBytes(kek, utf8ToBytes(json)),
+  );
+}
+
+/// Bulk variant of [appendCachedMessage] — reads the existing cache ONCE, appends
+/// every not-already-present message in [messages], and writes back ONCE.
+/// thread_screen.dart's `_load()` uses this for its history catch-up instead of
+/// calling [appendCachedMessage] once per message: that per-message version reads
+/// + decrypts + JSON-decodes the WHOLE cached list, then re-encodes + re-encrypts
+/// + rewrites the WHOLE thing, on every single call — O(n) work repeated n times
+/// (O(n²) total) for a conversation with n messages to catch up on. Found live as
+/// a real, measurable contributor to "opening a chat takes a while" — every
+/// message secure-storage read/write pays real Keystore/Keychain overhead, not
+/// just plain file I/O. A single live incoming message (features/chats/
+/// thread_screen.dart's `_onRealtimeNew`) still goes through the one-at-a-time
+/// [appendCachedMessage] — there's nothing to batch when there's only one.
+Future<void> appendCachedMessages(
+  Uint8List kek,
+  String conversationId,
+  List<CachedMessage> messages,
+) async {
+  if (messages.isEmpty) return;
+  final existing = await loadCachedMessages(kek, conversationId);
+  final existingIds = existing.map((m) => m.id).toSet();
+  final additions = messages.where((m) => !existingIds.contains(m.id));
+  final updated = [...existing, ...additions];
+  final trimmed = updated.length > _maxCachedPerConversation
+      ? updated.sublist(updated.length - _maxCachedPerConversation)
+      : updated;
+  final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
+  await putBlob(
+    _cacheKey(conversationId),
+    await wrapBytes(kek, utf8ToBytes(json)),
+  );
+}
+
+/// Rolls back an optimistically-rendered outgoing message (thread_screen.dart's
+/// `_sendEnvelope`) if the send actually fails server-side — mirrors
+/// apps/web/lib/crypto/message-cache.ts's `removeCachedMessage` exactly, same
+/// reasoning: the message was appended to the local cache the instant it was
+/// encrypted, before the network round trip even started, so a failure needs an
+/// explicit way to take it back out again.
+Future<void> removeCachedMessage(
+  Uint8List kek,
+  String conversationId,
+  String messageId,
+) async {
+  final existing = await loadCachedMessages(kek, conversationId);
+  final updated = existing.where((m) => m.id != messageId).toList();
+  if (updated.length == existing.length) return; // nothing to remove
+  final json = jsonEncode(updated.map((m) => m.toJson()).toList());
+  await putBlob(
+    _cacheKey(conversationId),
+    await wrapBytes(kek, utf8ToBytes(json)),
+  );
 }
 
 /// "Delete chat" (chats_list_screen.dart's long-press menu) — wipes this device's
@@ -119,4 +187,5 @@ Future<void> appendCachedMessage(Uint8List kek, CachedMessage message) async {
 /// ciphertext can only ever be decrypted once (this cache's own docstring above),
 /// this history is not recoverable afterward even from the server's stored
 /// ciphertext.
-Future<void> clearCachedMessages(String conversationId) => deleteBlob(_cacheKey(conversationId));
+Future<void> clearCachedMessages(String conversationId) =>
+    deleteBlob(_cacheKey(conversationId));
