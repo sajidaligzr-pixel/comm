@@ -10,9 +10,11 @@
 /// still 1:1 only), so the call button only ever appears for direct conversations.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show HapticFeedback;
@@ -20,6 +22,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../api/api_client.dart';
@@ -45,10 +48,22 @@ const _uuid = Uuid();
 class _DecodedContent {
   final String text;
   final AttachmentDescriptor? attachment;
-  const _DecodedContent({required this.text, this.attachment});
+  final String? mediaBase64;
+  const _DecodedContent({
+    required this.text,
+    this.attachment,
+    this.mediaBase64,
+  });
 }
 
 _DecodedContent _decodeContent(String contentTypeHint, Uint8List plaintext) {
+  if (contentTypeHint == 'voice') {
+    // Raw audio bytes, not JSON — same inline-envelope path as text, just
+    // base64'd for storage the same way apps/web keeps `mediaBase64` in its
+    // own local cache. See thread_screen.dart's recording docstring for the
+    // format this device records in and the cross-client playback story.
+    return _DecodedContent(text: '', mediaBase64: bytesToBase64(plaintext));
+  }
   if (contentTypeHint == 'media') {
     try {
       return _DecodedContent(
@@ -110,6 +125,13 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   bool _loading = true;
   bool _sending = false;
 
+  // --- Voice notes -----------------------------------------------------------
+  // See _startVoiceRecording's docstring for the format/protocol choice.
+  final AudioRecorder _voiceRecorder = AudioRecorder();
+  bool _isRecordingVoice = false;
+  int _recordingSeconds = 0;
+  Timer? _recordingTimer;
+
   String get _myUserId {
     final state = ref.read(authControllerProvider);
     return state is AuthSignedIn ? state.profile.id : '';
@@ -145,6 +167,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
     _textController.dispose();
     _scrollController.dispose();
+    _recordingTimer?.cancel();
+    _voiceRecorder.dispose();
     super.dispose();
   }
 
@@ -301,6 +325,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final isOwn = dto.senderUserId == _myUserId;
     String text = '';
     AttachmentDescriptor? attachment;
+    String? mediaBase64;
     if (isOwn && alreadyMine) {
       text = '[Sent from another device — not available on this one]';
     } else if (dto.envelopeType == 'megolm_group') {
@@ -325,6 +350,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           final decoded = _decodeContent(dto.contentTypeHint, plaintext);
           text = decoded.text;
           attachment = decoded.attachment;
+          mediaBase64 = decoded.mediaBase64;
         } catch (e) {
           if (!retriedAfterKeySync) {
             // This device may simply not have the sender's group session yet (a
@@ -375,6 +401,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       sentAt: dto.sentAt,
       replyToMessageId: dto.replyToMessageId,
       attachment: attachment,
+      mediaBase64: mediaBase64,
     );
     if (persist) await appendCachedMessage(kek, cached);
     if (mounted) {
@@ -435,6 +462,105 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   }
 
   void _cancelReply() => setState(() => _replyingTo = null);
+
+  /// Auto-stops (and sends) a recording at this length — mirrors web's own
+  /// `MAX_RECORDING_SECONDS` (message-thread.tsx) exactly, keeping a voice note
+  /// comfortably under the envelope's size ceiling for the same reason web's
+  /// docstring gives: this rides the same inline-ciphertext field a text
+  /// message does (no object storage — see `_startVoiceRecording`), which has
+  /// real headroom but isn't unlimited.
+  static const _maxRecordingSeconds = 120;
+
+  /// Records raw audio and sends it through the exact same E2E envelope text
+  /// already uses (`contentTypeHint: 'voice'`, no object storage, no signed
+  /// upload) — matches apps/web/components/chat/message-thread.tsx's own
+  /// MediaRecorder-based voice notes protocol-for-protocol.
+  ///
+  /// Format choice: AAC-LC in an MPEG-4 (.m4a) container — the `record`
+  /// package's own default, and deliberately not matched to web's WebM/Opus.
+  /// AAC is natively decodable by both Android's ExoPlayer (what this app's
+  /// player, `audioplayers`, uses under the hood) and iOS's AVFoundation,
+  /// which Opus is not — so a voice note recorded here is exactly as playable
+  /// on a future iOS build as it is here, at the cost of relying on
+  /// ExoPlayer's own content-sniffing (not just the file extension) to
+  /// correctly decode a WebM/Opus note arriving FROM the web client, since
+  /// there's no per-message format tag in the wire protocol to negotiate this
+  /// explicitly — the same implicit-format assumption the web client alone
+  /// already made before there was a second client to consider.
+  Future<void> _startVoiceRecording() async {
+    final granted = await _voiceRecorder.hasPermission();
+    if (!granted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              "Microphone access was denied — check this phone's app permissions to send a voice message.",
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    final dir = await getTemporaryDirectory();
+    final path = '${dir.path}/comm-voice-${_uuid.v4()}.m4a';
+    await _voiceRecorder.start(
+      const RecordConfig(
+        encoder: AudioEncoder.aacLc,
+        bitRate: 32000,
+        numChannels: 1,
+      ),
+      path: path,
+    );
+    if (!mounted) return;
+    setState(() {
+      _isRecordingVoice = true;
+      _recordingSeconds = 0;
+    });
+    _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _recordingSeconds++);
+      if (_recordingSeconds >= _maxRecordingSeconds) {
+        _stopAndSendVoiceRecording();
+      }
+    });
+  }
+
+  Future<void> _stopAndSendVoiceRecording() async {
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    final durationSec = _recordingSeconds;
+    final path = await _voiceRecorder.stop();
+    if (mounted) setState(() => _isRecordingVoice = false);
+    if (path == null) return;
+
+    final file = File(path);
+    if (!await file.exists()) return;
+    final bytes = await file.readAsBytes();
+    try {
+      await file
+          .delete(); // best-effort — the sent copy now lives in the encrypted message cache
+    } catch (_) {
+      // Not fatal — a leftover scratch file in the OS temp dir, which gets
+      // reclaimed by the platform on its own schedule regardless.
+    }
+    if (bytes.isEmpty) return;
+
+    await _sendEnvelope(
+      contentTypeHint: 'voice',
+      plaintext: bytes,
+      cacheText: '',
+      cacheMediaBase64: bytesToBase64(bytes),
+      cacheMediaDurationSec: durationSec,
+    );
+  }
+
+  Future<void> _cancelVoiceRecording() async {
+    _recordingTimer?.cancel();
+    _recordingTimer = null;
+    await _voiceRecorder.cancel(); // stops AND deletes the underlying file
+    if (mounted) setState(() => _isRecordingVoice = false);
+  }
 
   Future<void> _sendFile(
     Uint8List bytes,
@@ -503,6 +629,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     AttachmentDescriptor? cacheAttachment,
     MessageAttachmentRef? attachmentRef,
     String? restoreDraftOnFailure,
+    String? cacheMediaBase64,
+    int? cacheMediaDurationSec,
   }) async {
     final conversation = _conversation;
     if (conversation == null) return;
@@ -586,6 +714,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         sentAt: sentAt,
         replyToMessageId: replyToMessageId,
         attachment: cacheAttachment,
+        mediaBase64: cacheMediaBase64,
+        mediaDurationSec: cacheMediaDurationSec,
       );
       await appendCachedMessage(kek, cached);
       if (mounted) {
@@ -796,92 +926,177 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                     horizontal: 8,
                     vertical: 8,
                   ),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      PopupMenuButton<String>(
-                        enabled: !_sending,
-                        icon: const Icon(
-                          Icons.attach_file,
-                          color: WhatsAppColors.tealAccent,
-                        ),
-                        onSelected: (choice) => choice == 'photo'
-                            ? _pickAndSendPhoto()
-                            : _pickAndSendFile(),
-                        itemBuilder: (context) => const [
-                          PopupMenuItem(
-                            value: 'photo',
-                            child: ListTile(
-                              leading: Icon(Icons.photo),
-                              title: Text('Photo'),
-                            ),
-                          ),
-                          PopupMenuItem(
-                            value: 'file',
-                            child: ListTile(
-                              leading: Icon(Icons.attach_file),
-                              title: Text('File'),
-                            ),
-                          ),
-                        ],
-                      ),
-                      Expanded(
-                        child: Container(
-                          constraints: const BoxConstraints(minHeight: 44),
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF0F0F0),
-                            borderRadius: BorderRadius.circular(24),
-                          ),
-                          child: TextField(
-                            controller: _textController,
-                            decoration: const InputDecoration(
-                              hintText: 'Message',
-                              border: InputBorder.none,
-                              isCollapsed: true,
-                            ),
-                            style: const TextStyle(
-                              color: WhatsAppColors.bubbleText,
-                            ),
-                            minLines: 1,
-                            maxLines: 5,
-                            textInputAction: TextInputAction.send,
-                            onSubmitted: (_) => _send(),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      // Round green send button — WhatsApp's own shape, not the
-                      // square filled-icon-button Material default.
-                      Material(
-                        color: WhatsAppColors.green,
-                        shape: const CircleBorder(),
-                        child: InkWell(
-                          customBorder: const CircleBorder(),
-                          onTap: _sending ? null : _send,
-                          child: Padding(
-                            padding: const EdgeInsets.all(10),
-                            child: _sending
-                                ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.send,
-                                    color: Colors.white,
-                                    size: 20,
+                  child: _isRecordingVoice
+                      ? _buildRecordingRow()
+                      : Row(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            PopupMenuButton<String>(
+                              enabled: !_sending,
+                              icon: const Icon(
+                                Icons.attach_file,
+                                color: WhatsAppColors.tealAccent,
+                              ),
+                              onSelected: (choice) => choice == 'photo'
+                                  ? _pickAndSendPhoto()
+                                  : _pickAndSendFile(),
+                              itemBuilder: (context) => const [
+                                PopupMenuItem(
+                                  value: 'photo',
+                                  child: ListTile(
+                                    leading: Icon(Icons.photo),
+                                    title: Text('Photo'),
                                   ),
-                          ),
+                                ),
+                                PopupMenuItem(
+                                  value: 'file',
+                                  child: ListTile(
+                                    leading: Icon(Icons.attach_file),
+                                    title: Text('File'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Expanded(
+                              child: Container(
+                                constraints: const BoxConstraints(
+                                  minHeight: 44,
+                                ),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 16,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF0F0F0),
+                                  borderRadius: BorderRadius.circular(24),
+                                ),
+                                child: TextField(
+                                  controller: _textController,
+                                  decoration: const InputDecoration(
+                                    hintText: 'Message',
+                                    border: InputBorder.none,
+                                    isCollapsed: true,
+                                  ),
+                                  style: const TextStyle(
+                                    color: WhatsAppColors.bubbleText,
+                                  ),
+                                  minLines: 1,
+                                  maxLines: 5,
+                                  textInputAction: TextInputAction.send,
+                                  onSubmitted: (_) => _send(),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            // Round green button — WhatsApp's own shape, not the
+                            // square filled-icon-button Material default. Swaps
+                            // between mic (empty composer — tap to record a
+                            // voice note) and send (there's text to send),
+                            // matching WhatsApp's own composer exactly. Scoped
+                            // to just this button via ValueListenableBuilder
+                            // (TextEditingController is itself a
+                            // ValueListenable) rather than a whole-screen
+                            // setState on every keystroke.
+                            ValueListenableBuilder<TextEditingValue>(
+                              valueListenable: _textController,
+                              builder: (context, value, _) {
+                                final hasText = value.text.trim().isNotEmpty;
+                                return Material(
+                                  color: WhatsAppColors.green,
+                                  shape: const CircleBorder(),
+                                  child: InkWell(
+                                    customBorder: const CircleBorder(),
+                                    onTap: _sending
+                                        ? null
+                                        : (hasText
+                                              ? _send
+                                              : _startVoiceRecording),
+                                    child: Padding(
+                                      padding: const EdgeInsets.all(10),
+                                      child: _sending
+                                          ? const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                                color: Colors.white,
+                                              ),
+                                            )
+                                          : Icon(
+                                              hasText ? Icons.send : Icons.mic,
+                                              color: Colors.white,
+                                              size: 20,
+                                            ),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
                         ),
-                      ),
-                    ],
-                  ),
                 ),
               ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Replaces the normal text-field row while `_isRecordingVoice` — a red dot +
+  /// live elapsed time (mirrors web's own recording indicator, message-
+  /// thread.tsx), a trash button to discard, and the round button repurposed
+  /// as "stop and send." No slide-to-cancel gesture (WhatsApp's own
+  /// press-and-hold affordance) — this is deliberately tap-to-start/tap-to-stop
+  /// instead, a simpler and equally legitimate mobile pattern, not a hidden
+  /// corner cut: press-and-hold-with-slide-to-cancel is a real, separate
+  /// gesture to get right and verify, and this app has no way to test it on a
+  /// real device from where it's built.
+  Widget _buildRecordingRow() {
+    final minutes = (_recordingSeconds ~/ 60).toString().padLeft(2, '0');
+    final seconds = (_recordingSeconds % 60).toString().padLeft(2, '0');
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.delete_outline, color: Color(0xFF667781)),
+          tooltip: 'Cancel recording',
+          onPressed: _cancelVoiceRecording,
+        ),
+        const SizedBox(width: 4),
+        Container(
+          width: 10,
+          height: 10,
+          decoration: const BoxDecoration(
+            color: Colors.red,
+            shape: BoxShape.circle,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          '$minutes:$seconds',
+          style: const TextStyle(
+            color: WhatsAppColors.bubbleText,
+            fontFeatures: [FontFeature.tabularFigures()],
+          ),
+        ),
+        const Expanded(
+          child: Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: Text(
+              'Recording voice message…',
+              style: TextStyle(color: Color(0xFF667781), fontSize: 13),
+            ),
+          ),
+        ),
+        Material(
+          color: WhatsAppColors.green,
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: _stopAndSendVoiceRecording,
+            child: const Padding(
+              padding: EdgeInsets.all(10),
+              child: Icon(Icons.send, color: Colors.white, size: 20),
             ),
           ),
         ),
@@ -1117,7 +1332,15 @@ class _MessageBubble extends StatelessWidget {
                 ),
               Padding(
                 padding: const EdgeInsets.only(bottom: 2),
-                child: attachment != null
+                child:
+                    message.contentTypeHint == 'voice' &&
+                        message.mediaBase64 != null
+                    ? _VoiceMessagePlayer(
+                        base64Audio: message.mediaBase64!,
+                        durationHintSec: message.mediaDurationSec,
+                        fgColor: fgColor,
+                      )
+                    : attachment != null
                     ? InkWell(
                         onTap: () => onDownload(attachment),
                         child: Row(
@@ -1202,4 +1425,167 @@ String _formatBytes(int bytes) {
   if (bytes < 1024) return '$bytes B';
   if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
   return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+}
+
+String _formatPlaybackDuration(Duration d) {
+  final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return '$m:$s';
+}
+
+/// Play/pause + progress bar for a `contentTypeHint: 'voice'` bubble — the
+/// mobile counterpart to apps/web's `VoiceBubble` (components/chat/bubbles.tsx).
+/// Owns its own `AudioPlayer` rather than sharing one across bubbles, same as
+/// web owns one `<audio>` element per `VoiceBubble` instance — simplest
+/// correct option, and a chat thread never has more than a handful of these
+/// mounted at once.
+class _VoiceMessagePlayer extends StatefulWidget {
+  const _VoiceMessagePlayer({
+    required this.base64Audio,
+    required this.durationHintSec,
+    required this.fgColor,
+  });
+  final String base64Audio;
+
+  /// Only ever non-null for a message THIS device just recorded and sent —
+  /// see CachedMessage.mediaDurationSec's own docstring. Shown until the
+  /// player itself reports a real duration after loading.
+  final int? durationHintSec;
+  final Color fgColor;
+
+  @override
+  State<_VoiceMessagePlayer> createState() => _VoiceMessagePlayerState();
+}
+
+class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
+  final AudioPlayer _player = AudioPlayer();
+  bool _playing = false;
+  Duration _position = Duration.zero;
+  Duration? _duration;
+  String? _tempPath;
+  late final StreamSubscription<Duration> _positionSub;
+  late final StreamSubscription<Duration> _durationSub;
+  late final StreamSubscription<PlayerState> _stateSub;
+  late final StreamSubscription<void> _completeSub;
+
+  @override
+  void initState() {
+    super.initState();
+    _positionSub = _player.onPositionChanged.listen((p) {
+      if (mounted) setState(() => _position = p);
+    });
+    _durationSub = _player.onDurationChanged.listen((d) {
+      if (mounted) setState(() => _duration = d);
+    });
+    _stateSub = _player.onPlayerStateChanged.listen((s) {
+      if (mounted) setState(() => _playing = s == PlayerState.playing);
+    });
+    _completeSub = _player.onPlayerComplete.listen((_) {
+      if (mounted) {
+        setState(() {
+          _playing = false;
+          _position = Duration.zero;
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _positionSub.cancel();
+    _durationSub.cancel();
+    _stateSub.cancel();
+    _completeSub.cancel();
+    _player.dispose();
+    // The materialized temp file (if any) is deliberately left for the OS's
+    // own temp-dir reclaim schedule, same as _downloadAttachment's saved
+    // files elsewhere in this screen — not cleaned up here, since dispose()
+    // can't usefully await an async delete anyway.
+    super.dispose();
+  }
+
+  /// Decodes this message's base64 audio to a temp file the first time it's
+  /// actually played, not eagerly on build — a loaded thread can have many
+  /// voice bubbles on screen at once and most are never opened.
+  Future<String> _materialize() async {
+    final bytes = base64ToBytes(widget.base64Audio);
+    final dir = await getTemporaryDirectory();
+    final file = File(
+      '${dir.path}/comm-voice-play-${DateTime.now().microsecondsSinceEpoch}.m4a',
+    );
+    await file.writeAsBytes(bytes);
+    return file.path;
+  }
+
+  Future<void> _toggle() async {
+    if (_playing) {
+      await _player.pause();
+      return;
+    }
+    final path = _tempPath ??= await _materialize();
+    await _player.play(DeviceFileSource(path));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = _duration ?? Duration(seconds: widget.durationHintSec ?? 0);
+    final shown = _playing || _position > Duration.zero ? _position : total;
+    final progress = total.inMilliseconds > 0
+        ? (_position.inMilliseconds / total.inMilliseconds).clamp(0.0, 1.0)
+        : 0.0;
+
+    return SizedBox(
+      width: 180,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          InkWell(
+            onTap: _toggle,
+            customBorder: const CircleBorder(),
+            child: Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: widget.fgColor.withValues(alpha: 0.1),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                _playing ? Icons.pause : Icons.play_arrow,
+                color: widget.fgColor,
+                size: 20,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: LinearProgressIndicator(
+                    value: progress,
+                    minHeight: 3,
+                    backgroundColor: widget.fgColor.withValues(alpha: 0.15),
+                    valueColor: AlwaysStoppedAnimation(
+                      widget.fgColor.withValues(alpha: 0.7),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  _formatPlaybackDuration(shown),
+                  style: TextStyle(
+                    color: widget.fgColor.withValues(alpha: 0.7),
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }

@@ -77,9 +77,19 @@ installable binary:
   path for "haven't received this sender's group session yet."
 - File/photo attachments: AES-256-GCM per-file encryption, real object-storage
   upload/download pipeline, decrypt-on-download.
+- Voice notes: recorded (AAC-LC, tap-to-start/tap-to-stop, 2-minute cap) and sent
+  inline through the same E2E envelope text uses — no object storage, matching
+  apps/web's own MediaRecorder-based protocol. Playback via `audioplayers`;
+  cross-client format compatibility (this app records AAC, the web client
+  records WebM/Opus, and there's no per-message format tag to negotiate it) relies
+  on ExoPlayer's content-sniffing rather than a verified guarantee — see
+  `_startVoiceRecording`'s docstring in `lib/features/chats/thread_screen.dart`.
+- Reply to a specific message: long-press a bubble to stage a reply, preview strip
+  above the composer, quoted snippet rendered inside the sent bubble.
 - 1:1 voice calling over `flutter_webrtc`, same WS signaling protocol as the web
   client (interoperates with it unchanged) — native audio routing means the
-  browser's speaker-by-default bug doesn't exist here.
+  browser's speaker-by-default bug doesn't exist here. Full-screen call UI with
+  mute/speaker/end-call, matching WhatsApp's own call-screen layout.
 - Device management: list linked devices, revoke any of them.
 - Biometric unlock: opt-in (one-time dismissible prompt on first sign-in, or toggle
   any time from the Devices screen), auto-attempted on the unlock screen with the

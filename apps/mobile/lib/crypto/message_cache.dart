@@ -39,6 +39,22 @@ class CachedMessage {
   /// Download, not eagerly.
   final AttachmentDescriptor? attachment;
 
+  /// Present when `contentTypeHint == 'voice'` — the raw decrypted audio bytes,
+  /// base64-encoded for storage in this JSON-backed cache. Mirrors apps/web's
+  /// own `CachedMessage.mediaBase64` (lib/crypto/message-cache.ts) exactly: a
+  /// voice note travels inline through the same E2E envelope text does (no
+  /// object storage — see thread_screen.dart's recording docstring), and
+  /// Double Ratchet message keys are single-use, so this IS the durable copy;
+  /// there's no ciphertext left on the server to re-derive it from later.
+  final String? mediaBase64;
+
+  /// Local-only duration hint for a voice note THIS device just recorded —
+  /// known immediately from the recording itself, shown before the audio
+  /// player has loaded real metadata. Never transmitted to the server (not a
+  /// `SendMessageRequest` field on either client) — a receiving device simply
+  /// doesn't have this until its own player loads the audio, same as web.
+  final int? mediaDurationSec;
+
   const CachedMessage({
     required this.id,
     required this.conversationId,
@@ -49,6 +65,8 @@ class CachedMessage {
     required this.sentAt,
     required this.replyToMessageId,
     this.attachment,
+    this.mediaBase64,
+    this.mediaDurationSec,
   });
 
   Map<String, dynamic> toJson() => {
@@ -61,6 +79,8 @@ class CachedMessage {
     'sentAt': sentAt,
     'replyToMessageId': replyToMessageId,
     if (attachment != null) 'attachment': attachment!.toJson(),
+    if (mediaBase64 != null) 'mediaBase64': mediaBase64,
+    if (mediaDurationSec != null) 'mediaDurationSec': mediaDurationSec,
   };
 
   static CachedMessage fromJson(Map<String, dynamic> json) => CachedMessage(
@@ -77,6 +97,8 @@ class CachedMessage {
             json['attachment'] as Map<String, dynamic>,
           )
         : null,
+    mediaBase64: json['mediaBase64'] as String?,
+    mediaDurationSec: json['mediaDurationSec'] as int?,
   );
 }
 

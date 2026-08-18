@@ -72,6 +72,14 @@ dependencies:
   # file_picker for arbitrary documents.
   image_picker: ^1.1.2
   file_picker: ^8.1.6
+  # Voice notes — recorded raw and sent inline through the same E2E envelope
+  # text already uses (contentTypeHint: 'voice'), no object storage, mirroring
+  # apps/web/components/chat/message-thread.tsx's own MediaRecorder-based path
+  # exactly (see thread_screen.dart's docstring on the format/compat choice).
+  # RECORD_AUDIO (Android)/NSMicrophoneUsageDescription (iOS) already exist —
+  # voice calling (call_controller.dart) needed them first.
+  record: ^6.2.1
+  audioplayers: ^6.7.1
 
 dev_dependencies:
   flutter_test:
