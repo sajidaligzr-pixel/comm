@@ -430,6 +430,22 @@ class CallController extends StateNotifier<CallUiState> {
     _onRing(pending.toRingPayload());
   }
 
+  /// Used by the call notification's "Accept" action button
+  /// (local_notifications.dart, `showsUserInterface: true` — opens the app straight
+  /// into this via main.dart's `onTap`) — `checkPendingCall`'s normal job is only
+  /// ever surfacing the incoming-call screen for the user to choose from; this goes
+  /// one step further and answers it immediately, matching what tapping "Accept" on
+  /// a real phone call notification does. Safe to call even if a live 'call.ring'
+  /// WS event already got here first: `checkPendingCall` no-ops once `phase` isn't
+  /// idle, and this device is already `incoming` either way, which is all
+  /// `acceptCall` itself needs.
+  Future<void> acceptPendingCall() async {
+    await checkPendingCall();
+    if (state.phase == CallPhase.incoming) {
+      await acceptCall();
+    }
+  }
+
   void _onRing(Map<String, dynamic> payload) {
     if (state.phase != CallPhase.idle && state.phase != CallPhase.ended) {
       // Already on (or wrapping up) a call — decline as busy, no second ring UI.

@@ -163,6 +163,22 @@ class CallsApi {
     }
   }
 
+  /// REST counterpart to the in-app Decline button's WS `call.reject` send — used
+  /// specifically by the call notification's "Decline" action button
+  /// (local_notifications.dart's `_declineFromBackground`), which fires from a
+  /// background isolate with no live socket to send a WS frame over at all. Not
+  /// used by the normal in-app decline path (call_controller.dart), which still
+  /// sends over WS as before.
+  Future<void> decline(String conversationId, String callId, String reason) =>
+      _client.requestVoid(
+        '/api/calls/decline',
+        body: {
+          'conversationId': conversationId,
+          'callId': callId,
+          'reason': reason,
+        },
+      );
+
   /// `null` is the normal case (no missed call waiting) — see PendingCallResponse's
   /// docstring (packages/types/src/calls.ts). Falls back to `null` on any error too,
   /// same reasoning as `turnCredentials` above: this is a best-effort catch-up check

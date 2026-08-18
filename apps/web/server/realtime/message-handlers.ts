@@ -25,7 +25,8 @@ import { sendMessage, acknowledgeDelivered, markConversationRead, getMessageSend
 import { getAllOtherMembersActiveDeviceIds, requireConversationMembership } from '../modules/conversations/service';
 import { createGroupKeyShare } from '../modules/groups/key-share-service';
 import { setPendingCall, clearPendingCall } from '../modules/calls/pending';
-import { recordCallInvited, recordCallAnswered, recordCallDeclined, recordCallEnded } from '../modules/calls/history';
+import { recordCallInvited, recordCallAnswered, recordCallEnded } from '../modules/calls/history';
+import { declineCall } from '../modules/calls/service';
 import {
   publishNewMessage,
   publishDelivered,
@@ -252,38 +253,13 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         const body = CallRejectEnvelope.parse(parsed);
         // call.reject is always sent by the callee (declining, or auto-busy from
         // call_controller.dart's `_onRing`) — same `ctx.deviceId` reasoning as
-        // call.answer above.
-        await clearPendingCall(ctx.deviceId);
-        await recordCallDeclined(body.callId);
-        // Told to the caller immediately — a decline is decisive, not "maybe still
-        // ringing elsewhere." An earlier version of this waited for every one of
-        // this user's OTHER active devices to also stop ringing before forwarding,
-        // meant to let a real phone-like "still ringing on your other device" case
-        // play out — but in practice this account (like most, after enough
-        // reinstalls/relogins over time) has several old device rows that are
-        // still technically `active` but have no real app running on them to ever
-        // decline or answer; call.invite's fan-out gives every one of them a
-        // pending-call entry that then just sits there for the full ring timeout.
-        // Waiting on those meant the caller saw "Calling…" for the full 45s no
-        // matter how fast the other side actually declined — found live, reported
-        // directly. Forwarding immediately is simpler and matches what actually
-        // happens on a real phone in the common case anyway.
-        const callerTargets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
-        for (const target of callerTargets) {
-          await publishCallRejected(target.deviceId, body.conversationId, body.callId, body.reason);
-        }
-        // Also stop the ring on this same user's OTHER devices (mirrors call.answer's
-        // own cross-device cancel above) — declining on one device should end it
-        // everywhere for this user, not leave another device still ringing on a
-        // call this user just turned down.
-        const myOtherDevices = await prisma.device.findMany({
-          where: { userId: ctx.userId, status: 'active', id: { not: ctx.deviceId } },
-          select: { id: true },
-        });
-        for (const device of myOtherDevices) {
-          await clearPendingCall(device.id);
-          await publishCallRejected(device.id, body.conversationId, body.callId, body.reason);
-        }
+        // call.answer above. Extracted into declineCall (server/modules/calls/
+        // service.ts) — see that function's own docstring for why forwarding
+        // happens immediately rather than waiting on this user's other devices,
+        // and it's also the exact same logic `POST /api/calls/decline` needs for
+        // the notification "Decline" action button, which fires from a background
+        // isolate with no WS to send this over at all.
+        await declineCall(ctx.userId, ctx.deviceId, body.conversationId, body.callId, body.reason);
         return null;
       }
 

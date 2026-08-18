@@ -7,12 +7,22 @@
 /// looks the same either way.
 library;
 
+import 'dart:async' show unawaited;
 import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
+import '../../api/api_client.dart';
+import '../../api/calls_api.dart';
+
 final FlutterLocalNotificationsPlugin _plugin =
     FlutterLocalNotificationsPlugin();
+
+// Ids sent back in a `NotificationResponse.actionId` when the corresponding button
+// (below, on the call notification) is tapped — never used for anything else, so a
+// plain notification-body tap always arrives with `actionId == null`.
+const _acceptActionId = 'accept';
+const _declineActionId = 'decline';
 
 const _channelId = 'comm_messages';
 const _channelName = 'Messages';
@@ -49,10 +59,23 @@ const _androidCallChannel = AndroidNotificationChannel(
 class NotificationTap {
   final String conversationId;
   final bool isCall;
-  const NotificationTap({required this.conversationId, required this.isCall});
+  final String? callId;
+
+  /// Which action button was tapped, if any — `'accept'` (see main.dart's `onTap`
+  /// wiring) or null for a plain tap on the notification body itself. `'decline'`
+  /// is never seen here: that action has `showsUserInterface: false` and is instead
+  /// handled entirely by `_backgroundNotificationResponseHandler` below, which
+  /// fires without ever launching/resuming this app at all — exactly the point.
+  final String? actionId;
+  const NotificationTap({
+    required this.conversationId,
+    required this.isCall,
+    this.callId,
+    this.actionId,
+  });
 }
 
-NotificationTap? _decodeTapPayload(String? raw) {
+NotificationTap? _decodeTapPayload(String? raw, {String? actionId}) {
   if (raw == null || raw.isEmpty) return null;
   try {
     final decoded = jsonDecode(raw);
@@ -62,10 +85,43 @@ NotificationTap? _decodeTapPayload(String? raw) {
     return NotificationTap(
       conversationId: conversationId,
       isCall: decoded['type'] == 'call',
+      callId: decoded['callId'] as String?,
+      actionId: actionId,
     );
   } catch (_) {
     return null;
   }
+}
+
+/// Best-effort decline fired straight from the background isolate Android spawns
+/// for the "Decline" action — no app UI involved at all, matching WhatsApp's own
+/// notification-decline behavior. Uses the REST path (`POST /api/calls/decline`),
+/// not a WS send: there is no live socket in this isolate to send one over, the
+/// exact reasoning push_notifications.dart's `_ackDelivered` already established
+/// for delivery acks. `ApiClient.initialize()` builds a fresh instance backed by
+/// the same on-disk persisted cookie jar here — same per-isolate re-init this file's
+/// `ensurePluginInitializedForBackgroundIsolate` already does for the plugin itself.
+Future<void> _declineFromBackground(
+  String conversationId,
+  String callId,
+) async {
+  try {
+    final client = await ApiClient.initialize();
+    await CallsApi(client).decline(conversationId, callId, 'declined');
+  } catch (_) {
+    // Best-effort — a missed decline here just means the call keeps ringing until
+    // the caller's own 45s no-answer timeout gives up, not a broken experience.
+  }
+}
+
+/// Handles ONLY the "Decline" action button — see `NotificationTap.actionId`'s own
+/// docstring for why "Accept" never reaches this function at all.
+@pragma('vm:entry-point')
+void _backgroundNotificationResponseHandler(NotificationResponse response) {
+  if (response.actionId != _declineActionId) return;
+  final tap = _decodeTapPayload(response.payload, actionId: response.actionId);
+  if (tap == null || !tap.isCall || tap.callId == null) return;
+  unawaited(_declineFromBackground(tap.conversationId, tap.callId!));
 }
 
 /// `onTap` is called with what the user tapped — wired to actual navigation/call
@@ -83,9 +139,18 @@ Future<void> initLocalNotifications({
   await _plugin.initialize(
     const InitializationSettings(android: androidInit, iOS: iosInit),
     onDidReceiveNotificationResponse: (response) {
-      final tap = _decodeTapPayload(response.payload);
+      final tap = _decodeTapPayload(
+        response.payload,
+        actionId: response.actionId,
+      );
       if (tap != null) onTap(tap);
     },
+    // Only ever actually invoked for the "Decline" action (see that handler's own
+    // docstring) — "Accept" has `showsUserInterface: true`, which routes through
+    // the callback above (or the cold-start check below) instead, same as a plain
+    // tap on the notification body.
+    onDidReceiveBackgroundNotificationResponse:
+        _backgroundNotificationResponseHandler,
   );
 
   // The tap that COLD-STARTS the app from a killed state never reaches the
@@ -99,7 +164,10 @@ Future<void> initLocalNotifications({
   // notification was even tapped in the first place.
   final launchDetails = await _plugin.getNotificationAppLaunchDetails();
   if (launchDetails?.didNotificationLaunchApp ?? false) {
-    final tap = _decodeTapPayload(launchDetails?.notificationResponse?.payload);
+    final tap = _decodeTapPayload(
+      launchDetails?.notificationResponse?.payload,
+      actionId: launchDetails?.notificationResponse?.actionId,
+    );
     if (tap != null) onTap(tap);
   }
 
@@ -168,13 +236,20 @@ int _callNotificationIdFor(String callId) =>
 
 /// The push path's answer to "ring even while closed" — see push_notifications.
 /// dart's docstring on the overall scope/limits of this (a system notification, not
-/// a full-screen locked-device calling UI). Tapping it opens the app and — unlike a
-/// message notification, which navigates to the conversation — triggers
-/// `CallController.checkPendingCall` directly (main.dart's `onTap` handling), which
-/// is what actually surfaces the real, full-screen incoming-call overlay if the
-/// call is still live. No navigation needed for that: `CallOverlay` is mounted
-/// app-wide (app/app.dart) and shows itself the instant the call state changes,
-/// on top of whatever screen happens to be underneath.
+/// a full-screen locked-device calling UI). Tapping the notification body opens the
+/// app and — unlike a message notification, which navigates to the conversation —
+/// triggers `CallController.checkPendingCall` directly (main.dart's `onTap`
+/// handling), which is what actually surfaces the real, full-screen incoming-call
+/// overlay if the call is still live. No navigation needed for that: `CallOverlay`
+/// is mounted app-wide (app/app.dart) and shows itself the instant the call state
+/// changes, on top of whatever screen happens to be underneath.
+///
+/// Also carries WhatsApp's own Accept/Decline action buttons, right on the
+/// notification itself — Decline (`showsUserInterface: false`) fires and dismisses
+/// without ever opening the app at all (`_backgroundNotificationResponseHandler`
+/// above); Accept (`showsUserInterface: true`) opens the app straight into
+/// `CallController.acceptPendingCall` (main.dart's `onTap` handling), answering
+/// immediately rather than just showing the incoming-call screen for a second tap.
 Future<void> showIncomingCallNotification({
   required String callId,
   required String conversationId,
@@ -187,6 +262,20 @@ Future<void> showIncomingCallNotification({
     priority: Priority.max,
     category: AndroidNotificationCategory.call,
     fullScreenIntent: false,
+    actions: [
+      AndroidNotificationAction(
+        _declineActionId,
+        'Decline',
+        showsUserInterface: false,
+        cancelNotification: true,
+      ),
+      AndroidNotificationAction(
+        _acceptActionId,
+        'Accept',
+        showsUserInterface: true,
+        cancelNotification: true,
+      ),
+    ],
   );
   const iosDetails = DarwinNotificationDetails(
     interruptionLevel: InterruptionLevel.timeSensitive,

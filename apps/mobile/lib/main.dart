@@ -40,7 +40,15 @@ Future<void> main() async {
         // conversation's thread here — the old behavior — is exactly what left
         // the user staring at a chat with no incoming-call screen anywhere: this
         // check is the only thing that actually starts the ringing state.
-        container.read(callControllerProvider.notifier).checkPendingCall();
+        final controller = container.read(callControllerProvider.notifier);
+        if (tap.actionId == 'accept') {
+          // The notification's "Accept" button — answers immediately rather than
+          // just surfacing the incoming-call screen for a second tap. 'decline'
+          // never reaches here at all (see NotificationTap's own docstring).
+          controller.acceptPendingCall();
+        } else {
+          controller.checkPendingCall();
+        }
       } else {
         container.read(routerProvider).push('/chats/${tap.conversationId}');
       }
