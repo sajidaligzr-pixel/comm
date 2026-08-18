@@ -7,6 +7,7 @@
 /// looks the same either way.
 library;
 
+import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
@@ -38,12 +39,40 @@ const _androidCallChannel = AndroidNotificationChannel(
   importance: Importance.max,
 );
 
-/// `onTapConversationId` is called with the conversation id the user tapped a
-/// notification for — wired to actual navigation by whoever calls this (see
-/// main.dart), kept as a plain callback here so this file has no dependency on
-/// go_router/Riverpod.
+/// A tapped notification's payload, decoded — `isCall` is the whole reason this
+/// exists as a class instead of the bare conversation-id string the payload used
+/// to be: a call and a message tap need genuinely different handling (main.dart),
+/// and there was no way to tell them apart before this. `callId` is only present
+/// for a call tap — needed to call `clearCallNotification`/pass through to
+/// `checkPendingCall`'s caller if it ever wants it, though today's handling
+/// (main.dart) only needs `isCall` itself to decide what to do.
+class NotificationTap {
+  final String conversationId;
+  final bool isCall;
+  const NotificationTap({required this.conversationId, required this.isCall});
+}
+
+NotificationTap? _decodeTapPayload(String? raw) {
+  if (raw == null || raw.isEmpty) return null;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map<String, dynamic>) return null;
+    final conversationId = decoded['conversationId'] as String?;
+    if (conversationId == null || conversationId.isEmpty) return null;
+    return NotificationTap(
+      conversationId: conversationId,
+      isCall: decoded['type'] == 'call',
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
+/// `onTap` is called with what the user tapped — wired to actual navigation/call
+/// handling by whoever calls this (see main.dart), kept as a plain callback here
+/// so this file has no dependency on go_router/Riverpod.
 Future<void> initLocalNotifications({
-  required void Function(String conversationId) onTapConversationId,
+  required void Function(NotificationTap tap) onTap,
 }) async {
   const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
   const iosInit = DarwinInitializationSettings(
@@ -54,12 +83,25 @@ Future<void> initLocalNotifications({
   await _plugin.initialize(
     const InitializationSettings(android: androidInit, iOS: iosInit),
     onDidReceiveNotificationResponse: (response) {
-      final conversationId = response.payload;
-      if (conversationId != null && conversationId.isNotEmpty) {
-        onTapConversationId(conversationId);
-      }
+      final tap = _decodeTapPayload(response.payload);
+      if (tap != null) onTap(tap);
     },
   );
+
+  // The tap that COLD-STARTS the app from a killed state never reaches the
+  // callback above — flutter_local_notifications' own documented gap, since the
+  // plugin isn't wired up yet at the instant that tap actually happened. This is
+  // the other half: checked once, right here, after `initialize()` has resolved
+  // (this function is called from main.dart before the first frame, same timing
+  // guarantee `getNotificationAppLaunchDetails` needs to be reliable). Found live
+  // as exactly the reported bug: a tapped call notification opened the app but
+  // never showed the incoming-call screen — because nothing had told the app a
+  // notification was even tapped in the first place.
+  final launchDetails = await _plugin.getNotificationAppLaunchDetails();
+  if (launchDetails?.didNotificationLaunchApp ?? false) {
+    final tap = _decodeTapPayload(launchDetails?.notificationResponse?.payload);
+    if (tap != null) onTap(tap);
+  }
 
   final androidImpl = _plugin
       .resolvePlatformSpecificImplementation<
@@ -103,7 +145,7 @@ Future<void> showNewMessageNotification({
     title,
     body,
     const NotificationDetails(android: androidDetails, iOS: iosDetails),
-    payload: conversationId,
+    payload: jsonEncode({'type': 'message', 'conversationId': conversationId}),
   );
 }
 
@@ -126,10 +168,13 @@ int _callNotificationIdFor(String callId) =>
 
 /// The push path's answer to "ring even while closed" — see push_notifications.
 /// dart's docstring on the overall scope/limits of this (a system notification, not
-/// a full-screen locked-device calling UI). Tapping it opens the app to
-/// `conversationId` the same way a message notification does; from there,
-/// call_controller.dart's `checkPendingCall` (run on every reconnect) is what
-/// actually surfaces the real incoming-call screen if the call is still live.
+/// a full-screen locked-device calling UI). Tapping it opens the app and — unlike a
+/// message notification, which navigates to the conversation — triggers
+/// `CallController.checkPendingCall` directly (main.dart's `onTap` handling), which
+/// is what actually surfaces the real, full-screen incoming-call overlay if the
+/// call is still live. No navigation needed for that: `CallOverlay` is mounted
+/// app-wide (app/app.dart) and shows itself the instant the call state changes,
+/// on top of whatever screen happens to be underneath.
 Future<void> showIncomingCallNotification({
   required String callId,
   required String conversationId,
@@ -151,7 +196,11 @@ Future<void> showIncomingCallNotification({
     'Incoming call',
     '$callerName is calling you',
     const NotificationDetails(android: androidDetails, iOS: iosDetails),
-    payload: conversationId,
+    payload: jsonEncode({
+      'type': 'call',
+      'conversationId': conversationId,
+      'callId': callId,
+    }),
   );
 }
 

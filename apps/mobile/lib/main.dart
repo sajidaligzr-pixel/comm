@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'api/api_client.dart';
 import 'app/app.dart';
 import 'app/router.dart';
+import 'features/calls/call_controller.dart' show callControllerProvider;
 import 'features/notifications/local_notifications.dart';
 import 'features/notifications/push_notifications.dart';
 
@@ -30,8 +31,20 @@ Future<void> main() async {
   // fails closed rather than blocking on a capability check (biometric_unlock.dart,
   // admin nav gating).
   initLocalNotifications(
-    onTapConversationId: (conversationId) =>
-        container.read(routerProvider).push('/chats/$conversationId'),
+    onTap: (tap) {
+      if (tap.isCall) {
+        // Deliberately NOT a navigation — CallOverlay is mounted app-wide
+        // (app/app.dart) and shows itself full-screen the instant the call state
+        // changes, on top of whatever screen ends up underneath (`/unlock`,
+        // `/chats`, wherever auth naturally lands). Navigating to the
+        // conversation's thread here — the old behavior — is exactly what left
+        // the user staring at a chat with no incoming-call screen anywhere: this
+        // check is the only thing that actually starts the ringing state.
+        container.read(callControllerProvider.notifier).checkPendingCall();
+      } else {
+        container.read(routerProvider).push('/chats/${tap.conversationId}');
+      }
+    },
   );
   // Same "deliberately not awaited" reasoning as initLocalNotifications above —
   // Firebase init + registering the background handler shouldn't hold up the first

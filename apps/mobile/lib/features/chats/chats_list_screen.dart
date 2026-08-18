@@ -14,6 +14,7 @@ import '../../crypto/message_cache.dart'
         markConversationLocallyDeleted,
         unmarkConversationLocallyDeleted;
 import '../../shared/widgets/error_state.dart';
+import '../calls/call_controller.dart' show callControllerProvider;
 import '../notifications/conversation_titles.dart';
 import '../notifications/push_notifications.dart' show registerPushToken;
 import '../auth/auth_controller.dart';
@@ -60,13 +61,19 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
       registerPushToken(ref.read(pushApiProvider));
     }
     _checkAdmin();
+    // Fallback for the plain "opened the app normally, no notification tapped"
+    // case — main.dart's tap handler already triggers this directly for a tapped
+    // call notification, but a call could still be waiting even if the app was
+    // opened some other way (the home-screen icon, a task-switcher swipe back)
+    // while it was still ringing.
+    ref.read(callControllerProvider.notifier).checkPendingCall();
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final route = ModalRoute.of(context);
-    if (route is PageRoute<void>) chatsRouteObserver.subscribe(this, route);
+    if (route is PageRoute<dynamic>) chatsRouteObserver.subscribe(this, route);
   }
 
   /// Fires when a route pushed on top of this one (a thread, most commonly) is
@@ -116,6 +123,30 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
         : null;
     if (conversationId != null) {
       await unmarkConversationLocallyDeleted(conversationId);
+    }
+    if (message is Map<String, dynamic>) {
+      final senderUserId = message['senderUserId'] as String?;
+      final messageId = message['id'] as String?;
+      final authState = ref.read(authControllerProvider);
+      final myUserId = authState is AuthSignedIn ? authState.profile.id : null;
+      // Acknowledging delivery doesn't need decryption — it's just "this device
+      // has the ciphertext," the same thing thread_screen.dart's own
+      // markDelivered call means when a message is ingested there. This screen
+      // (chats_list_screen.dart) is normally mounted the whole time the app is
+      // foregrounded, on top of ANY currently-visible screen (Flutter keeps an
+      // off-screen route's State alive, listeners and all, until it's actually
+      // popped) — so acking here too, not only inside an opened thread, is what
+      // marks a message delivered the instant it arrives while the app is simply
+      // open, regardless of which specific screen is on top. Found live as part
+      // of the reported "delivered but ticks don't update" investigation.
+      if (messageId != null &&
+          senderUserId != null &&
+          senderUserId != myUserId) {
+        ref
+            .read(messagesApiProvider)
+            .markDelivered(messageId)
+            .catchError((_) {});
+      }
     }
     await _load();
   }

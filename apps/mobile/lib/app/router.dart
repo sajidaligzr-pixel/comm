@@ -67,7 +67,7 @@ String? computeAuthRedirect(AuthState auth, String path) {
 /// changed archive state, etc.) refreshes the list instead of showing whatever
 /// was on screen before that thread was opened. A single app-wide instance,
 /// same as any `RouteObserver` — there's only ever one Navigator here to watch.
-final chatsRouteObserver = RouteObserver<PageRoute<void>>();
+final chatsRouteObserver = RouteObserver<PageRoute<dynamic>>();
 
 final routerProvider = Provider<GoRouter>((ref) {
   final auth = ref.watch(authControllerProvider);

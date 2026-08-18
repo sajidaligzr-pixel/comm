@@ -170,6 +170,13 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     super.initState();
     _load();
     final realtime = ref.read(realtimeClientProvider);
+    // Idempotent (no-ops if already connected) — belt-and-suspenders for the case
+    // this is the very first screen reached this session (a deep link, or a
+    // tapped notification opening straight into a conversation) rather than
+    // chats_list_screen.dart, which is normally what calls this first. Without
+    // this, a thread opened that way could sit fully connected-*looking* while
+    // actually never having connected at all.
+    realtime.connect();
     realtime.on('new', _onRealtimeNew);
     realtime.on('delivered', _onRealtimeDelivered);
     realtime.on('read', _onRealtimeRead);
@@ -243,7 +250,36 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final upToMessageId = payload['upToMessageId'] as String?;
     if (upToMessageId == null) return;
     if (!mounted) return;
-    setState(() => _status[upToMessageId] = (delivered: true, read: true));
+    // "Read up to X" means every one of THIS device's own messages sent at or
+    // before X, not literally only the message whose id is X — the other side
+    // opening the thread reads everything up to that point in one motion, not
+    // message-by-message. Mirrors web's own message-thread.tsx exactly (same
+    // single-id-only update), which has the identical gap: sending two messages
+    // in a row before the other side opens the thread left the earlier one stuck
+    // on a single/grey tick indefinitely in this live path — it only ever caught
+    // up on the next full reload, which re-seeds every own message's status from
+    // a fresh REST fetch (see _load()'s own fix for why that part already works).
+    CachedMessage? upToMessage;
+    for (final m in _messages) {
+      if (m.id == upToMessageId) {
+        upToMessage = m;
+        break;
+      }
+    }
+    setState(() {
+      if (upToMessage != null) {
+        for (final m in _messages) {
+          if (m.isOwn && m.sentAt.compareTo(upToMessage.sentAt) <= 0) {
+            _status[m.id] = (delivered: true, read: true);
+          }
+        }
+      } else {
+        // The read message isn't in this device's local cache/view (e.g. it
+        // arrived on a different device) — fall back to the old exact-id update,
+        // still strictly better than doing nothing with it.
+        _status[upToMessageId] = (delivered: true, read: true);
+      }
+    });
   }
 
   /// Another member deleted one of their own messages (or the worker's
@@ -382,9 +418,23 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         // inside this same try, that rejection wiped out the whole loaded
         // thread (composer included) and left this screen showing the raw
         // validation message instead of any chat UI at all.
+        //
+        // `page.items.first`, not `.last` — messages_api.dart's `list()` (and the
+        // server's own listMessages, service.ts) returns the page newest-first
+        // (`orderBy: serverReceivedAt: 'desc'`, the natural shape for "give me the
+        // most recent page, paginate backwards for older history"). `.last` was
+        // the OLDEST message in the page, so markRead's `upToMessageId` was telling
+        // the server "mark read everything at or before the oldest message here" —
+        // server/modules/messages/service.ts's `markConversationRead` filters
+        // `serverReceivedAt: { lte: upToMessage.serverReceivedAt }`, so that
+        // consistently marked only the single oldest message (or a same-timestamp
+        // handful) as read, never the rest of the page. Found live as the reported
+        // bug: the sender's ticks would advance to delivered (a separate, per-
+        // message, unaffected path — markDelivered) but never past that to read/blue,
+        // no matter how many times the recipient opened the thread.
         ref
             .read(conversationsApiProvider)
-            .markRead(widget.conversationId, page.items.last.id)
+            .markRead(widget.conversationId, page.items.first.id)
             .catchError((_) {});
       }
       _scrollToBottom();
