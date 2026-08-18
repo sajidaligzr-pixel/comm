@@ -77,27 +77,35 @@ Caddy (or Nginx) on the app VM
                    still exists and still typechecks + emits `.d.ts`, it's
                    just not what `start` runs.)
 
-Separate, dedicated host/VM (needs a public IP + a wide UDP port range,
-which doesn't coexist cleanly with the reverse-proxied app VM's ports):
-   coturn (self-hosted TURN/STUN) — deploying the coturn instance
-   itself is still a real, undone ops step (this is infrastructure,
-   not application code); what IS shipped is the app-side half:
-   `POST /api/calls/turn-credentials` (apps/web) mints the
-   short-lived `use-auth-secret` HMAC credential the moment
-   `TURN_SHARED_SECRET`/`TURN_URLS` (.env.example) are set, so
-   turning on TURN in production is "deploy coturn with this shared
-   secret, set the two env vars" — no app code changes needed. Until
-   then the route returns an empty ICE server list, which is enough
-   for calls between peers on the same network (docs/13-roadmap.md's
-   Phase 6 slice) but not real-world NAT traversal.
-   - systemd unit, `turnserver` binary from the OS package or built
-     from source, not a container
+coturn (self-hosted TURN/STUN) — **shipped**, deployed on the SAME droplet as
+`comm-web`/`comm-worker` rather than a separate host as originally sketched here
+(a deliberate deviation made at this deployment's actual scale — revisit with a
+dedicated box only if call volume ever justifies the operational split; see
+docs/14-risk-register.md). `POST /api/calls/turn-credentials` (apps/web) mints the
+short-lived `use-auth-secret` HMAC credential now that `TURN_SHARED_SECRET`/
+`TURN_URLS` are set in production — config lives in `infrastructure/coturn/` (real
+secret redacted there; the live value is server-local only, in `/etc/turnserver.conf`
+and `apps/web/.env`, byte-for-byte identical in both). Verified via a real
+authenticated `turnutils_uclient` allocation (0% packet loss) against the exact
+REST-API credential scheme the app itself derives, not just a bare STUN ping.
+   - systemd unit, `turnserver` binary from the OS package (`apt install coturn`),
+     not a container or built from source
    - `use-auth-secret` shared secret held only in the API server's
      environment + coturn's config, never shipped to any client
+   - No TLS/DTLS listener (5349) this pass — `infrastructure/coturn/turnserver.conf`'s
+     own comment on why (Caddy's Let's Encrypt cert isn't in a format turnserver reads
+     directly; WebRTC media is already SRTP-encrypted regardless) — a disclosed
+     simplification, not an oversight.
+   - Relay port range narrowed to 200 ports (49152–49352) rather than the full
+     ephemeral range, specifically to keep the open-port surface small given this
+     runs alongside the app rather than on an isolated host.
+   - `denied-peer-ip` covers every private/reserved range — a TURN relay is a
+     "connect somewhere on my behalf" primitive; no legitimate call peer is ever on
+     an internal address, so relaying there is refused outright (SSRF hardening).
    - credential rotation: the shared secret itself is rotated on a
-     schedule (e.g. quarterly) via a documented runbook script in
-     infrastructure/scripts/, distinct from the per-call short-lived
-     credentials it derives (see 08-threat-model.md#call-security)
+     schedule (e.g. quarterly) — update both `/etc/turnserver.conf` and
+     `apps/web/.env` together (`infrastructure/coturn/README.md`), distinct from the
+     per-call short-lived credentials it derives (see 08-threat-model.md#call-security)
 
 Managed, not self-run:
    - PostgreSQL (managed provider — RDS/Neon/等, whichever the

@@ -53,7 +53,7 @@ Real 1:1 audio calling, asked for directly right after the UI/polish pass above 
 - **Group calls.** Phase 5 (groups) doesn't exist yet either; the whole design here is 1:1.
 - **Call history.** ✅ Shipped in apps/mobile's push notification pass — `calls` rows are now written and updated as a call resolves (docs/02-database-schema.md), and `GET /api/calls/history` backs apps/mobile's "Calls" tab. No UI for this on apps/web itself yet (only the API + persistence landed; the tracked gap now is specifically "no web client screen for it," not "no history exists at all").
 - **Minimize-to-bubble.** The call UI is a full-screen overlay for every phase including connected — there's no way to browse other chats while on a call yet (`components/call/call-overlay.tsx`'s docstring).
-- **Actual coturn deployment.** This is real infrastructure ([11-deployment-architecture](11-deployment-architecture.md)) that has to be stood up on a real host with a public IP — not something achievable from an application-code pass. What shipped is everything on the app side that deployment needs (the credential-minting route, the env vars it reads); calls between peers on the same network work today via host candidates alone.
+- ~~Actual coturn deployment.~~ **Shipped later** — see the dedicated section below (after the multi-device sync pass) for what actually got deployed and how it was verified.
 
 **Re-verified end-to-end, asked for directly** ("thoroughly check the calling and the voice message functionality... working perfectly without any issue"), alongside the group-chat/media-attachment pass below. Both re-confirmed live: ring→accept→both sides `connected` with a real, live remote `MediaStreamTrack`, decline, **immediate redial after decline** (not stuck in a false "busy" state), mute (`aria-pressed` genuinely toggles the outgoing track), and hangup propagating live to the other side — and separately, a voice message sent, received live via the sidebar-only path (thread not open), and played back with the correct decoded duration (byte-for-byte correct decrypt).
 
@@ -111,6 +111,35 @@ Verified via a new server integration test (two devices each for sender and reci
 
 **What this deliberately doesn't cover:** no retroactive access for a device added after a message was sent (same forward-secrecy guarantee groups already have); a target device offline at send time still relies on existing push/WS catch-up, unchanged; group conversations' still-open one-device-per-member gap (above) is untouched.
 
+### Real TURN (coturn) deployment ✅ — closes Phase 6's tracked gap
+
+The app-side half (`POST /api/calls/turn-credentials`, minting short-lived
+`use-auth-secret` HMAC credentials) shipped with the original voice-calling pass;
+until now it always returned an empty ICE server list because no coturn instance
+actually existed, which is enough for two peers on the same network but not real-world
+NAT traversal — exactly the gap a real user would hit first. **Shipped**: coturn
+installed and running (`infrastructure/coturn/` — config in version control, real
+secret redacted there and held only in `/etc/turnserver.conf` + `apps/web/.env`),
+deployed on the SAME droplet as `comm-web`/`comm-worker` rather than the separate
+VM docs/11 originally sketched — a deliberate deviation at this deployment's actual
+scale, revisited only if call volume ever justifies the operational split
+(docs/14-risk-register.md).
+
+Verified two ways, not just "the process is running": `turnutils_stunclient`
+confirms the server answers at all, then a real authenticated allocation via
+`turnutils_uclient` using a REST-API credential derived with the exact same
+HMAC scheme the app's own route uses — 0% packet loss round-tripped through the
+actual relay, proving the shared secret and the credential derivation genuinely
+match end to end, not just that a port is open.
+
+**What this deliberately doesn't cover:** no TLS/DTLS listener (5349) — Caddy's
+Let's Encrypt cert isn't in a format `turnserver` reads directly, and WebRTC media
+itself is already SRTP-encrypted regardless, so this was judged not worth the
+added cert-reuse complexity this pass; a live two-different-networks call (the
+only test that actually proves ICE falls back to the relay candidate in practice,
+as opposed to the relay being reachable in isolation) is a follow-up for whoever
+tests this live, not something reproducible from this environment.
+
 ### Media retention ✅ — a Phase 9/10 storage-bounding measure shipped early
 Asked for directly: with media now flowing freely (voice notes, photos, general files), unbounded storage growth needed an answer that didn't wait for a dedicated "performance/hardening" phase. **Shipped**: images, voice notes, and file attachments have their content erased 24 hours after being sent, always — a new `apps/worker` sweep (`sweepExpiredMedia`, `jobs/cleanup.ts`) independent of the existing disappearing-message sweep, since this is a storage default every conversation is on, not a privacy setting anyone opts into (see [10-privacy-data-retention](10-privacy-data-retention.md)'s "Media retention" section for the full reasoning on why it's deliberately *not* folded into `DisappearingTimer`). Text messages are untouched.
 
@@ -136,7 +165,7 @@ Asked for directly, after being asked "what's left before going live" and answer
 
 **What this deliberately doesn't cover:**
 - **`style-src 'unsafe-inline'`** — a documented, narrow exception, not an oversight; see [11-deployment-architecture](11-deployment-architecture.md)'s note on why `script-src` (not `style-src`) is where a strict policy actually matters.
-- **Not live-verified against a real coturn or S3 deployment** — the `connect-src` logic for both is written and reasoned through, but (same honest flag as the file-attachments pass's S3 adapter) neither has actually been exercised against real infrastructure in this environment.
+- **Not live-verified against a real S3 deployment** — the `connect-src` logic is written and reasoned through, but (same honest flag as the file-attachments pass's S3 adapter) hasn't actually been exercised against real infrastructure in this environment. coturn specifically WAS live-verified since this note was written — see the "Real TURN (coturn) deployment" section above.
 - **A handful of previously-statically-optimized routes (`/login`, `/`) now render dynamically.** `app/layout.tsx` reading the nonce via `headers()` opts its entire subtree out of static generation — every route shares that root layout. A known, inherent trade-off of Next's own nonce-based CSP pattern (not something this pass introduced avoidably), and a small one on an app that's already server-rendering everything else and running behind rate limits — not a regression worth engineering around.
 - **The rest of Phase 9** — MFA/TOTP step-up, `blocked_users` enforcement, dependency/secret scanning in CI, Security Center + Privacy Center UI, and an external review of `packages/crypto` (Phase 11) — is still open; this pass was scoped to headers/CSP specifically, not all of Phase 9.
 
@@ -150,13 +179,13 @@ Two halves: `components/biometric-unlock-toggle.tsx` (enrollment — lives on th
 
 **What this deliberately doesn't cover:**
 - **No re-wrap-on-password-change for the *account identity* itself** — the pre-existing gap this pass's fix is modeled on is still open; this pass only makes sure biometric unlock fails gracefully against it, not that the underlying gap is closed.
-- **Not live-verified against a real platform authenticator** — this development environment has no Touch ID/Windows Hello hardware to test against; the WebAuthn/PRF call shapes match the spec and MDN's documented usage exactly, but this is flagged honestly rather than claimed as live-tested, the same posture already taken for the S3 storage adapter and the CSP `connect-src` logic against a real coturn deployment.
+- **Not live-verified against a real platform authenticator** — this development environment has no Touch ID/Windows Hello hardware to test against; the WebAuthn/PRF call shapes match the spec and MDN's documented usage exactly, but this is flagged honestly rather than claimed as live-tested, the same posture already taken for the S3 storage adapter.
 
 ## Phase 5 — Groups
 Group CRUD, membership/roles, and a real Megolm-style rotating group ratchet shipped early — see above. Remaining: invite links, promote/demote UI, group avatars, and `only_admins_can_message`'s settings UI (the field and its server-side enforcement both exist, just no toggle in the client yet).
 
 ## Phase 6 — Voice/video calls
-1:1 audio calling, WS signaling, TURN credential minting, and call history persistence (`calls` rows + `GET /api/calls/history`) shipped early (see the Voice calling pass above and apps/mobile's push notification pass). Remaining: video, group calls, actual coturn deployment (real infrastructure work, not application code), and a call-history UI on apps/web itself (apps/mobile has one — its "Calls" tab — apps/web doesn't yet).
+1:1 audio calling, WS signaling, TURN credential minting, call history persistence (`calls` rows + `GET /api/calls/history`), and the real coturn deployment itself all shipped early (see the Voice calling pass and the Real TURN deployment section above, plus apps/mobile's push notification pass). Remaining: video, group calls, and a call-history UI on apps/web itself (apps/mobile has one — its "Calls" tab — apps/web doesn't yet).
 
 ## Phase 7 — Push notifications
 Web Push (VAPID) integration and generic-payload dispatch from `apps/worker` shipped early (see the Push notifications pass above); the FCM/native path shipped later, for apps/mobile specifically (push-dispatch.ts now branches per-subscription on `provider`, and apps/mobile's FCM push also covers incoming calls — a `GET /api/calls/pending` durable catch-up plus a data-only FCM message, since calls never had a web-push equivalent to begin with; see `server/modules/calls/pending.ts`'s docstring). Remaining: a real notification-preferences settings UI. "Client-side decrypt-then-notify" turned out not to be a coherent separate feature once actually built — see that section's "what this doesn't cover" note on why.
