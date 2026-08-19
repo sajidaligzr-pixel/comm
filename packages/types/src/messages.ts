@@ -52,7 +52,7 @@ export function disappearingTimerToMs(timer: DisappearingTimer): number | null {
  * `Message.deletionReason` in schema.prisma. Lives here (not just as a Prisma enum)
  * because the client needs it too, to pick which placeholder text to show.
  */
-export const MessageDeletionReason = z.enum(['manual', 'disappearing_timer', 'media_retention']);
+export const MessageDeletionReason = z.enum(['manual', 'disappearing_timer', 'media_retention', 'viewed']);
 export type MessageDeletionReason = z.infer<typeof MessageDeletionReason>;
 
 /**
@@ -66,7 +66,17 @@ export type MessageDeletionReason = z.infer<typeof MessageDeletionReason>;
  */
 export const MEDIA_RETENTION_MS = 24 * 60 * 60 * 1000;
 
-export const MessageContentType = z.enum(['text', 'image', 'media', 'voice', 'location', 'contact', 'reaction', 'system']);
+export const MessageContentType = z.enum([
+  'text',
+  'image',
+  'media',
+  'voice',
+  'location',
+  'contact',
+  'reaction',
+  'system',
+  'view_once',
+]);
 export type MessageContentType = z.infer<typeof MessageContentType>;
 
 export const MessageEnvelopeType = z.enum(['x3dh_ratchet_1to1', 'megolm_group']);

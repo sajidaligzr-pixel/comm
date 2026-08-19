@@ -15,7 +15,7 @@ import { formatFileSize, formatRecordingTime } from '@/lib/format';
 import { decryptAttachment } from '@/lib/crypto/attachment-crypto';
 import { downloadAttachmentCiphertext } from '@/lib/media-client';
 import type { AttachmentDescriptor } from '@/lib/message-content';
-import { IconPlay, IconPause, IconX, IconFile, IconDownload } from '../icons';
+import { IconPlay, IconPause, IconX, IconFile, IconDownload, IconEye } from '../icons';
 
 export function VoiceBubble({ base64, durationHint, isOwn }: { base64: string; durationHint?: number; isOwn: boolean }): React.JSX.Element {
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -155,6 +155,58 @@ export function ImageBubble({ base64 }: { base64: string }): React.JSX.Element {
             <IconX className="h-5 w-5" />
           </button>
           <img src={src} alt="Sent photo" className="max-h-full max-w-full rounded-lg object-contain" />
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * A view-once photo (docs/13-roadmap.md), the RECIPIENT's side only — the
+ * sender's own copy just renders as a normal `ImageBubble` (see the callers in
+ * message-thread.tsx/group-message-thread.tsx), since the "one look" promise is
+ * about the person receiving it, not the person who already has it. Locked
+ * behind a tap-to-reveal placeholder; opening it fires `onOpen` exactly once
+ * (the `opened` guard), which the caller uses to trigger the actual
+ * self-tombstone request (DELETE /api/messages/:id — now dual-authorized for a
+ * genuine recipient of a `view_once` message, see deleteMessage's own
+ * docstring). Deliberately no download button, unlike `ImageBubble` — the
+ * entire point is that this isn't meant to be kept.
+ */
+export function ViewOnceImageBubble({ base64, onOpen }: { base64: string; onOpen: () => void }): React.JSX.Element {
+  const [expanded, setExpanded] = useState(false);
+  const [opened, setOpened] = useState(false);
+  const src = useMemo(() => `data:image/jpeg;base64,${base64}`, [base64]);
+
+  function handleOpen() {
+    if (!opened) {
+      setOpened(true);
+      onOpen();
+    }
+    setExpanded(true);
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={handleOpen}
+        className="flex h-28 w-44 flex-col items-center justify-center gap-1.5 rounded-lg bg-black/10 text-current"
+      >
+        <IconEye className="h-6 w-6" />
+        <span className="text-xs font-medium">Tap to view photo</span>
+      </button>
+      {expanded && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4" onClick={() => setExpanded(false)}>
+          <button
+            type="button"
+            onClick={() => setExpanded(false)}
+            aria-label="Close"
+            className="absolute right-4 top-4 flex h-10 w-10 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20"
+          >
+            <IconX className="h-5 w-5" />
+          </button>
+          <img src={src} alt="View-once photo" className="max-h-full max-w-full rounded-lg object-contain" />
         </div>
       )}
     </>

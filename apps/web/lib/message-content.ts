@@ -11,7 +11,7 @@ import type { MessageDeletionReason } from '@comm/types';
  * it permanently, since Double Ratchet message keys are single-use and there is no
  * second chance to re-decrypt correctly later. */
 export function hasMediaBytes(contentTypeHint: string): boolean {
-  return contentTypeHint === 'voice' || contentTypeHint === 'image';
+  return contentTypeHint === 'voice' || contentTypeHint === 'image' || contentTypeHint === 'view_once';
 }
 
 /** Descriptor for a generic file attachment (docs/13-roadmap.md's file-attachment
@@ -53,10 +53,12 @@ export interface DecodedMessageContent {
  * falls through to the original generic text — only `media_retention` gets its own.
  */
 export function deletedPlaceholderText(contentTypeHint: string, deletedReason: MessageDeletionReason | undefined): string {
+  if (deletedReason === 'viewed') return 'Opened';
   if (deletedReason !== 'media_retention') return 'This message was deleted';
   if (contentTypeHint === 'voice') return 'This voice message has expired';
   if (contentTypeHint === 'image') return 'This photo has expired';
   if (contentTypeHint === 'media') return 'This file has expired';
+  if (contentTypeHint === 'view_once') return 'This photo has expired';
   return 'This message was deleted';
 }
 

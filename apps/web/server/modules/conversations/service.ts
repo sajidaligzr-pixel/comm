@@ -208,6 +208,21 @@ export async function getAllOtherMembersActiveDeviceIds(
 }
 
 /**
+ * The caller's own OTHER active devices — the self-fan-out half of multi-device
+ * sync (`sendMessage`'s own inline version of this exact query; extracted here so
+ * `DELETE /api/messages/:id`'s self-fan-out, docs/13-roadmap.md's view-once pass,
+ * doesn't need its own direct `@comm/database` import — route handlers go through
+ * a service function, never Prisma directly, docs/00-overview.md).
+ */
+export async function getOwnOtherActiveDeviceIds(userId: string, excludeDeviceId: string): Promise<string[]> {
+  const devices = await prisma.device.findMany({
+    where: { userId, status: 'active', id: { not: excludeDeviceId } },
+    select: { id: true },
+  });
+  return devices.map((d) => d.id);
+}
+
+/**
  * The group-conversation analog of `getPrimaryRecipientDevice` above — same
  * single-device-per-member simplification (Phase 3's tracked gap, not solved anew
  * here), generalized from "the one other member" to "every other member." Used by

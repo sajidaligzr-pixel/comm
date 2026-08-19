@@ -201,7 +201,13 @@ async function sweepExpiredMedia(now: Date): Promise<number> {
   const cutoff = new Date(now.getTime() - MEDIA_RETENTION_MS);
   const expired = await prisma.message.findMany({
     where: {
-      contentTypeHint: { in: ['image', 'voice', 'media'] },
+      // `view_once` included: an unopened view-once photo still needs the same
+      // storage-bounding fallback everything else here gets — the point of this
+      // sweep is never letting media sit forever regardless of whether anyone's
+      // looked at it (docs/13-roadmap.md). A message the viewer DID open is
+      // already gone by then (deleteMessage's `viewed` tombstone, service.ts),
+      // so this only ever catches the "never opened" case.
+      contentTypeHint: { in: ['image', 'voice', 'media', 'view_once'] },
       deletedAt: null,
       sentAt: { lt: cutoff },
     },

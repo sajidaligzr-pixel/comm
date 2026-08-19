@@ -763,6 +763,14 @@ export function GroupMessageThread({
                       <VoiceBubble base64={m.mediaBase64} durationHint={m.mediaDurationSec} isOwn={m.isOwn} />
                     ) : m.contentTypeHint === 'image' && m.mediaBase64 ? (
                       <ImageBubble base64={m.mediaBase64} />
+                    ) : m.contentTypeHint === 'view_once' && m.mediaBase64 ? (
+                      // View-once is a 1:1-only feature this pass (see deleteMessage's
+                      // own docstring on why per-recipient tracking makes group
+                      // view-once a separate, harder problem) — a photo that started
+                      // as view-once but got forwarded into a group just renders as a
+                      // normal photo here, an honest simplification rather than a
+                      // broken/blank bubble.
+                      <ImageBubble base64={m.mediaBase64} />
                     ) : m.contentTypeHint === 'media' && m.attachment ? (
                       <FileBubble attachment={m.attachment} isOwn={m.isOwn} />
                     ) : (

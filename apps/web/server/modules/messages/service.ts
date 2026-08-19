@@ -348,11 +348,41 @@ export async function markConversationRead(callerUserId: string, conversationId:
   return true;
 }
 
-export async function deleteMessage(callerUserId: string, messageId: string): Promise<{ conversationId: string }> {
+/**
+ * Two distinct authorized callers, not one: the SENDER deleting their own
+ * message (the original, only case this ever handled — reason `manual`), or —
+ * new, docs/13-roadmap.md's view-once pass — a genuine RECIPIENT tombstoning a
+ * `view_once` message the instant they open it (reason `viewed`, so the client
+ * shows "Opened" rather than a generic "deleted" placeholder). Both end up
+ * calling the exact same tombstone transaction below; only who's allowed to
+ * trigger it, and why, differs. A recipient can only ever self-tombstone a
+ * `view_once` message specifically — this is NOT a general "any member can
+ * delete any message" hole, and idempotent by construction (the transaction
+ * below is safe to run twice: a race between the viewer's own multiple devices
+ * both opening it just re-nulls already-null columns).
+ */
+export async function deleteMessage(
+  callerUserId: string,
+  messageId: string,
+): Promise<{ conversationId: string; deletionReason: 'manual' | 'viewed' }> {
   const message = await prisma.message.findUnique({ where: { id: messageId } });
-  if (!message || message.senderUserId !== callerUserId) {
+  if (!message) throw new AppError('NOT_FOUND', 'Message not found.');
+
+  let deletionReason: 'manual' | 'viewed';
+  if (message.senderUserId === callerUserId) {
+    deletionReason = 'manual';
+  } else if (message.contentTypeHint === 'view_once') {
+    // Throws FORBIDDEN for a non-member, which we deliberately let escape as
+    // NOT_FOUND below (same "don't leak whether a message id exists" posture
+    // every other message-scoped authorization check in this file already takes).
+    await requireConversationMembership(callerUserId, message.conversationId).catch(() => {
+      throw new AppError('NOT_FOUND', 'Message not found.');
+    });
+    deletionReason = 'viewed';
+  } else {
     throw new AppError('NOT_FOUND', 'Message not found.');
   }
+
   // Tombstone: ciphertext genuinely nulled out, not just flagged
   // (docs/02-database-schema.md's "On deletion" note) — a later DB compromise can't
   // retroactively decrypt "deleted" content. `Prisma.JsonNull` (not plain `null`)
@@ -365,14 +395,14 @@ export async function deleteMessage(callerUserId: string, messageId: string): Pr
   await prisma.$transaction([
     prisma.message.update({
       where: { id: messageId },
-      data: { deletedAt: new Date(), ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason: 'manual' },
+      data: { deletedAt: new Date(), ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason },
     }),
     prisma.messageRecipient.updateMany({
       where: { messageId },
       data: { ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull },
     }),
   ]);
-  return { conversationId: message.conversationId };
+  return { conversationId: message.conversationId, deletionReason };
 }
 
 /**

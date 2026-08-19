@@ -30,7 +30,7 @@ import { encryptAttachment } from '@/lib/crypto/attachment-crypto';
 import { uploadAttachmentCiphertext } from '@/lib/media-client';
 import { EmojiPicker } from './emoji-picker';
 import { ForwardDialog } from './forward-dialog';
-import { VoiceBubble, ImageBubble, FileBubble } from './bubbles';
+import { VoiceBubble, ImageBubble, ViewOnceImageBubble, FileBubble } from './bubbles';
 import {
   IconSend,
   IconCheck,
@@ -48,6 +48,7 @@ import {
   IconPaperclip,
   IconSearch,
   IconStar,
+  IconEye,
 } from '../icons';
 
 interface DeliveryStatus {
@@ -135,6 +136,10 @@ export function MessageThread({
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [sendingImage, setSendingImage] = useState(false);
   const [sendingFile, setSendingFile] = useState(false);
+  // Arms the NEXT picked photo to send as view-once (docs/13-roadmap.md) — reset
+  // right after that send, whether it succeeds or fails, so it never silently
+  // stays armed for an unrelated later photo.
+  const [viewOnceArmed, setViewOnceArmed] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchIndex, setSearchIndex] = useState(0);
@@ -521,7 +526,7 @@ export function MessageThread({
    * right away (WhatsApp-style instant bubble with a clock icon), POST, and roll the
    * optimistic bubble back out of the local cache if the send actually fails. */
   async function sendEncrypted(opts: {
-    contentTypeHint: 'text' | 'voice' | 'image' | 'media' | 'reaction';
+    contentTypeHint: 'text' | 'voice' | 'image' | 'media' | 'reaction' | 'view_once';
     plaintext: Uint8Array;
     draftText?: string;
     mediaDurationSec?: number;
@@ -672,9 +677,11 @@ export function MessageThread({
     }
     setError(undefined);
     setSendingImage(true);
+    const asViewOnce = viewOnceArmed;
+    setViewOnceArmed(false);
     try {
       const bytes = await compressImageForSend(file);
-      await sendEncrypted({ contentTypeHint: 'image', plaintext: bytes });
+      await sendEncrypted({ contentTypeHint: asViewOnce ? 'view_once' : 'image', plaintext: bytes });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send that photo.');
     } finally {
@@ -733,6 +740,24 @@ export function MessageThread({
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not delete that message.');
     }
+  }
+
+  /** Fired the instant a `view_once` bubble is first opened (ViewOnceImageBubble's
+   * `onOpen`) — reuses the exact same DELETE endpoint `handleDelete` above does,
+   * now dual-authorized for a genuine recipient of a `view_once` message (see
+   * deleteMessage's own docstring, server/modules/messages/service.ts). No confirm
+   * dialog — opening it IS the confirmation, matching WhatsApp's own view-once UX. */
+  async function handleViewOnceOpened(messageId: string) {
+    try {
+      await apiFetch(`/api/messages/${messageId}`, { method: 'DELETE' });
+    } catch {
+      // Best-effort — worst case this device's own tombstone write lags a beat;
+      // the sender's DELETE (or apps/worker's media-retention fallback sweep)
+      // still gets there eventually. Never worth surfacing an error for what the
+      // user just experienced as "I looked at a photo."
+    }
+    const kek = getCurrentKek();
+    if (kek) setMessages(await markCachedMessageDeleted(kek, conversationId, messageId, 'viewed'));
   }
 
   async function startRecording() {
@@ -953,9 +978,11 @@ export function MessageThread({
                               ? '🎤 Voice message'
                               : replySource.contentTypeHint === 'image'
                                 ? '📷 Photo'
-                                : replySource.contentTypeHint === 'media'
-                                  ? `📄 ${replySource.attachment?.fileName ?? 'File'}`
-                                  : replySource.text}
+                                : replySource.contentTypeHint === 'view_once'
+                                  ? '👁 Photo'
+                                  : replySource.contentTypeHint === 'media'
+                                    ? `📄 ${replySource.attachment?.fileName ?? 'File'}`
+                                    : replySource.text}
                         </p>
                       </div>
                     )}
@@ -968,6 +995,12 @@ export function MessageThread({
                       <VoiceBubble base64={m.mediaBase64} durationHint={m.mediaDurationSec} isOwn={m.isOwn} />
                     ) : m.contentTypeHint === 'image' && m.mediaBase64 ? (
                       <ImageBubble base64={m.mediaBase64} />
+                    ) : m.contentTypeHint === 'view_once' && m.mediaBase64 ? (
+                      m.isOwn ? (
+                        <ImageBubble base64={m.mediaBase64} />
+                      ) : (
+                        <ViewOnceImageBubble base64={m.mediaBase64} onOpen={() => void handleViewOnceOpened(m.id)} />
+                      )
                     ) : m.contentTypeHint === 'media' && m.attachment ? (
                       <FileBubble attachment={m.attachment} isOwn={m.isOwn} />
                     ) : (
@@ -1062,16 +1095,25 @@ export function MessageThread({
                             >
                               <IconReply className="h-4 w-4" /> Reply
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setForwardingMessage(m);
-                                setActiveMenuId(null);
-                              }}
-                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
-                            >
-                              <IconForward className="h-4 w-4" /> Forward
-                            </button>
+                            {/* Forwarding an unopened view-once photo before the
+                                recipient has actually spent their one look would
+                                defeat the entire point — this device already holds
+                                the decrypted plaintext regardless (see
+                                ViewOnceImageBubble's own docstring on why "locked"
+                                is a UI gate, not an encryption one), so this is
+                                about honoring intent, not fixing a security hole. */}
+                            {!(m.contentTypeHint === 'view_once' && !m.isOwn) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setForwardingMessage(m);
+                                  setActiveMenuId(null);
+                                }}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+                              >
+                                <IconForward className="h-4 w-4" /> Forward
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => void handleToggleStar(m.id)}
@@ -1123,9 +1165,11 @@ export function MessageThread({
                   ? '🎤 Voice message'
                   : replyingTo.contentTypeHint === 'image'
                     ? '📷 Photo'
-                    : replyingTo.contentTypeHint === 'media'
-                      ? `📄 ${replyingTo.attachment?.fileName ?? 'File'}`
-                      : replyingTo.text}
+                    : replyingTo.contentTypeHint === 'view_once'
+                      ? '👁 Photo'
+                      : replyingTo.contentTypeHint === 'media'
+                        ? `📄 ${replyingTo.attachment?.fileName ?? 'File'}`
+                        : replyingTo.text}
             </p>
           </div>
           <button
@@ -1181,6 +1225,20 @@ export function MessageThread({
               className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
             >
               <IconImage className="h-5 w-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewOnceArmed((v) => !v)}
+              disabled={sendingImage}
+              title={viewOnceArmed ? 'View-once armed — next photo disappears after one look' : 'Send next photo as view-once'}
+              aria-label="Toggle view-once for the next photo"
+              aria-pressed={viewOnceArmed}
+              className={cn(
+                'flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                viewOnceArmed ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+              )}
+            >
+              <IconEye className="h-5 w-5" />
             </button>
             <input ref={fileInputRef} type="file" onChange={(e) => void handleFileSelected(e)} className="hidden" />
             <button

@@ -2,7 +2,7 @@ import type { NextRequest } from 'next/server';
 import { handleRoute, jsonOk } from '@/server/common/errors';
 import { requireAuth, requireCsrf } from '@/server/common/auth';
 import { deleteMessage } from '@/server/modules/messages/service';
-import { getAllOtherMembersActiveDeviceIds } from '@/server/modules/conversations/service';
+import { getAllOtherMembersActiveDeviceIds, getOwnOtherActiveDeviceIds } from '@/server/modules/conversations/service';
 import { publishDeleted } from '@/server/realtime/bus';
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -10,17 +10,24 @@ export async function DELETE(req: NextRequest, { params }: { params: Promise<{ i
     const ctx = await requireAuth(req);
     requireCsrf(req);
     const { id } = await params;
-    const { conversationId } = await deleteMessage(ctx.userId, id);
+    const { conversationId, deletionReason } = await deleteMessage(ctx.userId, id);
 
     // Push the deletion live to every other member's device(s) — direct and group
     // alike — so their local decrypted cache is scrubbed too, not just the server's
     // row — without this, a "delete for everyone" would only be true on the server;
     // a recipient's already-decrypted local copy (lib/crypto/message-cache.ts) would
     // silently survive forever, since it's never re-read from server ciphertext once
-    // cached.
-    const others = await getAllOtherMembersActiveDeviceIds(conversationId, ctx.userId);
-    for (const { deviceId } of others) {
-      await publishDeleted(deviceId, conversationId, id, 'manual');
+    // cached. Also fans out to the CALLER's own other active devices (self-fan-out,
+    // same pattern sendMessage's multi-device sync already uses) — without this, a
+    // view-once photo opened on one device would keep showing as unopened on the
+    // viewer's other devices until they happened to reopen the thread.
+    const [others, ownOtherDeviceIds] = await Promise.all([
+      getAllOtherMembersActiveDeviceIds(conversationId, ctx.userId),
+      getOwnOtherActiveDeviceIds(ctx.userId, ctx.deviceId),
+    ]);
+    const targets = [...others.map((o) => o.deviceId), ...ownOtherDeviceIds];
+    for (const deviceId of targets) {
+      await publishDeleted(deviceId, conversationId, id, deletionReason);
     }
 
     return jsonOk({ deleted: true });

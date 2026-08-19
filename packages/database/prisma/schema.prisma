@@ -451,6 +451,11 @@ enum MessageDeletionReason {
   // default rather than a privacy feature. Text messages are never touched by this
   // path.
   media_retention
+  // docs/13-roadmap.md's view-once pass — the recipient opened a `view_once`
+  // photo, which self-destructs the instant it's been seen (deleteMessage's
+  // sender-or-genuine-recipient authorization carve-out). Distinct from `manual`
+  // so the client can show "Opened" rather than a generic "deleted" placeholder.
+  viewed
 }
 
 enum MessageEnvelopeType {
@@ -474,6 +479,15 @@ enum MessageContentType {
   contact
   reaction
   system
+  // docs/13-roadmap.md's view-once pass — same inline-base64-bytes plaintext as
+  // `image` (hasMediaBytes treats the two identically), a distinct enum value
+  // rather than a flag inside the plaintext so the content type itself, not
+  // something smuggled into the ciphertext's shape, is what the server-side
+  // deleteMessage authorization carve-out keys off. 1:1 conversations only this
+  // pass — see that carve-out's own comment for why group view-once (per-
+  // recipient tracking, not a single global "opened" state) is a separate,
+  // harder problem left for later.
+  view_once
 }
 
 model MessageRecipient {

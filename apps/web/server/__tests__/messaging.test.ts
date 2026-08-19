@@ -423,6 +423,75 @@ describe('messaging (real crypto end-to-end)', () => {
     expect(recipientRow.envelopeHeader).toBeNull();
   });
 
+  /**
+   * View-once (docs/13-roadmap.md) — the one deleteMessage authorization
+   * carve-out: a genuine RECIPIENT (never the sender-only path every other
+   * content type uses) can self-tombstone a `view_once` message the instant
+   * they open it, reason `viewed`. Must never generalize to "any member can
+   * delete any message" — the second assertion below proves a recipient still
+   * can't touch an ordinary `text` message.
+   */
+  it('view-once: a recipient can self-tombstone it (reason "viewed"), but not an ordinary text message', async () => {
+    const { alice, bob, aliceDevice, aliceDeviceId, bobDeviceId, conversation } = await setupConversation();
+
+    async function encryptFor(text: string) {
+      const bundle = await getKeyBundle(bob.userId, bobDeviceId);
+      const publicBundle: PublicKeyBundle = {
+        identityAgreementKey: Buffer.from(bundle.identityKey.agreementPublicKey, 'base64'),
+        identitySigningKey: Buffer.from(bundle.identityKey.signingPublicKey, 'base64'),
+        signedPreKeyId: bundle.signedPreKey.keyId,
+        signedPreKeyPublic: Buffer.from(bundle.signedPreKey.publicKey, 'base64'),
+        signedPreKeySignature: Buffer.from(bundle.signedPreKey.signature, 'base64'),
+        oneTimePreKeyId: bundle.oneTimePreKey?.keyId ?? null,
+        oneTimePreKeyPublic: bundle.oneTimePreKey ? Buffer.from(bundle.oneTimePreKey.publicKey, 'base64') : null,
+      };
+      const { session, x3dhInit } = createOutboundSession(aliceDevice.identity, publicBundle);
+      return { envelope: encryptMessage(session, new TextEncoder().encode(text)), x3dhInit };
+    }
+
+    const viewOnce = await encryptFor('pretend this is a photo');
+    const viewOnceMessageId = crypto.randomUUID();
+    await sendMessage(
+      { userId: alice.userId, deviceId: aliceDeviceId },
+      conversation.id,
+      {
+        messageId: viewOnceMessageId,
+        envelopeType: 'x3dh_ratchet_1to1',
+        recipients: [{ deviceId: bobDeviceId, envelope: viewOnce.envelope, x3dhInit: viewOnce.x3dhInit }],
+        contentTypeHint: 'view_once',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+
+    // Bob (the recipient, not the sender) opens it — self-tombstones.
+    const result = await deleteMessage(bob.userId, viewOnceMessageId);
+    expect(result.deletionReason).toBe('viewed');
+    const row = await prisma.message.findUniqueOrThrow({ where: { id: viewOnceMessageId } });
+    expect(row.deletedAt).not.toBeNull();
+    expect(row.deletionReason).toBe('viewed');
+    expect(row.ciphertext).toBeNull();
+
+    // Same recipient, an ORDINARY text message — still sender-only, the
+    // carve-out is scoped to `view_once` specifically, not "any recipient can
+    // delete anything."
+    const text = await encryptFor('a normal message');
+    const textMessageId = crypto.randomUUID();
+    await sendMessage(
+      { userId: alice.userId, deviceId: aliceDeviceId },
+      conversation.id,
+      {
+        messageId: textMessageId,
+        envelopeType: 'x3dh_ratchet_1to1',
+        recipients: [{ deviceId: bobDeviceId, envelope: text.envelope, x3dhInit: text.x3dhInit }],
+        contentTypeHint: 'text',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+    await expect(deleteMessage(bob.userId, textMessageId)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
   it('respects the reader privacy setting: read receipts are not recorded when disabled', async () => {
     const { alice, bob, aliceDevice, aliceDeviceId, bobDeviceId, conversation } = await setupConversation();
     await prisma.userPrivacySetting.update({ where: { userId: bob.userId }, data: { readReceipts: false } });

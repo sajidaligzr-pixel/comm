@@ -59,11 +59,21 @@ class _DecodedContent {
 }
 
 _DecodedContent _decodeContent(String contentTypeHint, Uint8List plaintext) {
-  if (contentTypeHint == 'voice') {
-    // Raw audio bytes, not JSON — same inline-envelope path as text, just
-    // base64'd for storage the same way apps/web keeps `mediaBase64` in its
-    // own local cache. See thread_screen.dart's recording docstring for the
-    // format this device records in and the cross-client playback story.
+  if (contentTypeHint == 'voice' ||
+      contentTypeHint == 'image' ||
+      contentTypeHint == 'view_once') {
+    // Raw bytes, not JSON — same inline-envelope path as text, just base64'd
+    // for storage the same way apps/web keeps `mediaBase64` in its own local
+    // cache. `image`/`view_once` were a real, found gap: this mobile client
+    // never SENDS a photo this way (`_pickAndSendPhoto` used the object-
+    // storage `media` pipeline exclusively — see its own docstring), so a
+    // photo arriving FROM web (which does send inline `image` bytes,
+    // message-thread.tsx's `compressImageForSend`) had no decode branch here
+    // at all and fell through to being interpreted as UTF-8 text — silently
+    // garbled, not a crash, so easy to miss. `view_once` (docs/13-roadmap.md)
+    // needed this same inline path anyway (it must stay wire-compatible with
+    // web's own `view_once` format), which is what surfaced the `image` gap
+    // sitting right next to it.
     return _DecodedContent(text: '', mediaBase64: bytesToBase64(plaintext));
   }
   if (contentTypeHint == 'media') {
@@ -1224,6 +1234,23 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     );
   }
 
+  /// Fired the instant a `view_once` bubble is first opened
+  /// (`_ViewOnceImageBubble.onOpen`) — reuses the exact same DELETE endpoint
+  /// `_confirmAndDelete` below does, now dual-authorized for a genuine
+  /// recipient of a `view_once` message (see deleteMessage's own docstring,
+  /// apps/web/server/modules/messages/service.ts). No confirmation dialog —
+  /// opening it IS the confirmation, matching WhatsApp's own view-once UX.
+  Future<void> _handleViewOnceOpened(String messageId) async {
+    try {
+      await ref.read(messagesApiProvider).delete(messageId);
+    } on ApiException catch (_) {
+      // Best-effort — worst case this device's own tombstone write lags a
+      // beat; the sender's own delete (or apps/worker's media-retention
+      // fallback sweep) still gets there eventually.
+    }
+    await _applyDeletion(messageId, 'viewed');
+  }
+
   Future<void> _confirmAndDelete(CachedMessage message) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1596,6 +1623,47 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     await _sendFile(bytes, picked.name, picked.mimeType ?? 'image/jpeg');
   }
 
+  /// A view-once photo (docs/13-roadmap.md) rides the SAME inline-envelope
+  /// path web's own `view_once` send does (message-thread.tsx's
+  /// `sendEncrypted`), not the object-storage `media` pipeline
+  /// `_pickAndSendPhoto` above uses — the two clients must agree on the wire
+  /// format for a shared `contentTypeHint`, and web's is raw bytes, not a
+  /// descriptor. `imageQuality: 70` here (vs. 90 for a regular photo) is this
+  /// client's stand-in for web's real client-side re-encode/downscale
+  /// (`compressImageForSend`) — a coarser, honestly-simpler way of keeping a
+  /// typical phone photo comfortably under the same ~4 MiB envelope
+  /// ciphertext ceiling every inline send shares
+  /// (packages/types/src/messages.ts's `CiphertextBase64`), not a guarantee
+  /// for every possible source image.
+  static const _maxViewOnceBytes = 2621440; // 2.5 MiB, matches web's own cap
+
+  Future<void> _pickAndSendViewOncePhoto() async {
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 70,
+    );
+    if (picked == null) return;
+    final bytes = await picked.readAsBytes();
+    if (bytes.length > _maxViewOnceBytes) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'That photo is too large to send as view-once — try a smaller one.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    await _sendEnvelope(
+      contentTypeHint: 'view_once',
+      plaintext: bytes,
+      cacheText: '',
+      cacheMediaBase64: bytesToBase64(bytes),
+    );
+  }
+
   Future<void> _pickAndSendFile() async {
     final result = await FilePicker.platform.pickFiles(withData: true);
     final picked = result?.files.single;
@@ -1859,6 +1927,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                       searchQuery: _searchOpen ? normalizedSearchQuery : '',
                       isActiveSearchMatch: message.id == activeSearchMatchId,
                       starred: _starredIds.contains(message.id),
+                      onViewOnceOpen: (id) => _handleViewOnceOpened(id),
                     );
                   },
                 ),
@@ -1896,18 +1965,34 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                                 Icons.attach_file,
                                 color: WhatsAppColors.tealAccent,
                               ),
-                              onSelected: (choice) => choice == 'photo'
-                                  ? _pickAndSendPhoto()
-                                  : _pickAndSendFile(),
-                              itemBuilder: (context) => const [
-                                PopupMenuItem(
+                              onSelected: (choice) => switch (choice) {
+                                'photo' => _pickAndSendPhoto(),
+                                'view_once' => _pickAndSendViewOncePhoto(),
+                                _ => _pickAndSendFile(),
+                              },
+                              itemBuilder: (context) => [
+                                const PopupMenuItem(
                                   value: 'photo',
                                   child: ListTile(
                                     leading: Icon(Icons.photo),
                                     title: Text('Photo'),
                                   ),
                                 ),
-                                PopupMenuItem(
+                                // 1:1 only — view-once needs a single global
+                                // "opened" state that doesn't generalize
+                                // cleanly to a group's several recipients
+                                // (deleteMessage's own docstring).
+                                if (_conversation?.type == 'direct')
+                                  const PopupMenuItem(
+                                    value: 'view_once',
+                                    child: ListTile(
+                                      leading: Icon(
+                                        Icons.remove_red_eye_outlined,
+                                      ),
+                                      title: Text('View once photo'),
+                                    ),
+                                  ),
+                                const PopupMenuItem(
                                   value: 'file',
                                   child: ListTile(
                                     leading: Icon(Icons.attach_file),
@@ -2239,6 +2324,7 @@ class _MessageBubble extends StatelessWidget {
     this.searchQuery = '',
     this.isActiveSearchMatch = false,
     this.starred = false,
+    this.onViewOnceOpen,
   });
   final CachedMessage message;
   final void Function(AttachmentDescriptor) onDownload;
@@ -2272,6 +2358,11 @@ class _MessageBubble extends StatelessWidget {
   /// See `StarredMessage`'s doc comment in schema.prisma — resolved once per
   /// build by the parent from `_ThreadScreenState._starredIds`.
   final bool starred;
+
+  /// Fired the instant a `view_once` bubble is first opened — see
+  /// `_ViewOnceImageBubble`'s own docstring. Null for a sender's own copy
+  /// (never rendered with that widget in the first place).
+  final void Function(String messageId)? onViewOnceOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -2424,6 +2515,18 @@ class _MessageBubble extends StatelessWidget {
                             durationHintSec: message.mediaDurationSec,
                             fgColor: fgColor,
                           )
+                        : message.contentTypeHint == 'image' &&
+                              message.mediaBase64 != null
+                        ? _InlineImageBubble(base64: message.mediaBase64!)
+                        : message.contentTypeHint == 'view_once' &&
+                              message.mediaBase64 != null
+                        ? (message.isOwn
+                              ? _InlineImageBubble(base64: message.mediaBase64!)
+                              : _ViewOnceImageBubble(
+                                  base64: message.mediaBase64!,
+                                  onOpen: () =>
+                                      onViewOnceOpen?.call(message.id),
+                                ))
                         : attachment != null
                         ? InkWell(
                             onTap: () => onDownload(attachment),
@@ -2691,6 +2794,111 @@ String _formatPlaybackDuration(Duration d) {
   final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
   final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
   return '$m:$s';
+}
+
+/// An inline `contentTypeHint: 'image'` (or the sender's own `view_once` copy)
+/// photo — mobile counterpart to apps/web's `ImageBubble` (components/chat/
+/// bubbles.tsx). Tap to expand full-screen; no download button (mobile's
+/// generic file bubble above already covers "save this," and an inline photo
+/// here is view-only by design, same scope apps/web ships for this pass).
+class _InlineImageBubble extends StatelessWidget {
+  const _InlineImageBubble({required this.base64});
+  final String base64;
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = base64Decode(base64);
+    return GestureDetector(
+      onTap: () => _showFullscreenImage(context, bytes),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.memory(bytes, width: 220, height: 220, fit: BoxFit.cover),
+      ),
+    );
+  }
+}
+
+void _showFullscreenImage(BuildContext context, Uint8List bytes) {
+  Navigator.of(context).push(
+    PageRouteBuilder<void>(
+      opaque: false,
+      barrierColor: Colors.black87,
+      pageBuilder: (context, _, _) => GestureDetector(
+        onTap: () => Navigator.of(context).pop(),
+        child: Scaffold(
+          backgroundColor: Colors.transparent,
+          body: SafeArea(
+            child: Stack(
+              children: [
+                Center(child: InteractiveViewer(child: Image.memory(bytes))),
+                Positioned(
+                  right: 8,
+                  top: 8,
+                  child: IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+/// A `contentTypeHint: 'view_once'` photo, the RECIPIENT's side only — mirrors
+/// apps/web's `ViewOnceImageBubble` (components/chat/bubbles.tsx) exactly,
+/// including WHY the sender's own copy never uses this widget (see that file's
+/// docstring: the "one look" promise is about the recipient, not the person who
+/// already has it — thread_screen.dart's render switch routes `message.isOwn`
+/// straight to `_InlineImageBubble` instead). Opening it fires `onOpen` exactly
+/// once (the `_opened` guard), which the caller uses to trigger the actual
+/// self-tombstone request.
+class _ViewOnceImageBubble extends StatefulWidget {
+  const _ViewOnceImageBubble({required this.base64, required this.onOpen});
+  final String base64;
+  final VoidCallback onOpen;
+
+  @override
+  State<_ViewOnceImageBubble> createState() => _ViewOnceImageBubbleState();
+}
+
+class _ViewOnceImageBubbleState extends State<_ViewOnceImageBubble> {
+  bool _opened = false;
+
+  void _handleOpen() {
+    if (!_opened) {
+      setState(() => _opened = true);
+      widget.onOpen();
+    }
+    _showFullscreenImage(context, base64Decode(widget.base64));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: _handleOpen,
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 176,
+        height: 112,
+        decoration: BoxDecoration(
+          color: Colors.black12,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: const Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.remove_red_eye_outlined, size: 24),
+            SizedBox(height: 4),
+            Text('Tap to view photo', style: TextStyle(fontSize: 12)),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 /// Play/pause + progress bar for a `contentTypeHint: 'voice'` bubble — the
