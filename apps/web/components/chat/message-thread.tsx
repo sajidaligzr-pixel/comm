@@ -21,6 +21,8 @@ import {
   decodeMessagePlaintext,
   deletedPlaceholderText,
   buildReactionState,
+  messageMatchesSearch,
+  splitForHighlight,
   type AttachmentDescriptor,
   type ReactionPayload,
 } from '@/lib/message-content';
@@ -41,8 +43,10 @@ import {
   IconX,
   IconMoreVertical,
   IconChevronUp,
+  IconChevronDown,
   IconImage,
   IconPaperclip,
+  IconSearch,
 } from '../icons';
 
 interface DeliveryStatus {
@@ -130,9 +134,13 @@ export function MessageThread({
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [sendingImage, setSendingImage] = useState(false);
   const [sendingFile, setSendingFile] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchIndex, setSearchIndex] = useState(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const bubbleRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // Every device an outgoing message needs its own independently-encrypted envelope
   // for — the other member's active devices, plus the caller's own other active
   // devices (self-fan-out — a second phone, a desktop client, a web tab left open
@@ -179,6 +187,33 @@ export function MessageThread({
     const next = mine === emoji ? null : emoji;
     const payload: ReactionPayload = { targetMessageId, emoji: next };
     await sendEncrypted({ contentTypeHint: 'reaction', plaintext: utf8ToBytes(JSON.stringify(payload)) });
+  }
+
+  // In-chat search (lib/message-content.ts's `messageMatchesSearch` docstring on
+  // why this is a plain linear scan, not a real index) — matches in chronological
+  // order (oldest first), so the LAST entry is the most recent match, which is
+  // where a fresh query jumps by default, same as WhatsApp's own in-chat search.
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+  const searchMatches = useMemo(
+    () => visibleMessages.filter((m) => messageMatchesSearch(m, normalizedSearchQuery)).map((m) => m.id),
+    [visibleMessages, normalizedSearchQuery],
+  );
+  useEffect(() => {
+    setSearchIndex(searchMatches.length > 0 ? searchMatches.length - 1 : 0);
+    // Deliberately keyed on the query text, not `searchMatches` itself — jumping
+    // back to "most recent" every time a NEW message happens to match the
+    // already-typed query would yank the user away from wherever they were
+    // browsing to.
+  }, [normalizedSearchQuery]);
+  useEffect(() => {
+    if (!searchOpen) return;
+    const id = searchMatches[searchIndex];
+    if (id) bubbleRefs.current.get(id)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [searchOpen, searchIndex, searchMatches]);
+
+  function closeSearch() {
+    setSearchOpen(false);
+    setSearchQuery('');
   }
 
   // Local, immediate enforcement of the disappearing-message timer — checked on
@@ -740,7 +775,63 @@ export function MessageThread({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-muted/20">
+    <div className="relative flex h-full min-h-0 flex-col bg-muted/20">
+      {!searchOpen && (
+        <button
+          type="button"
+          onClick={() => setSearchOpen(true)}
+          aria-label="Search in this chat"
+          className="absolute right-3 top-2 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-background text-muted-foreground shadow-sm hover:text-foreground"
+        >
+          <IconSearch className="h-4 w-4" />
+        </button>
+      )}
+      {searchOpen && (
+        <div className="flex flex-shrink-0 items-center gap-1 border-b border-border bg-background px-3 py-2">
+          <IconSearch className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+          <input
+            autoFocus
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') closeSearch();
+              if (e.key === 'Enter') setSearchIndex((i) => Math.max(0, i - 1));
+            }}
+            placeholder="Search in this chat"
+            aria-label="Search in this chat"
+            className="h-8 min-w-0 flex-1 bg-transparent px-1 text-sm text-foreground outline-none placeholder:text-muted-foreground"
+          />
+          <span className="flex-shrink-0 text-xs tabular-nums text-muted-foreground">
+            {normalizedSearchQuery ? `${searchMatches.length > 0 ? searchIndex + 1 : 0} / ${searchMatches.length}` : ''}
+          </span>
+          <button
+            type="button"
+            onClick={() => setSearchIndex((i) => Math.max(0, i - 1))}
+            disabled={searchMatches.length === 0}
+            aria-label="Previous match (older)"
+            className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+          >
+            <IconChevronUp className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setSearchIndex((i) => Math.min(searchMatches.length - 1, i + 1))}
+            disabled={searchMatches.length === 0}
+            aria-label="Next match (newer)"
+            className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40"
+          >
+            <IconChevronDown className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={closeSearch}
+            aria-label="Close search"
+            className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            <IconX className="h-4 w-4" />
+          </button>
+        </div>
+      )}
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-0.5 overflow-y-auto py-3 pl-2 pr-3 sm:px-6">
         {!ready && <p className="text-center text-sm text-muted-foreground">Loading…</p>}
         {ready && nextCursor && (
@@ -771,9 +862,16 @@ export function MessageThread({
             new Date(m.sentAt).getTime() - new Date(prev.sentAt).getTime() < 5 * 60_000;
           const replySource = m.replyToMessageId ? messages.find((mm) => mm.id === m.replyToMessageId) : undefined;
           const reactions = reactionState.get(m.id)?.summaries ?? [];
+          const isActiveSearchMatch = searchOpen && searchMatches[searchIndex] === m.id;
 
           return (
-            <div key={m.id}>
+            <div
+              key={m.id}
+              ref={(el) => {
+                if (el) bubbleRefs.current.set(m.id, el);
+                else bubbleRefs.current.delete(m.id);
+              }}
+            >
               {showDateSeparator && (
                 <div className="flex justify-center py-2">
                   <span className="rounded-full bg-background px-3 py-1 text-xs font-medium text-muted-foreground shadow-sm">
@@ -795,6 +893,7 @@ export function MessageThread({
                       'relative min-w-0 rounded-2xl px-3 py-2 text-sm shadow-sm',
                       m.isOwn ? 'bg-primary text-primary-foreground' : 'bg-background text-foreground',
                       m.isOwn ? (grouped ? 'rounded-tr-md' : 'rounded-tr-sm') : grouped ? 'rounded-tl-md' : 'rounded-tl-sm',
+                      isActiveSearchMatch && 'ring-2 ring-yellow-400',
                     )}
                   >
                     {!m.deleted && replySource && (
@@ -830,7 +929,19 @@ export function MessageThread({
                     ) : m.contentTypeHint === 'media' && m.attachment ? (
                       <FileBubble attachment={m.attachment} isOwn={m.isOwn} />
                     ) : (
-                      <p className="whitespace-pre-wrap break-words">{m.text}</p>
+                      <p className="whitespace-pre-wrap break-words">
+                        {searchOpen && normalizedSearchQuery
+                          ? splitForHighlight(m.text, normalizedSearchQuery).map((seg, segIndex) =>
+                              seg.matched ? (
+                                <mark key={segIndex} className="rounded bg-yellow-300/80 text-foreground">
+                                  {seg.text}
+                                </mark>
+                              ) : (
+                                <span key={segIndex}>{seg.text}</span>
+                              ),
+                            )
+                          : m.text}
+                      </p>
                     )}
 
                     <p

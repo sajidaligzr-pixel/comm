@@ -171,3 +171,53 @@ export function buildReactionState(
   }
   return result;
 }
+
+/**
+ * In-chat search (docs/13-roadmap.md) — necessarily 100% client-side: the server
+ * only ever holds ciphertext, so there is no server-side query to run at all (unlike
+ * every other "search" feature in a typical app). This scans whatever's already in
+ * the local decrypted cache — deliberately NOT a real inverted index: a
+ * per-conversation cache tops out at a few hundred messages
+ * (lib/crypto/message-cache.ts's cap), and a linear substring scan over that is
+ * imperceptibly fast; a real index is the right call only for a FUTURE
+ * cross-conversation global search, scoped out of this pass on purpose (see the
+ * roadmap entry).
+ */
+export function messageMatchesSearch(
+  m: { deleted?: boolean; contentTypeHint: string; text: string; attachment?: AttachmentDescriptor },
+  query: string,
+): boolean {
+  if (m.deleted || !query) return false;
+  if (m.contentTypeHint === 'reaction' || m.contentTypeHint === 'system') return false;
+  if (m.contentTypeHint === 'media') return (m.attachment?.fileName ?? '').toLowerCase().includes(query);
+  if (m.contentTypeHint === 'voice' || m.contentTypeHint === 'image') return false; // no text to search
+  return m.text.toLowerCase().includes(query);
+}
+
+export interface TextSegment {
+  text: string;
+  matched: boolean;
+}
+
+/** Splits `text` into segments alternating matched/unmatched against `query`
+ * (case-insensitive) — the caller (a `.tsx` file; this one can't return JSX
+ * itself) wraps `matched` segments in a highlight element. Returns the whole
+ * string as one unmatched segment when `query` is empty. */
+export function splitForHighlight(text: string, query: string): TextSegment[] {
+  if (!query) return [{ text, matched: false }];
+  const lower = text.toLowerCase();
+  const needle = query.toLowerCase();
+  const segments: TextSegment[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const idx = lower.indexOf(needle, cursor);
+    if (idx === -1) {
+      segments.push({ text: text.slice(cursor), matched: false });
+      break;
+    }
+    if (idx > cursor) segments.push({ text: text.slice(cursor, idx), matched: false });
+    segments.push({ text: text.slice(idx, idx + needle.length), matched: true });
+    cursor = idx + needle.length;
+  }
+  return segments;
+}

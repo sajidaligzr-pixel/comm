@@ -189,6 +189,64 @@ String? _myReactionAmong(List<ReactionSummary> summaries) {
 /// phone's long-press bottom sheet has much less room than a desktop dropdown.
 const _quickReactionEmoji = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
+/// In-chat search — mirrors apps/web/lib/message-content.ts's
+/// `messageMatchesSearch` exactly, including WHY this is a plain linear scan
+/// and not a real index: a per-conversation cache tops out at a few hundred
+/// messages (message_cache.dart's cap), and scanning that is imperceptibly
+/// fast; a real index only earns its cost for a FUTURE cross-conversation
+/// global search, out of scope for this pass (docs/13-roadmap.md).
+bool _messageMatchesSearch(CachedMessage m, String normalizedQuery) {
+  if (m.deleted || normalizedQuery.isEmpty) return false;
+  if (m.contentTypeHint == 'reaction' || m.contentTypeHint == 'system') {
+    return false;
+  }
+  if (m.contentTypeHint == 'media') {
+    return (m.attachment?.fileName ?? '').toLowerCase().contains(
+      normalizedQuery,
+    );
+  }
+  if (m.contentTypeHint == 'voice' || m.contentTypeHint == 'image') {
+    return false; // no text to search
+  }
+  return m.text.toLowerCase().contains(normalizedQuery);
+}
+
+/// Splits `text` into `TextSpan`s, highlighting every case-insensitive match of
+/// `query` — the Dart/`Text.rich` counterpart to apps/web's `splitForHighlight`
+/// (which returns plain data since a `.ts` file can't return JSX; here a
+/// `TextSpan` tree serves the same purpose directly).
+List<TextSpan> _highlightSpans(
+  String text,
+  String normalizedQuery,
+  TextStyle baseStyle,
+) {
+  if (normalizedQuery.isEmpty) return [TextSpan(text: text, style: baseStyle)];
+  final lower = text.toLowerCase();
+  final spans = <TextSpan>[];
+  var cursor = 0;
+  while (cursor < text.length) {
+    final idx = lower.indexOf(normalizedQuery, cursor);
+    if (idx == -1) {
+      spans.add(TextSpan(text: text.substring(cursor), style: baseStyle));
+      break;
+    }
+    if (idx > cursor) {
+      spans.add(TextSpan(text: text.substring(cursor, idx), style: baseStyle));
+    }
+    spans.add(
+      TextSpan(
+        text: text.substring(idx, idx + normalizedQuery.length),
+        style: baseStyle.copyWith(
+          backgroundColor: const Color(0xFFFFE082),
+          color: Colors.black,
+        ),
+      ),
+    );
+    cursor = idx + normalizedQuery.length;
+  }
+  return spans;
+}
+
 class ThreadScreen extends ConsumerStatefulWidget {
   const ThreadScreen({super.key, required this.conversationId});
   final String conversationId;
@@ -235,6 +293,74 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   CachedMessage? _replyingTo;
   final _scrollController = ScrollController();
   String? _error;
+
+  /// In-chat search (mirrors apps/web's identical feature — message-thread.tsx)
+  /// — a plain linear scan over `_messages`, never a real index; see
+  /// `_messageMatchesSearch`'s docstring. `_bubbleKeys` is what lets
+  /// `_scrollToSearchMatch` jump the ListView to an arbitrary already-rendered
+  /// bubble (`Scrollable.ensureVisible`, the standard Flutter pattern for this —
+  /// there's no by-index scroll-to for a variable-height ListView.builder).
+  bool _searchOpen = false;
+  String _searchQuery = '';
+  int _searchIndex = 0;
+  final _searchController = TextEditingController();
+  final Map<String, GlobalKey> _bubbleKeys = {};
+
+  GlobalKey _keyFor(String messageId) =>
+      _bubbleKeys.putIfAbsent(messageId, () => GlobalKey());
+
+  List<String> _computeSearchMatches(String normalizedQuery) {
+    if (normalizedQuery.isEmpty) return const [];
+    return _messages
+        .where(
+          (m) =>
+              m.contentTypeHint != 'reaction' &&
+              _messageMatchesSearch(m, normalizedQuery),
+        )
+        .map((m) => m.id)
+        .toList();
+  }
+
+  void _onSearchChanged(String value) {
+    final normalized = value.trim().toLowerCase();
+    final matches = _computeSearchMatches(normalized);
+    setState(() {
+      _searchQuery = value;
+      _searchIndex = matches.isNotEmpty ? matches.length - 1 : 0;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToSearchMatch());
+  }
+
+  void _moveSearch(int delta, List<String> matches) {
+    if (matches.isEmpty) return;
+    setState(
+      () => _searchIndex = (_searchIndex + delta).clamp(0, matches.length - 1),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToSearchMatch());
+  }
+
+  void _scrollToSearchMatch() {
+    final matches = _computeSearchMatches(_searchQuery.trim().toLowerCase());
+    if (matches.isEmpty) return;
+    final id = matches[_searchIndex.clamp(0, matches.length - 1)];
+    final ctx = _bubbleKeys[id]?.currentContext;
+    if (ctx != null) {
+      Scrollable.ensureVisible(
+        ctx,
+        alignment: 0.5,
+        duration: const Duration(milliseconds: 250),
+      );
+    }
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _searchOpen = false;
+      _searchQuery = '';
+      _searchController.clear();
+    });
+  }
+
   bool _loading = true;
   bool _sending = false;
 
@@ -379,6 +505,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
     _statusPollTimer?.cancel();
     _textController.dispose();
+    _searchController.dispose();
     _scrollController.dispose();
     _recordingTimer?.cancel();
     _voiceRecorder.dispose();
@@ -1439,30 +1566,82 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                     ? '@${conversation.otherUsername}'
                     : null)
               : '${conversation.groupMemberCount ?? 0} member${conversation.groupMemberCount == 1 ? '' : 's'}');
+    final searchMatches = _computeSearchMatches(
+      _searchQuery.trim().toLowerCase(),
+    );
     return Scaffold(
       appBar: AppBar(
-        title: InkWell(
-          onTap: isGroup
-              ? () => context.push('/groups/${conversation.groupId}/info')
-              : null,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(conversation?.displayTitle() ?? 'Chat'),
-              if (subtitle != null)
-                Text(
-                  subtitle,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.normal,
-                    color: Colors.white70,
+        title: _searchOpen
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'Search in this chat',
+                  hintStyle: TextStyle(color: Colors.white70),
+                  border: InputBorder.none,
+                ),
+                onChanged: _onSearchChanged,
+              )
+            : InkWell(
+                onTap: isGroup
+                    ? () => context.push('/groups/${conversation.groupId}/info')
+                    : null,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(conversation?.displayTitle() ?? 'Chat'),
+                    if (subtitle != null)
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.normal,
+                          color: Colors.white70,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+        actions: [
+          if (_searchOpen) ...[
+            if (_searchQuery.trim().isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Center(
+                  child: Text(
+                    '${searchMatches.isNotEmpty ? _searchIndex + 1 : 0} / ${searchMatches.length}',
+                    style: const TextStyle(fontSize: 12, color: Colors.white70),
                   ),
                 ),
-            ],
-          ),
-        ),
-        actions: [
+              ),
+            IconButton(
+              icon: const Icon(Icons.keyboard_arrow_up),
+              tooltip: 'Previous match (older)',
+              onPressed: searchMatches.isEmpty
+                  ? null
+                  : () => _moveSearch(-1, searchMatches),
+            ),
+            IconButton(
+              icon: const Icon(Icons.keyboard_arrow_down),
+              tooltip: 'Next match (newer)',
+              onPressed: searchMatches.isEmpty
+                  ? null
+                  : () => _moveSearch(1, searchMatches),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close),
+              tooltip: 'Close search',
+              onPressed: _closeSearch,
+            ),
+          ] else ...[
+            IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: 'Search in this chat',
+              onPressed: () => setState(() => _searchOpen = true),
+            ),
+          ],
           if (conversation != null)
             PopupMenuButton<String>(
               tooltip: 'Disappearing messages',
@@ -1542,6 +1721,12 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         .toList(growable: false);
     final reactionState = _buildReactionState(_messages, _myUserId);
 
+    final normalizedSearchQuery = _searchQuery.trim().toLowerCase();
+    final searchMatches = _computeSearchMatches(normalizedSearchQuery);
+    final activeSearchMatchId = _searchOpen && searchMatches.isNotEmpty
+        ? searchMatches[_searchIndex.clamp(0, searchMatches.length - 1)]
+        : null;
+
     // Typing indicator renders as a trailing list item, not a widget bolted on
     // outside the ListView — that keeps it scrolling into view with everything
     // else instead of needing its own separate layout/visibility logic.
@@ -1566,6 +1751,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                     }
                     final message = visibleMessages[index];
                     return _MessageBubble(
+                      key: _keyFor(message.id),
                       message: message,
                       onDownload: _downloadAttachment,
                       status: _status[message.id],
@@ -1578,6 +1764,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                           : () => _showMessageActions(message),
                       reactions: reactionState[message.id] ?? const [],
                       onReactTap: (emoji) => _react(message, emoji),
+                      searchQuery: _searchOpen ? normalizedSearchQuery : '',
+                      isActiveSearchMatch: message.id == activeSearchMatchId,
                     );
                   },
                 ),
@@ -1946,6 +2134,7 @@ class _ReplyPreview extends StatelessWidget {
 
 class _MessageBubble extends StatelessWidget {
   const _MessageBubble({
+    super.key,
     required this.message,
     required this.onDownload,
     this.status,
@@ -1954,6 +2143,8 @@ class _MessageBubble extends StatelessWidget {
     this.onLongPress,
     this.reactions = const [],
     this.onReactTap,
+    this.searchQuery = '',
+    this.isActiveSearchMatch = false,
   });
   final CachedMessage message;
   final void Function(AttachmentDescriptor) onDownload;
@@ -1977,6 +2168,12 @@ class _MessageBubble extends StatelessWidget {
   /// not recomputed per bubble.
   final List<ReactionSummary> reactions;
   final void Function(String emoji)? onReactTap;
+
+  /// Lowercased search text — empty when search is closed. Highlights matches
+  /// inside the bubble's own text and, when [isActiveSearchMatch], draws the
+  /// same yellow ring web's message-thread.tsx uses for the current match.
+  final String searchQuery;
+  final bool isActiveSearchMatch;
 
   @override
   Widget build(BuildContext context) {
@@ -2063,6 +2260,9 @@ class _MessageBubble extends StatelessWidget {
                   bottomLeft: Radius.circular(message.isOwn ? 8 : 0),
                   bottomRight: Radius.circular(message.isOwn ? 0 : 8),
                 ),
+                border: isActiveSearchMatch
+                    ? Border.all(color: const Color(0xFFFBC02D), width: 2)
+                    : null,
                 boxShadow: const [
                   BoxShadow(
                     color: Color(0x14000000),
@@ -2160,6 +2360,16 @@ class _MessageBubble extends StatelessWidget {
                                 const SizedBox(width: 8),
                                 Icon(Icons.download, color: fgColor, size: 18),
                               ],
+                            ),
+                          )
+                        : searchQuery.isNotEmpty
+                        ? Text.rich(
+                            TextSpan(
+                              children: _highlightSpans(
+                                message.text,
+                                searchQuery,
+                                TextStyle(color: fgColor),
+                              ),
                             ),
                           )
                         : Text(message.text, style: TextStyle(color: fgColor)),
