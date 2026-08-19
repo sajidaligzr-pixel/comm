@@ -15,5 +15,20 @@ export default defineConfig({
     // randomly-suffixed usernames/emails).
     fileParallelism: true,
     sequence: { concurrent: false },
+    // Found live: CI (GitHub Actions' ubuntu-latest runners) intermittently failed
+    // `prisma.user.create()` calls in exactly one or two test files per run with
+    // "Environment variable not found: DATABASE_URL" — Prisma reading an empty
+    // `process.env` in that file's specific forked worker — while every other file
+    // in the same run (same job, same `env:` block) read it fine. Every local
+    // repro (including against a from-scratch database, matching CI's fresh-DB
+    // setup exactly) passed 100% of the time, which points at vitest's default
+    // `pool: 'forks'` spawning one child process per file and, under CI's more
+    // constrained/containerized runner, occasionally not fully propagating
+    // `process.env` to one of several concurrently-forked children — not
+    // anything about this app's code or tests. Pinning to a single fork removes
+    // the multi-process env-propagation variable entirely; this suite runs in a
+    // few seconds either way, so the lost cross-file parallelism costs nothing
+    // worth trading correctness for.
+    poolOptions: { forks: { singleFork: true } },
   },
 });
