@@ -46,6 +46,7 @@ import { useGroupSession } from '@/components/group/group-session-provider';
 import { Avatar } from './avatar';
 import { EmojiPicker } from './emoji-picker';
 import { ForwardDialog } from './forward-dialog';
+import { MessageInfoDialog } from './message-info-dialog';
 import { VoiceBubble, ImageBubble, FileBubble } from './bubbles';
 import {
   IconSend,
@@ -60,6 +61,7 @@ import {
   IconChevronDown,
   IconX,
   IconStar,
+  IconCheckDouble,
 } from '../icons';
 
 const MAX_RECORDING_SECONDS = 120;
@@ -121,6 +123,7 @@ export function GroupMessageThread({
   const [searchQuery, setSearchQuery] = useState('');
   const [searchIndex, setSearchIndex] = useState(0);
   const [starredIds, setStarredIds] = useState<Set<string>>(new Set());
+  const [infoMessageId, setInfoMessageId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -867,6 +870,18 @@ export function GroupMessageThread({
                             {m.isOwn && (
                               <button
                                 type="button"
+                                onClick={() => {
+                                  setInfoMessageId(m.id);
+                                  setActiveMenuId(null);
+                                }}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+                              >
+                                <IconCheckDouble className="h-4 w-4" /> Info
+                              </button>
+                            )}
+                            {m.isOwn && (
+                              <button
+                                type="button"
                                 onClick={() => void handleDelete(m.id)}
                                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-danger hover:bg-muted"
                               >
@@ -982,6 +997,14 @@ export function GroupMessageThread({
           }}
         />
       )}
+
+      <MessageInfoDialog
+        open={infoMessageId !== null}
+        onClose={() => setInfoMessageId(null)}
+        messageId={infoMessageId}
+        members={members}
+        currentUserId={currentUserId}
+      />
     </div>
   );
 }

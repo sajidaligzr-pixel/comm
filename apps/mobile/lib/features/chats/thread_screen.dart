@@ -43,6 +43,7 @@ import '../auth/auth_state.dart';
 import '../calls/call_controller.dart';
 import '../groups/group_session_controller.dart';
 import 'forward_dialog.dart' show showForwardSheet;
+import 'message_info_sheet.dart' show showMessageInfoSheet;
 
 const _uuid = Uuid();
 
@@ -1169,6 +1170,17 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                 _toggleStar(message);
               },
             ),
+            if (_conversation?.type == 'group' &&
+                message.isOwn &&
+                _conversation?.groupId != null)
+              ListTile(
+                leading: const Icon(Icons.done_all),
+                title: const Text('Info'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _openMessageInfoSheet(message);
+                },
+              ),
             if (message.isOwn)
               ListTile(
                 leading: Icon(
@@ -1197,6 +1209,19 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// second statement, but this screen's own `context` stays valid underneath.
   void _openForwardSheet(CachedMessage message) {
     showForwardSheet(context, currentUserId: _myUserId, message: message);
+  }
+
+  /// Same context-lifetime reasoning as `_openForwardSheet` above.
+  void _openMessageInfoSheet(CachedMessage message) {
+    final groupId = _conversation?.groupId;
+    if (groupId == null) return;
+    showMessageInfoSheet(
+      context,
+      ref,
+      groupId: groupId,
+      messageId: message.id,
+      currentUserId: _myUserId,
+    );
   }
 
   Future<void> _confirmAndDelete(CachedMessage message) async {

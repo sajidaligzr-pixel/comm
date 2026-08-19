@@ -382,6 +382,32 @@ class StarredMessageDto {
       );
 }
 
+/// `GET /api/messages/:id/receipts` — "seen by" for a GROUP message, mirrors
+/// apps/web's identical DTO (packages/types/src/messages.ts). One entry per
+/// member who has at least one `MessageRecipient` row for this message.
+class MessageReceiptDto {
+  final String userId;
+  final String username;
+  final String displayName;
+  final String? deliveredAt;
+  final String? readAt;
+  const MessageReceiptDto({
+    required this.userId,
+    required this.username,
+    required this.displayName,
+    required this.deliveredAt,
+    required this.readAt,
+  });
+  static MessageReceiptDto fromJson(Map<String, dynamic> json) =>
+      MessageReceiptDto(
+        userId: json['userId'] as String,
+        username: json['username'] as String,
+        displayName: json['displayName'] as String,
+        deliveredAt: json['deliveredAt'] as String?,
+        readAt: json['readAt'] as String?,
+      );
+}
+
 class MessageAttachmentRef {
   final String objectKey;
   final int encryptedSizeBytes;

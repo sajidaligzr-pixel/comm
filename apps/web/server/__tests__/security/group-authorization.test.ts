@@ -3,6 +3,7 @@ import { prisma } from '@comm/database';
 import { createGroup, getGroupMemberDeviceTargets } from '../../modules/groups/service';
 import { getAllOtherMembersActiveDeviceIds } from '../../modules/conversations/service';
 import { registerDevice } from '../../modules/devices/service';
+import { sendMessage, acknowledgeDelivered, markConversationRead, getMessageReceipts } from '../../modules/messages/service';
 import { createActiveUser, deleteTestUser, fakeDeviceRegistration } from '../helpers';
 
 /**
@@ -111,5 +112,69 @@ describe('group authorization', () => {
     const outsider = await makeMember('Outsider device');
 
     await expect(getAllOtherMembersActiveDeviceIds(group.conversationId, outsider.userId)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  /**
+   * "Seen by" (docs/13-roadmap.md) — a pure read path over `MessageRecipient`
+   * rows the group-chat pass already writes on every send/ack; this is the
+   * first test that actually exercises it end to end: one member acks
+   * delivered+read, another does neither, and `getMessageReceipts` must report
+   * each correctly, scoped to real group membership.
+   */
+  it('"seen by" resolves delivered/read per group member from real MessageRecipient rows', async () => {
+    const { admin, others, group } = await setupGroup(3);
+    const [reader, silent] = others;
+
+    const messageId = crypto.randomUUID();
+    await sendMessage(
+      { userId: admin.userId, deviceId: admin.deviceId },
+      group.conversationId,
+      {
+        messageId,
+        envelopeType: 'megolm_group',
+        envelope: { header: 'aGVhZGVy', ciphertext: 'Y2lwaGVydGV4dA==' },
+        x3dhInit: null,
+        contentTypeHint: 'text',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+
+    await acknowledgeDelivered(reader!.deviceId, messageId);
+    await markConversationRead(reader!.userId, group.conversationId, messageId);
+
+    const receipts = await getMessageReceipts(admin.userId, messageId);
+    const byUser = new Map(receipts.map((r) => [r.userId, r]));
+    expect(byUser.get(reader!.userId)?.readAt).toBeTruthy();
+    expect(byUser.get(reader!.userId)?.deliveredAt).toBeTruthy();
+    expect(byUser.get(silent!.userId)?.readAt).toBeFalsy();
+    expect(byUser.get(silent!.userId)?.deliveredAt).toBeFalsy();
+
+    const outsider = await makeMember('Outsider device');
+    await expect(getMessageReceipts(outsider.userId, messageId)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('"seen by" refuses a 1:1 message — WhatsApp only ever shows this for groups', async () => {
+    const admin = await makeMember('Solo device 1');
+    const other = await makeMember('Solo device 2');
+    const conversation = await prisma.conversation.create({
+      data: { type: 'direct', members: { create: [{ userId: admin.userId }, { userId: other.userId }] } },
+    });
+
+    const messageId = crypto.randomUUID();
+    await sendMessage(
+      { userId: admin.userId, deviceId: admin.deviceId },
+      conversation.id,
+      {
+        messageId,
+        envelopeType: 'x3dh_ratchet_1to1',
+        recipients: [{ deviceId: other.deviceId, envelope: { header: 'aGVhZGVy', ciphertext: 'Y2lwaGVydGV4dA==' }, x3dhInit: null }],
+        contentTypeHint: 'text',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+
+    await expect(getMessageReceipts(admin.userId, messageId)).rejects.toMatchObject({ code: 'VALIDATION_FAILED' });
   });
 });

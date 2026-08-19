@@ -59,4 +59,15 @@ class MessagesApi {
           .toList(),
     );
   }
+
+  /// "Seen by" — group messages only, see `MessageReceiptDto`'s own docstring.
+  Future<List<MessageReceiptDto>> receipts(String messageId) {
+    return _client.request(
+      '/api/messages/$messageId/receipts',
+      method: 'GET',
+      parse: (data) => (data as List)
+          .map((e) => MessageReceiptDto.fromJson(e as Map<String, dynamic>))
+          .toList(),
+    );
+  }
 }

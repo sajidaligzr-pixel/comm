@@ -1,5 +1,5 @@
 import { prisma, Prisma } from '@comm/database';
-import { AppError, type SendMessageRequest, type MessageDto, type StarredMessageDto } from '@comm/types';
+import { AppError, type SendMessageRequest, type MessageDto, type StarredMessageDto, type MessageReceiptDto } from '@comm/types';
 import {
   requireConversationMembership,
   getGroupMemberPrimaryDevices,
@@ -404,6 +404,60 @@ export async function starMessage(callerUserId: string, messageId: string): Prom
 
 export async function unstarMessage(callerUserId: string, messageId: string): Promise<void> {
   await prisma.starredMessage.deleteMany({ where: { userId: callerUserId, messageId } });
+}
+
+/**
+ * "Seen by" (docs/13-roadmap.md) — group messages only, see `MessageReceiptDto`'s
+ * own docstring for why: a 1:1 conversation already shows this as a single tick
+ * (sent), double tick (delivered), or blue double tick (read), never a
+ * per-person breakdown. Data was already being recorded for every group member
+ * (`sendMessage`'s `MessageRecipient` rows, one per member's primary device) —
+ * this is purely a new read path over it, no send-path changes at all.
+ */
+export async function getMessageReceipts(callerUserId: string, messageId: string): Promise<MessageReceiptDto[]> {
+  const message = await prisma.message.findUnique({
+    where: { id: messageId },
+    include: { conversation: true },
+  });
+  if (!message) throw new AppError('NOT_FOUND', 'Message not found.');
+  await requireConversationMembership(callerUserId, message.conversationId);
+  if (message.conversation.type !== 'group') {
+    throw new AppError('VALIDATION_FAILED', '"Seen by" is only available for group messages.');
+  }
+
+  const recipients = await prisma.messageRecipient.findMany({
+    where: { messageId },
+    include: { recipientDevice: { include: { user: true } } },
+  });
+
+  // Collapse to one entry per USER, not per device — a member with more than one
+  // device (uncommon for groups today, since sendMessage's group branch still
+  // targets one primary device per member) takes the best state across whichever
+  // rows exist: read beats delivered beats neither, and the later timestamp wins
+  // when more than one row has the same state.
+  const byUser = new Map<string, { userId: string; username: string; displayName: string; deliveredAt: Date | null; readAt: Date | null }>();
+  for (const r of recipients) {
+    const u = r.recipientDevice.user;
+    const existing = byUser.get(u.id);
+    byUser.set(u.id, {
+      userId: u.id,
+      username: u.username,
+      displayName: u.displayName,
+      deliveredAt: laterOf(existing?.deliveredAt ?? null, r.deliveredAt),
+      readAt: laterOf(existing?.readAt ?? null, r.readAt),
+    });
+  }
+  return [...byUser.values()].map((v) => ({
+    ...v,
+    deliveredAt: v.deliveredAt?.toISOString() ?? null,
+    readAt: v.readAt?.toISOString() ?? null,
+  }));
+}
+
+function laterOf(a: Date | null, b: Date | null): Date | null {
+  if (!a) return b;
+  if (!b) return a;
+  return a > b ? a : b;
 }
 
 export async function listStarredMessages(callerUserId: string): Promise<StarredMessageDto[]> {

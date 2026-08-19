@@ -257,3 +257,22 @@ export const StarredMessageDto = z.object({
   starredAt: z.string().datetime(),
 });
 export type StarredMessageDto = z.infer<typeof StarredMessageDto>;
+
+/**
+ * `GET /api/messages/:id/receipts` — "seen by" for a GROUP message (1:1 already
+ * shows this as a single/double/blue tick, never a per-person breakdown, same as
+ * WhatsApp). One entry per member who has at least one `MessageRecipient` row for
+ * this message (server/modules/messages/service.ts's `getMessageReceipts` — a
+ * member with multiple devices is collapsed to their best state across all of
+ * them: read beats delivered beats neither). A member absent from this list never
+ * had a reachable device when the message was sent — same "no catch-up path"
+ * limitation `sendMessage`'s own docstring already states.
+ */
+export const MessageReceiptDto = z.object({
+  userId: z.string().uuid(),
+  username: z.string(),
+  displayName: z.string(),
+  deliveredAt: z.string().datetime().nullable(),
+  readAt: z.string().datetime().nullable(),
+});
+export type MessageReceiptDto = z.infer<typeof MessageReceiptDto>;
