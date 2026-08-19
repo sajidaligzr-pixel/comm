@@ -177,6 +177,22 @@ function GroupInfoBody({
     }
   }
 
+  async function setMemberRole(member: GroupMemberDto, role: 'admin' | 'member') {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const updated = await apiFetch<GroupSummary>(`/api/groups/${group.id}/members/${member.userId}`, {
+        method: 'PATCH',
+        body: { role },
+      });
+      onGroupChange(updated);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change that member’s role.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex flex-col items-center gap-2 text-center">
@@ -280,7 +296,9 @@ function GroupInfoBody({
           </button>
         </div>
         <div className="space-y-0.5">
-          {group.members.map((m) => (
+          {(() => {
+            const adminCount = group.members.filter((m) => m.role === 'admin').length;
+            return group.members.map((m) => (
             <div key={m.userId} className="flex items-center gap-3 rounded-lg px-2 py-1.5 hover:bg-muted">
               <Avatar name={m.displayName} size="sm" />
               <div className="min-w-0 flex-1">
@@ -290,6 +308,29 @@ function GroupInfoBody({
                   {m.role === 'admin' ? ' · Admin' : ''}
                 </p>
               </div>
+              {isAdmin && m.role === 'member' && (
+                <button
+                  type="button"
+                  onClick={() => void setMemberRole(m, 'admin')}
+                  disabled={busy}
+                  className="flex-shrink-0 text-xs font-medium text-primary hover:underline disabled:opacity-50"
+                >
+                  Make admin
+                </button>
+              )}
+              {/* Hidden, not just disabled, for the group's last remaining admin —
+                  demoting them would leave zero admins, which setGroupMemberRole
+                  itself rejects; no reason to offer a button that always errors. */}
+              {isAdmin && m.role === 'admin' && adminCount > 1 && (
+                <button
+                  type="button"
+                  onClick={() => void setMemberRole(m, 'member')}
+                  disabled={busy}
+                  className="flex-shrink-0 text-xs font-medium text-muted-foreground hover:underline disabled:opacity-50"
+                >
+                  Remove admin
+                </button>
+              )}
               {isAdmin && m.role !== 'admin' && (
                 <button
                   type="button"
@@ -303,7 +344,8 @@ function GroupInfoBody({
                 </button>
               )}
             </div>
-          ))}
+            ));
+          })()}
         </div>
       </div>
     </div>

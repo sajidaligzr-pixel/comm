@@ -10,17 +10,18 @@ import {
   createGroupAvatarUploadUrl,
   confirmGroupAvatar,
   removeGroupAvatar,
+  setGroupMemberRole,
 } from '../../modules/groups/service';
 import { createActiveUser, deleteTestUser, fakeDeviceRegistration } from '../helpers';
 import { registerDevice } from '../../modules/devices/service';
 
 /**
- * Coverage for the two group-settings features added in this pass (docs/13-roadmap.md
- * "quick wins" batch) — both are new admin-gated authorization surfaces, the same
+ * Coverage for the three group-settings features added in this pass (docs/13-roadmap.md
+ * "quick wins" batch) — all new admin-gated authorization surfaces, the same
  * class of thing group-authorization.test.ts already covers for the pre-existing
  * group routes, so this mirrors that file's exact fixture shape.
  */
-describe('group invite links and avatar', () => {
+describe('group invite links, avatar, and roles', () => {
   const createdUserIds: string[] = [];
   const createdGroupIds: string[] = [];
 
@@ -146,5 +147,54 @@ describe('group invite links and avatar', () => {
 
     const withoutAvatar = await removeGroupAvatar(group.id, admin.userId);
     expect(withoutAvatar.avatarUrl).toBeNull();
+  });
+
+  it('rejects a non-admin from promoting or demoting anyone', async () => {
+    const { member, group } = await setupGroup();
+
+    await expect(setGroupMemberRole(group.id, member.userId, member.userId, 'admin')).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  it('an admin can promote a member, and that promoted member can then act as an admin too', async () => {
+    const { admin, member, group } = await setupGroup();
+
+    const promoted = await setGroupMemberRole(group.id, admin.userId, member.userId, 'admin');
+    expect(promoted.members.find((m) => m.userId === member.userId)?.role).toBe('admin');
+
+    // The freshly-promoted member now genuinely holds admin authority server-side,
+    // not just in the response shape — re-derived from the DB on every call
+    // (requireGroupAdmin), same as every other admin-gated action in this file.
+    const demoted = await setGroupMemberRole(group.id, member.userId, admin.userId, 'member');
+    expect(demoted.members.find((m) => m.userId === admin.userId)?.role).toBe('member');
+  });
+
+  it('refuses to demote the group\'s last remaining admin', async () => {
+    const { admin, group } = await setupGroup();
+
+    await expect(setGroupMemberRole(group.id, admin.userId, admin.userId, 'member')).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+    });
+  });
+
+  it('demoting the last admin is fine once a second admin exists', async () => {
+    const { admin, member, group } = await setupGroup();
+    await setGroupMemberRole(group.id, admin.userId, member.userId, 'admin');
+
+    const result = await setGroupMemberRole(group.id, admin.userId, admin.userId, 'member');
+    expect(result.members.find((m) => m.userId === admin.userId)?.role).toBe('member');
+    expect(result.members.find((m) => m.userId === member.userId)?.role).toBe('admin');
+  });
+
+  it('setting a role to what it already is is a harmless no-op', async () => {
+    const { admin, group } = await setupGroup();
+    const result = await setGroupMemberRole(group.id, admin.userId, admin.userId, 'admin');
+    expect(result.members.find((m) => m.userId === admin.userId)?.role).toBe('admin');
+  });
+
+  it('rejects setting a role for someone not actually in the group', async () => {
+    const { admin, group } = await setupGroup();
+    const outsider = await makeMember('Outsider device');
+
+    await expect(setGroupMemberRole(group.id, admin.userId, outsider.userId, 'admin')).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });

@@ -43,6 +43,19 @@ class GroupsApi {
     return _client.requestVoid('/api/groups/$groupId/members/$userId', method: 'DELETE');
   }
 
+  /// Promote to admin or demote to member — same URL `removeMember` uses, a
+  /// different verb (mirrors the web route's own PATCH-vs-DELETE split on
+  /// `/api/groups/:id/members/:userId`). Demoting the group's last remaining admin
+  /// is rejected server-side (setGroupMemberRole's own docstring).
+  Future<GroupSummary> setMemberRole(String groupId, String userId, String role) {
+    return _client.request(
+      '/api/groups/$groupId/members/$userId',
+      method: 'PATCH',
+      body: {'role': role},
+      parse: (data) => GroupSummary.fromJson(data as Map<String, dynamic>),
+    );
+  }
+
   /// Mints an upload target, PUTs/POSTs `imageBytes` to it, then confirms — see
   /// server/modules/groups/service.ts's "Group avatar" section for why this is a
   /// separate, simpler pipeline than the encrypted message-attachment one

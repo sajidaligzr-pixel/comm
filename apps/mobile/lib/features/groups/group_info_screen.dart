@@ -183,6 +183,17 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
     }
   }
 
+  Future<void> _setMemberRole(GroupMemberDto member, String role) async {
+    try {
+      final updated = await ref
+          .read(groupsApiProvider)
+          .setMemberRole(widget.groupId, member.userId, role);
+      if (mounted) setState(() => _group = updated);
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final group = _group;
@@ -291,16 +302,41 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
                     ],
                   ),
                 ),
-                ...group.members.map(
-                  (m) => ListTile(
-                    leading: const CircleAvatar(child: Icon(Icons.person)),
-                    title: Text(m.displayName),
-                    subtitle: Text('@${m.username}${m.role == 'admin' ? ' · Admin' : ''}'),
-                    trailing: _isAdmin && m.role != 'admin'
-                        ? IconButton(icon: const Icon(Icons.remove_circle_outline), onPressed: () => _removeMember(m))
-                        : null,
-                  ),
-                ),
+                ...(() {
+                  final adminCount = group.members.where((m) => m.role == 'admin').length;
+                  return group.members.map(
+                    (m) => ListTile(
+                      leading: const CircleAvatar(child: Icon(Icons.person)),
+                      title: Text(m.displayName),
+                      subtitle: Text('@${m.username}${m.role == 'admin' ? ' · Admin' : ''}'),
+                      trailing: !_isAdmin
+                          ? null
+                          : Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (m.role == 'member')
+                                  TextButton(
+                                    onPressed: () => _setMemberRole(m, 'admin'),
+                                    child: const Text('Make admin'),
+                                  ),
+                                // Hidden, not just disabled, for the group's last
+                                // remaining admin — see setMemberRole's own
+                                // docstring on why demoting them is rejected.
+                                if (m.role == 'admin' && adminCount > 1)
+                                  TextButton(
+                                    onPressed: () => _setMemberRole(m, 'member'),
+                                    child: const Text('Remove admin'),
+                                  ),
+                                if (m.role != 'admin')
+                                  IconButton(
+                                    icon: const Icon(Icons.remove_circle_outline),
+                                    onPressed: () => _removeMember(m),
+                                  ),
+                              ],
+                            ),
+                    ),
+                  );
+                })(),
               ],
             )
           : (_loading

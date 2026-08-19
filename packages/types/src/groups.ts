@@ -4,10 +4,8 @@ import { MessageEnvelopeUpload, X3dhInitPayload } from './messages';
 /**
  * `/groups` — docs/13-roadmap.md's group chat pass (real Megolm-style group ratchet,
  * docs/05-crypto-architecture.md#group-encryption), ahead of the original Phase 5
- * slot. Group avatars and invite links landed in a later pass (see `GroupSummary`'s
- * `avatarObjectKey`/`avatarUrl` and `GroupInviteLinkDto` below). Still trimmed vs.
- * the original design doc: no promote/demote UI yet (the `role` field and its
- * enforcement exist; no route changes it after creation).
+ * slot. Group avatars, invite links, and promote/demote (`SetGroupMemberRoleRequest`
+ * below) all landed in later passes — see each type's own docstring.
  */
 
 export const GroupRole = z.enum(['member', 'admin']);
@@ -103,6 +101,14 @@ export const AddGroupMemberRequest = z.object({
   username: z.string(),
 });
 export type AddGroupMemberRequest = z.infer<typeof AddGroupMemberRequest>;
+
+/** `PATCH /api/groups/:id/members/:userId` — promote to admin or demote to
+ * member (same URL `DELETE` already uses to remove a member, different verb).
+ * Demoting the group's last remaining admin is rejected server-side
+ * (`setGroupMemberRole`'s own docstring) — a group can never end up with zero
+ * admins through this route. */
+export const SetGroupMemberRoleRequest = z.object({ role: GroupRole });
+export type SetGroupMemberRoleRequest = z.infer<typeof SetGroupMemberRoleRequest>;
 
 /**
  * Group session key distribution (docs/13-roadmap.md's design note — docs/05 says key

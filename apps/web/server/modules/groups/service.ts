@@ -4,6 +4,7 @@ import {
   AppError,
   type GroupSummary,
   type GroupMemberDto,
+  type GroupRole,
   type CreateUploadUrlResponse,
   type GroupInviteLinkDto,
   type GroupInvitePeekDto,
@@ -217,6 +218,39 @@ export async function addGroupMember(groupId: string, callerUserId: string, user
     });
   });
 
+  return toGroupSummary(groupId, callerUserId);
+}
+
+/**
+ * Promote to admin or demote to member — no crypto/epoch implications either way
+ * (unlike removal), since `role` only gates server-side authorization checks
+ * (`requireGroupAdmin`, `updateGroup`, etc.), never anything the Megolm session
+ * cares about. A no-op (not an error) if the target already holds that role.
+ * Demoting the group's LAST admin is rejected — this route can never leave a group
+ * with zero admins, mirroring `removeGroupMember`'s "use leave group instead" rule
+ * for the analogous "don't let the caller strand the group" concern.
+ */
+export async function setGroupMemberRole(
+  groupId: string,
+  callerUserId: string,
+  targetUserId: string,
+  role: GroupRole,
+): Promise<GroupSummary> {
+  await requireGroupAdmin(groupId, callerUserId);
+  const membership = await prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId: targetUserId } } });
+  if (!membership || membership.removedAt) {
+    throw new AppError('NOT_FOUND', 'That user is not in the group.');
+  }
+  if (membership.role === role) {
+    return toGroupSummary(groupId, callerUserId);
+  }
+  if (role === 'member') {
+    const adminCount = await prisma.groupMember.count({ where: { groupId, role: 'admin', removedAt: null } });
+    if (adminCount <= 1) {
+      throw new AppError('VALIDATION_FAILED', 'A group needs at least one admin — promote someone else first.');
+    }
+  }
+  await prisma.groupMember.update({ where: { groupId_userId: { groupId, userId: targetUserId } }, data: { role } });
   return toGroupSummary(groupId, callerUserId);
 }
 
