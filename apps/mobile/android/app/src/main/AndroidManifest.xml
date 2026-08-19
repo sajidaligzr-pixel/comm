@@ -23,6 +23,11 @@
          local_notifications.dart's initLocalNotifications; this declaration alone
          only states intent, same as RECORD_AUDIO above. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- In-app update prompt (features/update/) — this app is sideloaded, not
+         Play-Store-distributed, so installing a newer APK the user opted into via
+         the update banner needs this explicitly; without it, Android silently
+         refuses the install intent on API 26+ regardless of what the user taps. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
         android:label="Comm"
         android:name="${applicationName}"
@@ -55,6 +60,26 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- In-app update prompt (features/update/apk_installer.dart) — Android's
+             package installer needs a content:// URI, not a bare file:// path (blocked
+             by FileUriExposedException on API 24+); this FileProvider is what turns
+             the downloaded APK (written to this app's own private cache dir, so no
+             READ/MANAGE_EXTERNAL_STORAGE permission is needed at all) into one. The
+             authorities value and file_paths.xml's <cache-path> together determine
+             the exact content:// URI apk_installer.dart constructs by hand — see that
+             file's own comment for why it's built manually rather than through a
+             plugin (no cross-platform-safe way to call FileProvider.getUriForFile()
+             from Dart directly without writing native platform-channel code for
+             something this small). -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

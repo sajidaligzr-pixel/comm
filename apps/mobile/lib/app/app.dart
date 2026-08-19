@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../features/calls/call_overlay.dart';
 import '../features/calls/group_call_overlay.dart';
+import '../features/update/update_prompt.dart';
 import 'providers.dart' show realtimeClientProvider;
 import 'router.dart';
 
@@ -149,6 +150,11 @@ class _CommAppState extends ConsumerState<CommApp> with WidgetsBindingObserver {
           if (child != null) child,
           const Positioned.fill(child: CallOverlay()),
           const Positioned.fill(child: GroupCallOverlay()),
+          // In-app update prompt (features/update/) — last in the Stack (painted on
+          // top) so it can't be hidden behind a call overlay; the two are extremely
+          // unlikely to coincide in practice (a call in progress vs. app-launch
+          // timing), and there's no coordination between them beyond paint order.
+          const Positioned.fill(child: UpdatePromptOverlay()),
         ],
       ),
     );

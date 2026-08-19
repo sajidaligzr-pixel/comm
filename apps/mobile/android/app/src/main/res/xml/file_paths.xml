@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backs the FileProvider declared in AndroidManifest.xml — see that entry's own
+     comment. `cache-path path="."` maps to this app's private cache dir
+     (Context.getCacheDir(), the same directory path_provider's getTemporaryDirectory()
+     returns — apk_installer.dart writes the downloaded APK there), so a `name="app_cache"`
+     tag turns into the URI segment apk_installer.dart's hand-built content:// URI uses. -->
+<paths>
+    <cache-path name="app_cache" path="."/>
+</paths>

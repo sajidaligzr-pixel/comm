@@ -38,3 +38,12 @@ packages/database/generated/
 
 comm-5d11c-firebase-adminsdk-fbsvc-e0a9fd2487.json
 google-services.json
+
+# In-app mobile update pass (docs/13-roadmap.md) — release APKs are uploaded
+# directly to the server (scp, outside the normal git-push deploy flow — see
+# apps/web/public/app-version.json's own docstring) rather than committed, the
+# same "don't put large binaries in git history" reasoning already applied to
+# every other asset in this repo. deploy.sh's `git reset --hard` only ever
+# touches TRACKED files, so an ignored file placed here survives every future
+# deploy untouched.
+/apps/web/public/downloads/

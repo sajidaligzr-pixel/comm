@@ -1,7 +1,7 @@
 name: comm_mobile
 description: "Comm — native Flutter client for the existing Comm backend (apps/web, apps/worker). See apps/mobile/README.md for architecture and how this maps to the TypeScript client it replaces."
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0+2
 
 environment:
   sdk: ^3.10.7
@@ -91,6 +91,18 @@ dependencies:
   audioplayers: ^6.7.1
   firebase_core: ^4.13.0
   firebase_messaging: ^16.5.0
+
+  # --- In-app update prompt (features/update/) --------------------------------
+  # This app is sideloaded (not distributed through Play Store — docs/13-roadmap.md),
+  # so there is no store-managed auto-update at all; these two are what make a
+  # manual, opt-in "Update available" flow possible. package_info_plus reads this
+  # install's own version/build number to compare against the server's advertised
+  # latest (GET /app-version.json); android_intent_plus fires the native package
+  # installer once a new APK has been downloaded (a FileProvider-backed content://
+  # URI — see AndroidManifest.xml's own comment — not a whole extra plugin, since
+  # nothing here needs anything beyond "build one Intent and launch it").
+  package_info_plus: ^8.1.0
+  android_intent_plus: ^6.1.0
 
 dev_dependencies:
   flutter_test:

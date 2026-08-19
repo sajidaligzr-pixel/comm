@@ -1,0 +1,170 @@
+/// The actual "Update available" UI — a bottom-anchored card over a dimming
+/// scrim, not a real `showModalBottomSheet`/route: this widget is mounted once
+/// at the app-shell level (app/app.dart, same placement as CallOverlay/
+/// GroupCallOverlay) specifically so an update can be offered no matter which
+/// screen is open, including before the user has ever logged in — and a modal
+/// route needs a `Navigator` above the calling context, which `MaterialApp.router`'s
+/// own `builder` callback isn't guaranteed to have yet. Rendering the "modal" look
+/// directly in this Stack (mirrors GroupCallOverlay's own `_InviteBanner`, the
+/// identical problem solved the identical way) sidesteps that entirely.
+library;
+
+import 'package:flutter/material.dart';
+
+import 'update_models.dart';
+import 'update_service.dart';
+import '../../storage/prefs.dart';
+
+enum _Phase { hidden, available, downloading, error }
+
+class UpdatePromptOverlay extends StatefulWidget {
+  const UpdatePromptOverlay({super.key});
+
+  @override
+  State<UpdatePromptOverlay> createState() => _UpdatePromptOverlayState();
+}
+
+class _UpdatePromptOverlayState extends State<UpdatePromptOverlay> {
+  _Phase _phase = _Phase.hidden;
+  AppVersionInfo? _info;
+  double _progress = 0;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    // One check per cold start — not on every resume/reconnect the way call
+    // catch-up is, since this is genuinely a low-frequency thing (a new build
+    // isn't cut more than a few times a week at most) and re-checking constantly
+    // would just be wasted requests for the same answer.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _check());
+  }
+
+  Future<void> _check() async {
+    final result = await checkForUpdate();
+    if (!mounted || result == null) return;
+    setState(() {
+      _info = result.info;
+      _phase = _Phase.available;
+    });
+  }
+
+  Future<void> _dismiss() async {
+    final info = _info;
+    if (info != null) {
+      // Suppresses THIS build's nag on future opens — a later, genuinely newer
+      // build still shows (see prefs.dart's own docstring on this exact tradeoff).
+      await setUpdateDismissedBuildNumber(info.buildNumber);
+    }
+    if (mounted) setState(() => _phase = _Phase.hidden);
+  }
+
+  Future<void> _update() async {
+    final info = _info;
+    if (info == null) return;
+    setState(() {
+      _phase = _Phase.downloading;
+      _progress = 0;
+    });
+    try {
+      await downloadAndInstall(info.apkUrl, info.buildNumber, (p) {
+        if (mounted) setState(() => _progress = p);
+      });
+      // Android's package installer takes over the screen from here — nothing
+      // left for this widget to do once the intent has launched successfully;
+      // hide so it doesn't sit stale underneath the installer UI.
+      if (mounted) setState(() => _phase = _Phase.hidden);
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _phase = _Phase.error;
+          _error = 'Could not download the update. Check your connection and try again.';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_phase == _Phase.hidden || _info == null) return const SizedBox.shrink();
+    final info = _info!;
+
+    return Stack(
+      children: [
+        // Scrim — tap outside the card to dismiss, same as a real bottom sheet's
+        // barrier, but a plain GestureDetector rather than ModalBarrier (no
+        // Navigator route backing this, see this file's own module docstring).
+        Positioned.fill(
+          child: GestureDetector(
+            onTap: _phase == _Phase.available ? _dismiss : null,
+            child: Container(color: Colors.black.withValues(alpha: 0.4)),
+          ),
+        ),
+        Align(
+          alignment: Alignment.bottomCenter,
+          child: SafeArea(
+            top: false,
+            child: Material(
+              color: Theme.of(context).colorScheme.surface,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.system_update, size: 22),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Update available',
+                            style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text('Version ${info.versionName}', style: Theme.of(context).textTheme.bodyMedium),
+                    if (info.releaseNotes != null && info.releaseNotes!.trim().isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        info.releaseNotes!,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    if (_phase == _Phase.downloading) ...[
+                      LinearProgressIndicator(value: _progress > 0 ? _progress : null),
+                      const SizedBox(height: 8),
+                      Text(
+                        _progress > 0 ? 'Downloading… ${(_progress * 100).round()}%' : 'Downloading…',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ] else ...[
+                      if (_phase == _Phase.error && _error != null) ...[
+                        Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 13)),
+                        const SizedBox(height: 12),
+                      ],
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(onPressed: _dismiss, child: const Text('Not now')),
+                          const SizedBox(width: 8),
+                          FilledButton(onPressed: _update, child: Text(_phase == _Phase.error ? 'Retry' : 'Update')),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}

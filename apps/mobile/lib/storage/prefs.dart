@@ -50,3 +50,22 @@ Future<DateTime?> getBiometricPromptDismissedAt(String username) async {
   if (raw == null) return null;
   return DateTime.tryParse(raw);
 }
+
+/// Snooze state for the in-app update banner (features/update/update_prompt.dart)
+/// — NOT scoped by username, unlike the two keys above: which build is installed
+/// is a property of this device's copy of the app itself, the same for every
+/// account signed into it, not something a second account should see fresh again.
+/// Tapping "Not now" records the build being offered so the banner doesn't nag on
+/// every single app open — but a genuinely NEWER build later (a higher number
+/// than whatever was last dismissed) still shows, since dismissing isn't the same
+/// as "never tell me about updates again."
+const _updateDismissedBuildKey = 'comm_update_dismissed_build';
+
+Future<void> setUpdateDismissedBuildNumber(int buildNumber) =>
+    _storage.write(key: _updateDismissedBuildKey, value: buildNumber.toString());
+
+Future<int?> getUpdateDismissedBuildNumber() async {
+  final raw = await _storage.read(key: _updateDismissedBuildKey);
+  if (raw == null) return null;
+  return int.tryParse(raw);
+}
