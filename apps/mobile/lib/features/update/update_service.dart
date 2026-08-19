@@ -1,11 +1,12 @@
 /// In-app update check + install (docs/13-roadmap.md) — this app is sideloaded,
 /// not distributed through Play Store, so there's no store-managed auto-update at
 /// all; this is the only way an already-installed copy ever finds out a newer
-/// build exists. Deliberately opt-in, never forced: `checkForUpdate` only ever
-/// reports that something newer exists, `update_prompt.dart`'s banner is the one
-/// place a user actually triggers `downloadAndInstall`, and "Not now" genuinely
-/// suppresses the nag (see prefs.dart's dismissed-build-number docstring) rather
-/// than this silently re-downloading in the background regardless.
+/// build exists. Mandatory, not opt-in: `checkForUpdate` reports any build newer
+/// than the one running, and `update_prompt.dart`'s card blocks the rest of the
+/// app until the user actually taps through `downloadAndInstall` — there is no
+/// "later"/"skip" path (see that file's own docstring for the blocking mechanics).
+/// Still never silent, though — nothing downloads or installs without that tap;
+/// "mandatory" governs whether it can be dismissed, not whether it asks first.
 library;
 
 import 'dart:io';
@@ -16,7 +17,6 @@ import 'package:android_intent_plus/flag.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../api/app_config.dart';
-import '../../storage/prefs.dart';
 import 'update_models.dart';
 
 class UpdateCheckResult {
@@ -31,11 +31,12 @@ class UpdateCheckResult {
 /// session-expired install.
 final Dio _plainDio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 10), receiveTimeout: const Duration(seconds: 10)));
 
-/// Returns `null` on anything short of "there is a genuinely newer, not-yet-
-/// dismissed build available" — a bad network, a malformed response, or "already
-/// up to date" are all the same "nothing to show" outcome to the caller, matching
-/// this feature's own "best-effort, never intrusive" posture (see this file's own
-/// module docstring).
+/// Returns `null` on anything short of "there is a genuinely newer build
+/// available" — a bad network, a malformed response, or "already up to date" are
+/// all the same "nothing to show" outcome to the caller. Deliberately fails OPEN
+/// on a check failure (offline, server unreachable, bad JSON) rather than
+/// blocking the app when it can't even confirm whether an update exists — being
+/// mandatory means "no skipping a confirmed update," not "no internet, no app."
 Future<UpdateCheckResult?> checkForUpdate() async {
   try {
     final packageInfo = await PackageInfo.fromPlatform();
@@ -44,9 +45,6 @@ Future<UpdateCheckResult?> checkForUpdate() async {
     final response = await _plainDio.get<Map<String, dynamic>>('${AppConfig.apiBaseUrl}/app-version.json');
     final info = AppVersionInfo.fromJson(response.data ?? const {});
     if (info == null || info.buildNumber <= currentBuild) return null;
-
-    final dismissed = await getUpdateDismissedBuildNumber();
-    if (dismissed != null && dismissed >= info.buildNumber) return null;
 
     return UpdateCheckResult(info);
   } catch (_) {

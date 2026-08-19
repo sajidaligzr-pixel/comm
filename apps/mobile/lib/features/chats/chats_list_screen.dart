@@ -20,6 +20,7 @@ import '../notifications/push_notifications.dart' show registerPushToken;
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 import '../auth/biometric_enroll_prompt.dart';
+import '../permissions/permissions_prompt.dart';
 import 'chat_list_tile.dart';
 
 class ChatsListScreen extends ConsumerStatefulWidget {
@@ -393,6 +394,9 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
           _buildBody(),
           if (profile != null)
             BiometricEnrollPrompt(username: profile.username),
+          // Painted last (on top) — see this prompt's own module docstring on
+          // why it and BiometricEnrollPrompt above are mutually exclusive.
+          const PermissionsOnboardingPrompt(),
         ],
       ),
       floatingActionButton: Row(

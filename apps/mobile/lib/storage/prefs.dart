@@ -51,21 +51,19 @@ Future<DateTime?> getBiometricPromptDismissedAt(String username) async {
   return DateTime.tryParse(raw);
 }
 
-/// Snooze state for the in-app update banner (features/update/update_prompt.dart)
-/// — NOT scoped by username, unlike the two keys above: which build is installed
-/// is a property of this device's copy of the app itself, the same for every
-/// account signed into it, not something a second account should see fresh again.
-/// Tapping "Not now" records the build being offered so the banner doesn't nag on
-/// every single app open — but a genuinely NEWER build later (a higher number
-/// than whatever was last dismissed) still shows, since dismissing isn't the same
-/// as "never tell me about updates again."
-const _updateDismissedBuildKey = 'comm_update_dismissed_build';
+/// Has this device already been shown the one-time "allow permissions" card
+/// (features/permissions/permissions_prompt.dart)? NOT scoped by username, same
+/// reasoning as the update-dismissed key above — microphone/Bluetooth access is
+/// granted to the app itself (this device's install), not to whichever account
+/// happens to be signed in, so a second account on the same phone shouldn't see
+/// it again. Deliberately a one-shot flag rather than a snooze/dismiss-with-expiry
+/// like the two prompts above: OS-level permission dialogs already have their own
+/// "don't ask again" behavior, so re-showing this app-level card on every launch
+/// would just be nagging on top of nagging.
+const _permissionsOnboardingShownKey = 'comm_permissions_onboarding_shown';
 
-Future<void> setUpdateDismissedBuildNumber(int buildNumber) =>
-    _storage.write(key: _updateDismissedBuildKey, value: buildNumber.toString());
+Future<void> setPermissionsOnboardingShown() =>
+    _storage.write(key: _permissionsOnboardingShownKey, value: 'true');
 
-Future<int?> getUpdateDismissedBuildNumber() async {
-  final raw = await _storage.read(key: _updateDismissedBuildKey);
-  if (raw == null) return null;
-  return int.tryParse(raw);
-}
+Future<bool> getPermissionsOnboardingShown() async =>
+    (await _storage.read(key: _permissionsOnboardingShownKey)) == 'true';

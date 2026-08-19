@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 3,
+  "buildNumber": 4,
   "versionName": "1.0.0",
   "apkUrl": "/downloads/comm-latest.apk",
-  "releaseNotes": "Copy message text (long-press a message)."
+  "releaseNotes": "Copy message text, up-front permission prompts. This update is required."
 }

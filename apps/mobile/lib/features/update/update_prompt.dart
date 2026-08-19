@@ -1,4 +1,4 @@
-/// The actual "Update available" UI — a bottom-anchored card over a dimming
+/// The actual "Update required" UI — a bottom-anchored card over an opaque
 /// scrim, not a real `showModalBottomSheet`/route: this widget is mounted once
 /// at the app-shell level (app/app.dart, same placement as CallOverlay/
 /// GroupCallOverlay) specifically so an update can be offered no matter which
@@ -7,15 +7,22 @@
 /// own `builder` callback isn't guaranteed to have yet. Rendering the "modal" look
 /// directly in this Stack (mirrors GroupCallOverlay's own `_InviteBanner`, the
 /// identical problem solved the identical way) sidesteps that entirely.
+///
+/// Mandatory: once `_check()` finds a newer build, there is no way out of this
+/// screen short of actually updating. No "Not now", no tap-outside-to-dismiss,
+/// no back-button escape needed — the full-screen `Container` scrim has no
+/// `onTap` at all, so it simply sits there and swallows every touch that would
+/// otherwise reach whatever's underneath (a plain opaque widget still wins
+/// hit-testing regardless of whether it has a gesture handler). The only buttons
+/// on the card are "Update" and, if the download/install itself fails, "Retry".
 library;
 
 import 'package:flutter/material.dart';
 
 import 'update_models.dart';
 import 'update_service.dart';
-import '../../storage/prefs.dart';
 
-enum _Phase { hidden, available, downloading, error }
+enum _Phase { hidden, blocking, downloading, error }
 
 class UpdatePromptOverlay extends StatefulWidget {
   const UpdatePromptOverlay({super.key});
@@ -45,18 +52,8 @@ class _UpdatePromptOverlayState extends State<UpdatePromptOverlay> {
     if (!mounted || result == null) return;
     setState(() {
       _info = result.info;
-      _phase = _Phase.available;
+      _phase = _Phase.blocking;
     });
-  }
-
-  Future<void> _dismiss() async {
-    final info = _info;
-    if (info != null) {
-      // Suppresses THIS build's nag on future opens — a later, genuinely newer
-      // build still shows (see prefs.dart's own docstring on this exact tradeoff).
-      await setUpdateDismissedBuildNumber(info.buildNumber);
-    }
-    if (mounted) setState(() => _phase = _Phase.hidden);
   }
 
   Future<void> _update() async {
@@ -70,10 +67,11 @@ class _UpdatePromptOverlayState extends State<UpdatePromptOverlay> {
       await downloadAndInstall(info.apkUrl, info.buildNumber, (p) {
         if (mounted) setState(() => _progress = p);
       });
-      // Android's package installer takes over the screen from here — nothing
-      // left for this widget to do once the intent has launched successfully;
-      // hide so it doesn't sit stale underneath the installer UI.
-      if (mounted) setState(() => _phase = _Phase.hidden);
+      // Android's package installer takes over the screen from here. Stay in
+      // `downloading` rather than dropping back to `hidden` — this build is
+      // still the old, blocked one until the install actually completes and the
+      // process restarts; hiding the card here would let the old app show
+      // through underneath while the installer is still up.
     } catch (_) {
       if (mounted) {
         setState(() {
@@ -91,14 +89,10 @@ class _UpdatePromptOverlayState extends State<UpdatePromptOverlay> {
 
     return Stack(
       children: [
-        // Scrim — tap outside the card to dismiss, same as a real bottom sheet's
-        // barrier, but a plain GestureDetector rather than ModalBarrier (no
-        // Navigator route backing this, see this file's own module docstring).
-        Positioned.fill(
-          child: GestureDetector(
-            onTap: _phase == _Phase.available ? _dismiss : null,
-            child: Container(color: Colors.black.withValues(alpha: 0.4)),
-          ),
+        // Opaque, not just dimmed — this is the actual block, not decoration.
+        // Deliberately no `onTap`: nothing short of updating dismisses this.
+        const Positioned.fill(
+          child: ColoredBox(color: Colors.black87),
         ),
         Align(
           alignment: Alignment.bottomCenter,
@@ -119,14 +113,17 @@ class _UpdatePromptOverlayState extends State<UpdatePromptOverlay> {
                         const SizedBox(width: 10),
                         Expanded(
                           child: Text(
-                            'Update available',
+                            'Update required',
                             style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600),
                           ),
                         ),
                       ],
                     ),
                     const SizedBox(height: 6),
-                    Text('Version ${info.versionName}', style: Theme.of(context).textTheme.bodyMedium),
+                    Text(
+                      'Version ${info.versionName} is required to keep using Comm.',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
                     if (info.releaseNotes != null && info.releaseNotes!.trim().isNotEmpty) ...[
                       const SizedBox(height: 8),
                       Text(
@@ -152,8 +149,6 @@ class _UpdatePromptOverlayState extends State<UpdatePromptOverlay> {
                       Row(
                         mainAxisAlignment: MainAxisAlignment.end,
                         children: [
-                          TextButton(onPressed: _dismiss, child: const Text('Not now')),
-                          const SizedBox(width: 8),
                           FilledButton(onPressed: _update, child: Text(_phase == _Phase.error ? 'Retry' : 'Update')),
                         ],
                       ),

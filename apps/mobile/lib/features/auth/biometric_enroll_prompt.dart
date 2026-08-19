@@ -6,6 +6,14 @@
 /// the real KEK (`biometric_unlock.dart#enableBiometricUnlock`), which only exists
 /// in memory once the device is actually unlocked — showing this any earlier would
 /// have nothing to wrap.
+///
+/// Deliberately waits for `PermissionsOnboardingPrompt` (features/permissions/) to
+/// have already been resolved before ever offering itself — both cards render
+/// `Align(bottom)` in the same Stack (chats_list_screen.dart), and both being
+/// visible at once would just paint one directly on top of the other. Since this
+/// only re-checks on mount, denying/completing the permissions card mid-session
+/// won't make this one appear until the next cold start — an acceptable one-launch
+/// delay in exchange for never risking the overlap.
 library;
 
 import 'package:flutter/material.dart';
@@ -37,6 +45,7 @@ class _BiometricEnrollPromptState extends State<BiometricEnrollPrompt> {
 
   Future<void> _check() async {
     try {
+      if (!await getPermissionsOnboardingShown()) return;
       final dismissedAt = await getBiometricPromptDismissedAt(widget.username);
       if (dismissedAt != null && DateTime.now().toUtc().difference(dismissedAt) < _snooze) return;
       final available = await biometric.isBiometricAvailable();
