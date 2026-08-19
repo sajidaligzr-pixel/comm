@@ -7,7 +7,7 @@ import { cn } from '@/lib/cn';
 import { formatConversationTimestamp } from '@/lib/format';
 import { deletedPlaceholderText } from '@/lib/message-content';
 import { Avatar } from './avatar';
-import { IconArchive, IconPin } from '../icons';
+import { IconArchive, IconPin, IconTrash } from '../icons';
 
 /**
  * A real hydration mismatch found live (and now fixed): `formatConversationTimestamp`
@@ -69,6 +69,7 @@ export function ConversationList({
   openId,
   onToggleArchive,
   onTogglePin,
+  onDeleteChat,
 }: {
   conversations: ConversationSummary[];
   previews: Record<string, ConversationPreview | undefined>;
@@ -82,6 +83,11 @@ export function ConversationList({
    * component only renders the toggle and the "is pinned" indicator, it
    * doesn't re-sort its own input. */
   onTogglePin: (conversationId: string, pinned: boolean) => void;
+  /** Local-only wipe of this device's cached history + hides the row — see
+   * `lib/crypto/message-cache.ts`'s `clearCachedMessages`/
+   * `markConversationLocallyDeleted` docstrings for the exact WhatsApp-parity
+   * scope (never touches the other side, comes back if they message again). */
+  onDeleteChat: (conversationId: string) => void;
 }): React.JSX.Element {
   if (conversations.length === 0) {
     return (
@@ -160,6 +166,19 @@ export function ConversationList({
               className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
             >
               <IconArchive className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onDeleteChat(c.id);
+              }}
+              title="Delete chat"
+              aria-label={`Delete chat with ${titleFor(c)}`}
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+            >
+              <IconTrash className="h-4 w-4" />
             </button>
           </Link>
         );

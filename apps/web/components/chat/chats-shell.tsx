@@ -8,10 +8,19 @@ import { cn } from '@/lib/cn';
 import { apiFetch } from '@/lib/api-client';
 import { getCurrentKek } from '@/lib/crypto/kek-holder';
 import { decryptFromDeviceOnce } from '@/lib/crypto/conversation-crypto';
-import { loadCachedMessages, appendCachedMessage, markCachedMessageDeleted, type CachedMessage } from '@/lib/crypto/message-cache';
+import {
+  loadCachedMessages,
+  appendCachedMessage,
+  markCachedMessageDeleted,
+  clearCachedMessages,
+  markConversationLocallyDeleted,
+  unmarkConversationLocallyDeleted,
+  locallyDeletedConversationIds,
+  type CachedMessage,
+} from '@/lib/crypto/message-cache';
 import { onRealtimeEvent } from '@/lib/realtime-client';
 import { decodeMessagePlaintext } from '@/lib/message-content';
-import { ConversationList, type ConversationPreview } from './conversation-list';
+import { ConversationList, titleFor, type ConversationPreview } from './conversation-list';
 import { NewChatForm } from './new-chat-form';
 import { NewGroupForm } from './new-group-form';
 import { IconSearch, IconEdit, IconX, IconArchive, IconChevronUp, IconUsers, IconStar } from '../icons';
@@ -80,6 +89,7 @@ export function ChatsShell({
   const [conversations, setConversations] = useState(initialConversations);
   const conversationsRef = useRef(conversations);
   const [previews, setPreviews] = useState<Record<string, ConversationPreview | undefined>>({});
+  const [locallyDeleted, setLocallyDeleted] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [composeOpen, setComposeOpen] = useState(false);
   const [archivedOpen, setArchivedOpen] = useState(false);
@@ -106,6 +116,27 @@ export function ChatsShell({
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
+
+  // Mirrors conversationsRef's own reasoning: the 'new' WS handler below is set up
+  // once (empty deps array) and would otherwise only ever see `locallyDeleted` as
+  // it was at mount time.
+  const locallyDeletedRef = useRef(locallyDeleted);
+  useEffect(() => {
+    locallyDeletedRef.current = locallyDeleted;
+  }, [locallyDeleted]);
+
+  // "Delete chat" (conversation-list.tsx's per-row action) is local-only and never
+  // reaches the server — load once on mount, no KEK/unlock needed (the id list
+  // itself isn't sensitive, see message-cache.ts's own note).
+  useEffect(() => {
+    let cancelled = false;
+    void locallyDeletedConversationIds().then((ids) => {
+      if (!cancelled) setLocallyDeleted(ids);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Reconcile with the server after anything that calls router.refresh() (e.g.
   // starting a new chat) — see chats-shell.tsx's own note on why a plain useState
@@ -149,6 +180,18 @@ export function ChatsShell({
     const offNew = onRealtimeEvent('new', (payload) => {
       const message = payload.message as MessageDto;
       const isOpen = message.conversationId === openIdRef.current;
+
+      // A live message landing for a conversation this device had locally
+      // "deleted" is exactly the promise made in that confirmation dialog — see
+      // message-cache.ts's `unmarkConversationLocallyDeleted` docstring.
+      if (locallyDeletedRef.current.has(message.conversationId)) {
+        const id = message.conversationId;
+        void unmarkConversationLocallyDeleted(id);
+        const next = new Set(locallyDeletedRef.current);
+        next.delete(id);
+        locallyDeletedRef.current = next;
+        setLocallyDeleted(next);
+      }
 
       // A real bug found live: "delivered" (the sender's second grey tick) only ever
       // got sent from message-thread.tsx's open-thread listener, bundled together
@@ -278,6 +321,29 @@ export function ChatsShell({
     }
   }
 
+  /** "Delete chat" — local-only, no network round trip at all (unlike archive/pin
+   * above), so this can't fail and takes effect instantly. See
+   * message-cache.ts's `clearCachedMessages`/`markConversationLocallyDeleted`
+   * docstrings for the exact WhatsApp-parity scope this mirrors from
+   * apps/mobile: clears this device's own view, not the other person's, and the
+   * chat comes back if they message again (handled by the 'new' WS listener
+   * above). */
+  async function handleDeleteChat(conversationId: string) {
+    const target = conversations.find((c) => c.id === conversationId);
+    const title = target ? titleFor(target) : 'this chat';
+    const confirmed = window.confirm(
+      `Delete this chat?\n\nThis removes "${title}" and its message history from this device only. It stays on the other side, and this chat will come back if they message you again.`,
+    );
+    if (!confirmed) return;
+
+    await clearCachedMessages(conversationId);
+    await markConversationLocallyDeleted(conversationId);
+    const next = new Set(locallyDeletedRef.current);
+    next.add(conversationId);
+    locallyDeletedRef.current = next;
+    setLocallyDeleted(next);
+  }
+
   const isThreadOpen = openId !== null;
   const query = search.trim().toLowerCase();
   const matchesQuery = (c: ConversationSummary) => {
@@ -288,10 +354,12 @@ export function ChatsShell({
   // Pinned-first, same as WhatsApp's own chat list — a plain stable sort (Array#sort
   // is stable in every JS engine this app targets) keeps everything else in whatever
   // order it already was (most-recent-first, from listConversations/toSummary).
+  // Locally-deleted conversations (see handleDeleteChat above) are excluded from
+  // both lists outright — they aren't "archived," they're meant to vanish.
   const activeFiltered = conversations
-    .filter((c) => !c.archived && matchesQuery(c))
+    .filter((c) => !c.archived && !locallyDeleted.has(c.id) && matchesQuery(c))
     .sort((a, b) => Number(b.pinned) - Number(a.pinned));
-  const archivedFiltered = conversations.filter((c) => c.archived && matchesQuery(c));
+  const archivedFiltered = conversations.filter((c) => c.archived && !locallyDeleted.has(c.id) && matchesQuery(c));
 
   return (
     <div className="flex h-full">
@@ -379,6 +447,7 @@ export function ChatsShell({
               openId={openId}
               onToggleArchive={(id, archived) => void handleToggleArchive(id, archived)}
               onTogglePin={(id, pinned) => void handleTogglePin(id, pinned)}
+              onDeleteChat={(id) => void handleDeleteChat(id)}
             />
           )}
           <ConversationList
@@ -387,6 +456,7 @@ export function ChatsShell({
             openId={openId}
             onToggleArchive={(id, archived) => void handleToggleArchive(id, archived)}
             onTogglePin={(id, pinned) => void handleTogglePin(id, pinned)}
+            onDeleteChat={(id) => void handleDeleteChat(id)}
           />
         </div>
       </aside>

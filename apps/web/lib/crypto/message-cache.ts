@@ -16,7 +16,7 @@
  */
 import { wrapBytes, unwrapBytes, utf8ToBytes, bytesToUtf8 } from '@comm/crypto';
 import type { MessageDeletionReason } from '@comm/types';
-import { putBlob, getBlob } from './db';
+import { putBlob, getBlob, deleteBlob } from './db';
 import type { AttachmentDescriptor } from '../message-content';
 
 export interface CachedMessage {
@@ -177,4 +177,80 @@ export function markCachedMessageDeleted(
     await saveCachedMessages(kek, conversationId, updated);
     return updated;
   });
+}
+
+/**
+ * "Delete chat" (chats-shell.tsx's per-row action, mirroring apps/mobile's
+ * identically-named feature exactly — see message_cache.dart's own docstring)
+ * — wipes this device's own local decrypted history for one conversation.
+ * Deliberately NOT a server-side delete: no such route exists (only `archived`,
+ * a per-caller view preference), and WhatsApp's own "Delete chat" has the same
+ * scope: it clears your device's view, not the other person's, and the
+ * conversation reappears if they message you again. Since a Double Ratchet
+ * ciphertext can only ever be decrypted once (this file's own module docstring),
+ * this history is not recoverable afterward even from the server's stored
+ * ciphertext.
+ *
+ * Used together with `markConversationLocallyDeleted` below, NOT `archived` —
+ * reusing the archive flag for this would land a "deleted" chat inside the
+ * Archived section instead of actually making it disappear, the exact bug this
+ * two-function split (matching the mobile client's own fix for the identical
+ * mistake) avoids from the start.
+ */
+export function clearCachedMessages(conversationId: string): Promise<void> {
+  return deleteBlob(cacheKey(conversationId));
+}
+
+const LOCALLY_DELETED_KEY = 'messages:locally-deleted-conversations';
+
+async function readLocallyDeleted(): Promise<Set<string>> {
+  const raw = await getBlob(LOCALLY_DELETED_KEY);
+  if (!raw) return new Set();
+  try {
+    const decoded = JSON.parse(bytesToUtf8(raw)) as unknown;
+    return Array.isArray(decoded) ? new Set(decoded.filter((id): id is string => typeof id === 'string')) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+async function writeLocallyDeleted(ids: Set<string>): Promise<void> {
+  if (ids.size === 0) {
+    await deleteBlob(LOCALLY_DELETED_KEY);
+    return;
+  }
+  await putBlob(LOCALLY_DELETED_KEY, utf8ToBytes(JSON.stringify([...ids])));
+}
+
+/**
+ * The other half of "Delete chat" (see `clearCachedMessages` above).
+ * Unencrypted on the wire, plaintext at rest is fine here — a conversation id
+ * is not sensitive content, unlike everything else this file stores. This is
+ * local-only and never reaches the server — deleting a chat on one device has
+ * no effect on the conversation's `archived` state or visibility on any other
+ * device, matching every other "local view preference" in this file.
+ */
+export async function markConversationLocallyDeleted(conversationId: string): Promise<void> {
+  const ids = await readLocallyDeleted();
+  ids.add(conversationId);
+  await writeLocallyDeleted(ids);
+}
+
+/** Called the moment a live message arrives for a conversation (chats-shell.tsx's
+ * WS 'new' handler) — this is what actually makes good on "this chat will come
+ * back if they message you again" from the delete-confirmation dialog: a
+ * locally-deleted conversation is hidden by `locallyDeletedConversationIds`
+ * below, not removed from the account, so the moment a new message shows it's
+ * still live, this un-hides it. A no-op if the id wasn't hidden to begin with. */
+export async function unmarkConversationLocallyDeleted(conversationId: string): Promise<void> {
+  const ids = await readLocallyDeleted();
+  if (ids.delete(conversationId)) {
+    await writeLocallyDeleted(ids);
+  }
+}
+
+/** Bulk read — chats-shell.tsx filters an entire freshly-loaded conversation
+ * list against this once, rather than one blob read per row. */
+export function locallyDeletedConversationIds(): Promise<Set<string>> {
+  return readLocallyDeleted();
 }

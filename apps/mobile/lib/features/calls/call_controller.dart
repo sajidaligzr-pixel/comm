@@ -255,6 +255,18 @@ class CallController extends StateNotifier<CallUiState> {
     }
     _localStream = stream;
     setActiveCallKind(ActiveCallKind.oneToOne);
+    // Actively force earpiece routing the moment this call's own audio session
+    // starts — found live (reported directly: calls come out of the loudspeaker,
+    // not the earpiece, by default). The class docstring's assumption that native
+    // WebRTC categorizes call audio as a voice call and routes to the earpiece
+    // automatically doesn't hold on every real device/OEM audio stack — Android's
+    // speakerphone flag can be left ON from something else entirely (a previous
+    // call that used the toggle, a video app, etc.) and nothing resets it FOR the
+    // next call, only after one ends (see `_teardown`'s own call to this). Setting
+    // it explicitly here, not just trusting the default, is the same "don't lean
+    // on an assumed default for something that matters" fix web's own
+    // call-provider.tsx already applies via `selectAudioOutput(false)`.
+    unawaited(Helper.setSpeakerphoneOn(false));
 
     final callId = _uuid.v4();
     final call = ActiveCall(
@@ -341,6 +353,9 @@ class CallController extends StateNotifier<CallUiState> {
       return;
     }
     _localStream = stream;
+    // Same active earpiece-forcing fix as startCall above — see that call site's
+    // comment for why this can't be left to an assumed default.
+    unawaited(Helper.setSpeakerphoneOn(false));
 
     final iceServers = await _callsApi.turnCredentials();
     final pc = await _createPeerConnection(iceServers);

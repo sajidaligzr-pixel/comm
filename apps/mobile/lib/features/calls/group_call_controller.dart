@@ -243,6 +243,11 @@ class GroupCallController extends StateNotifier<GroupCallUiState> {
     }
     _localStream = stream;
     setActiveCallKind(ActiveCallKind.group);
+    // Same fix as call_controller.dart's startCall/acceptCall — actively force
+    // earpiece routing rather than trusting a default that isn't reliable on
+    // every real device (found live on 1:1 calling; a group call sets up its own
+    // WebRTC audio session the identical way, so it has the identical gap).
+    unawaited(Helper.setSpeakerphoneOn(false));
     state = state.copyWith(
       phase: GroupCallPhase.active,
       call: call,
