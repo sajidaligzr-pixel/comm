@@ -17,7 +17,7 @@ import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show HapticFeedback;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData, HapticFeedback;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
@@ -1223,6 +1223,17 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                 _openForwardSheet(message);
               },
             ),
+            // Only meaningful when there's actual text to grab — a bare voice
+            // note/photo/file with no caption has nothing for the clipboard.
+            if (message.text.trim().isNotEmpty)
+              ListTile(
+                leading: const Icon(Icons.copy_outlined),
+                title: const Text('Copy'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _copyMessageText(message);
+                },
+              ),
             ListTile(
               leading: Icon(
                 _starredIds.contains(message.id)
@@ -1277,6 +1288,14 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// second statement, but this screen's own `context` stays valid underneath.
   void _openForwardSheet(CachedMessage message) {
     showForwardSheet(context, currentUserId: _myUserId, message: message);
+  }
+
+  /// Same context-lifetime reasoning as `_openForwardSheet` above.
+  void _copyMessageText(CachedMessage message) {
+    Clipboard.setData(ClipboardData(text: message.text));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Message copied')));
   }
 
   /// Same context-lifetime reasoning as `_openForwardSheet` above.

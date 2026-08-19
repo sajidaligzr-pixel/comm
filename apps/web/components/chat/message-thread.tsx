@@ -40,6 +40,7 @@ import {
   IconTrash,
   IconReply,
   IconForward,
+  IconCopy,
   IconX,
   IconMoreVertical,
   IconChevronUp,
@@ -728,6 +729,11 @@ export function MessageThread({
     }
   }
 
+  async function handleCopy(text: string) {
+    setActiveMenuId(null);
+    await navigator.clipboard.writeText(text);
+  }
+
   async function handleDelete(messageId: string) {
     setActiveMenuId(null);
     // A lightweight native confirm is enough for a destructive-but-recoverable
@@ -1112,6 +1118,18 @@ export function MessageThread({
                                 className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
                               >
                                 <IconForward className="h-4 w-4" /> Forward
+                              </button>
+                            )}
+                            {/* Only meaningful when there's actual text to grab —
+                                a bare voice note/photo/file with no caption has
+                                nothing for the clipboard. */}
+                            {m.text.trim().length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => void handleCopy(m.text)}
+                                className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+                              >
+                                <IconCopy className="h-4 w-4" /> Copy
                               </button>
                             )}
                             <button
