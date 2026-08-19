@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 4,
+  "buildNumber": 5,
   "versionName": "1.0.0",
   "apkUrl": "/downloads/comm-latest.apk",
-  "releaseNotes": "Copy message text, up-front permission prompts. This update is required."
+  "releaseNotes": "Call history fixes, group admin settings, group avatars + invite links, chat search. This update is required."
 }
