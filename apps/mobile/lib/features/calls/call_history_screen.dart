@@ -16,6 +16,7 @@ import '../../app/app.dart' show WhatsAppColors;
 import '../../app/providers.dart';
 import '../../shared/widgets/error_state.dart';
 import 'call_controller.dart';
+import 'group_call_controller.dart';
 
 class CallHistoryScreen extends ConsumerStatefulWidget {
   const CallHistoryScreen({super.key});
@@ -44,6 +45,12 @@ class _CallHistoryScreenState extends ConsumerState<CallHistoryScreen> {
   }
 
   void _callAgain(CallHistoryEntry entry) {
+    if (entry.isGroup) {
+      ref
+          .read(groupCallControllerProvider.notifier)
+          .startGroupCall(entry.conversationId, entry.displayName());
+      return;
+    }
     final otherUserId = entry.otherUserId;
     if (otherUserId == null) return;
     ref

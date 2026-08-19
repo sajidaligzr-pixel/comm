@@ -23,7 +23,7 @@ import { decodeMessagePlaintext } from '@/lib/message-content';
 import { ConversationList, titleFor, type ConversationPreview } from './conversation-list';
 import { NewChatForm } from './new-chat-form';
 import { NewGroupForm } from './new-group-form';
-import { IconSearch, IconEdit, IconX, IconArchive, IconChevronUp, IconUsers, IconStar } from '../icons';
+import { IconSearch, IconEdit, IconX, IconArchive, IconChevronUp, IconUsers, IconStar, IconPhone } from '../icons';
 import { Input } from '../ui/input';
 import { Dialog } from '../ui/dialog';
 
@@ -372,6 +372,14 @@ export function ChatsShell({
         <div className="flex flex-shrink-0 items-center justify-between gap-2 px-4 py-3">
           <h1 className="text-xl font-semibold text-foreground">Chats</h1>
           <div className="flex items-center gap-1">
+            <Link
+              href="/calls"
+              aria-label="Calls"
+              title="Calls"
+              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <IconPhone className="h-5 w-5" />
+            </Link>
             <Link
               href="/starred"
               aria-label="Starred messages"

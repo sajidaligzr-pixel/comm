@@ -72,6 +72,11 @@ class CallHistoryEntry {
   final String? otherUserId;
   final String? otherUsername;
   final String? otherDisplayName;
+  // Set instead of the three `other*` fields above for a group call — exactly one
+  // of `groupName`/`otherUserId` is ever non-null, mirroring
+  // `CallHistoryEntry.groupName` (packages/types/src/calls.ts) exactly. Previously
+  // unparsed here entirely, which mislabeled every group-call row as "Unknown".
+  final String? groupName;
   final String direction; // 'incoming' | 'outgoing'
   final String status; // 'answered' | 'missed' | 'declined'
   final String? startedAt;
@@ -84,6 +89,7 @@ class CallHistoryEntry {
     required this.otherUserId,
     required this.otherUsername,
     required this.otherDisplayName,
+    required this.groupName,
     required this.direction,
     required this.status,
     required this.startedAt,
@@ -99,6 +105,7 @@ class CallHistoryEntry {
       otherUserId: other?['id'] as String?,
       otherUsername: other?['username'] as String?,
       otherDisplayName: other?['displayName'] as String?,
+      groupName: json['groupName'] as String?,
       direction: json['direction'] as String,
       status: json['status'] as String,
       startedAt: json['startedAt'] as String?,
@@ -107,7 +114,9 @@ class CallHistoryEntry {
     );
   }
 
-  String displayName() => otherDisplayName ?? otherUsername ?? 'Unknown';
+  bool get isGroup => groupName != null;
+
+  String displayName() => groupName ?? otherDisplayName ?? otherUsername ?? 'Unknown';
 
   /// Null when the call was never answered (`missed`/`declined` — nothing to
   /// measure) or, defensively, if either timestamp is somehow missing/malformed

@@ -11,6 +11,7 @@ import { DisappearingTimerMenu } from '@/components/chat/disappearing-timer-menu
 import { CallButton } from '@/components/chat/call-button';
 import { GroupCallButton } from '@/components/chat/group-call-button';
 import { BlockUserButton } from '@/components/chat/block-user-button';
+import { GroupInfoTrigger } from '@/components/group/group-info-trigger';
 import { IconArrowLeft } from '@/components/icons';
 
 const TIMER_LABEL: Partial<Record<DisappearingTimer, string>> = { h24: '24 hours', d7: '7 days', d30: '30 days' };
@@ -51,13 +52,7 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ id:
           >
             <IconArrowLeft className="h-5 w-5" />
           </Link>
-          <Avatar name={group.name} size="sm" />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-foreground">{group.name}</p>
-            <p className="truncate text-xs text-muted-foreground">
-              {timerLabel ?? `${group.members.length} member${group.members.length === 1 ? '' : 's'}`}
-            </p>
-          </div>
+          <GroupInfoTrigger group={group} timerLabel={timerLabel} />
           <DisappearingTimerMenu conversationId={conversationId} initialTimer={conversation.disappearingTimer} />
           <GroupCallButton conversationId={conversationId} groupName={group.name} />
         </div>

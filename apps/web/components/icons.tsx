@@ -194,6 +194,27 @@ export function IconPause({ className }: IconProps): React.JSX.Element {
   );
 }
 
+/** Call-history direction glyphs — an arrow into/out of a phone corner, the same
+ * convention WhatsApp/every dialer uses (mirrors apps/mobile's `Icons.call_received`/
+ * `Icons.call_made` in call_history_screen.dart). */
+export function IconCallIncoming({ className }: IconProps): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M7 7v6h6" />
+      <path d="M7 13 17 3" />
+    </svg>
+  );
+}
+
+export function IconCallOutgoing({ className }: IconProps): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M11 3h6v6" />
+      <path d="M17 3 7 13" />
+    </svg>
+  );
+}
+
 export function IconPhoneOff({ className }: IconProps): React.JSX.Element {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">

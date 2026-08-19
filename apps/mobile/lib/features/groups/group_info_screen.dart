@@ -71,6 +71,20 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
     }
   }
 
+  /// `PATCH /api/groups/:id` and its `onlyAdminsCanMessage` field already existed
+  /// server-side (server/modules/groups/service.ts's `updateGroup`) — there was
+  /// just no toggle anywhere in either client to flip it (docs/13-roadmap.md's
+  /// Groups "Remaining" note). `GroupsApi.update` already supports this exact
+  /// param; this just wires it to a switch.
+  Future<void> _toggleOnlyAdminsCanMessage(bool value) async {
+    try {
+      final updated = await ref.read(groupsApiProvider).update(widget.groupId, onlyAdminsCanMessage: value);
+      if (mounted) setState(() => _group = updated);
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    }
+  }
+
   Future<void> _removeMember(GroupMemberDto member) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -123,6 +137,15 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
                     ],
                   ),
                 ),
+                if (_isAdmin) ...[
+                  const Divider(),
+                  SwitchListTile(
+                    title: const Text('Only admins can message'),
+                    subtitle: const Text('Other members can still read, react, and call.'),
+                    value: group.onlyAdminsCanMessage,
+                    onChanged: (v) => _toggleOnlyAdminsCanMessage(v),
+                  ),
+                ],
                 const Divider(),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),

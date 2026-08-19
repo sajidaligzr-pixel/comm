@@ -35,6 +35,12 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
   Set<String> _locallyDeleted = {};
   String? _error;
   bool _isAdmin = false;
+  // Mirrors web's chats-shell.tsx `search` state/`matchesQuery` filter exactly —
+  // name-only, chat-list-level (not message content; that's a much bigger, still
+  // separate follow-up needing a real local index — docs/13-roadmap.md's Search
+  // section). Web already had this; mobile never did until now.
+  final _searchController = TextEditingController();
+  String _search = '';
 
   @override
   void initState() {
@@ -108,7 +114,14 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
         .read(realtimeClientProvider)
         .off('connection.open', _onRealtimeReconnect);
     chatsRouteObserver.unsubscribe(this);
+    _searchController.dispose();
     super.dispose();
+  }
+
+  bool _matchesSearch(ConversationSummary c) {
+    if (_search.isEmpty) return true;
+    return c.displayTitle().toLowerCase().contains(_search) ||
+        (c.otherUsername?.toLowerCase().contains(_search) ?? false);
   }
 
   void _onRealtimeReconnect(Map<String, dynamic> _) => _load();
@@ -441,11 +454,16 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
     // (most-recent-first, from the server).
     final visible =
         conversations
-            .where((c) => !c.archived && !_locallyDeleted.contains(c.id))
+            .where(
+              (c) =>
+                  !c.archived &&
+                  !_locallyDeleted.contains(c.id) &&
+                  _matchesSearch(c),
+            )
             .toList()
           ..sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
 
-    if (visible.isEmpty && archivedCount == 0) {
+    if (conversations.where((c) => !c.archived).isEmpty && archivedCount == 0) {
       return const EmptyState(
         icon: Icons.chat_bubble_outline,
         message:
@@ -453,47 +471,82 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
       );
     }
 
-    return RefreshIndicator(
-      onRefresh: _load,
-      child: ListView(
-        children: [
-          if (archivedCount > 0) ...[
-            ListTile(
-              leading: const Icon(
-                Icons.archive_outlined,
-                color: WhatsAppColors.tealAccent,
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          child: TextField(
+            controller: _searchController,
+            onChanged: (v) => setState(() => _search = v.trim().toLowerCase()),
+            decoration: InputDecoration(
+              hintText: 'Search chats',
+              prefixIcon: const Icon(Icons.search, size: 20),
+              suffixIcon: _search.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      tooltip: 'Clear search',
+                      onPressed: () => setState(() {
+                        _searchController.clear();
+                        _search = '';
+                      }),
+                    ),
+              filled: true,
+              fillColor: const Color(0xFFF0F0F0),
+              contentPadding: const EdgeInsets.symmetric(vertical: 0),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(24),
+                borderSide: BorderSide.none,
               ),
-              title: Text('Archived ($archivedCount)'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => context.push('/chats/archived'),
             ),
-            const Divider(height: 1),
-          ],
-          if (visible.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(24),
-              child: EmptyState(
-                icon: Icons.chat_bubble_outline,
-                message:
-                    'No active chats — tap the compose button to message someone.',
-              ),
+          ),
+        ),
+        Expanded(
+          child: RefreshIndicator(
+            onRefresh: _load,
+            child: ListView(
+              children: [
+                if (archivedCount > 0 && _search.isEmpty) ...[
+                  ListTile(
+                    leading: const Icon(
+                      Icons.archive_outlined,
+                      color: WhatsAppColors.tealAccent,
+                    ),
+                    title: Text('Archived ($archivedCount)'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => context.push('/chats/archived'),
+                  ),
+                  const Divider(height: 1),
+                ],
+                if (visible.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: EmptyState(
+                      icon: _search.isEmpty ? Icons.chat_bubble_outline : Icons.search_off,
+                      message: _search.isEmpty
+                          ? 'No active chats — tap the compose button to message someone.'
+                          : 'No chats match "$_search".',
+                    ),
+                  ),
+                for (var i = 0; i < visible.length; i++) ...[
+                  if (i > 0) const Divider(height: 1),
+                  buildChatListTile(
+                    visible[i],
+                    onTap: () => context.push('/chats/${visible[i].id}'),
+                    // Long-press → Archive/Unarchive + Delete, matching WhatsApp's own
+                    // long-press chat-list menu (asked for directly) — mirrors
+                    // chats-shell.tsx's per-row archive action, which the web client
+                    // instead exposes as a hover-revealed icon button (a desktop-only
+                    // interaction with no mobile equivalent, so long-press is the
+                    // natural port here, not a literal copy).
+                    onLongPress: () => _showChatOptions(visible[i]),
+                  ),
+                ],
+              ],
             ),
-          for (var i = 0; i < visible.length; i++) ...[
-            if (i > 0) const Divider(height: 1),
-            buildChatListTile(
-              visible[i],
-              onTap: () => context.push('/chats/${visible[i].id}'),
-              // Long-press → Archive/Unarchive + Delete, matching WhatsApp's own
-              // long-press chat-list menu (asked for directly) — mirrors
-              // chats-shell.tsx's per-row archive action, which the web client
-              // instead exposes as a hover-revealed icon button (a desktop-only
-              // interaction with no mobile equivalent, so long-press is the
-              // natural port here, not a literal copy).
-              onLongPress: () => _showChatOptions(visible[i]),
-            ),
-          ],
-        ],
-      ),
+          ),
+        ),
+      ],
     );
   }
 }
