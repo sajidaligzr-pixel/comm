@@ -96,6 +96,17 @@ export function IconReply({ className }: IconProps): React.JSX.Element {
   );
 }
 
+/** `IconReply` mirrored — same curved-arrow shape pointing the other way, the
+ * conventional "forward" glyph (WhatsApp/Telegram/Gmail all draw it this way). */
+export function IconForward({ className }: IconProps): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M15 10l5 5-5 5" />
+      <path d="M20 15H10a6 6 0 0 1-6-6V7" />
+    </svg>
+  );
+}
+
 export function IconX({ className }: IconProps): React.JSX.Element {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" className={className} aria-hidden="true">

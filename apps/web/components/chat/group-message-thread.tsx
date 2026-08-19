@@ -38,8 +38,9 @@ import { uploadAttachmentCiphertext } from '@/lib/media-client';
 import { useGroupSession } from '@/components/group/group-session-provider';
 import { Avatar } from './avatar';
 import { EmojiPicker } from './emoji-picker';
+import { ForwardDialog } from './forward-dialog';
 import { VoiceBubble, ImageBubble, FileBubble } from './bubbles';
-import { IconSend, IconTrash, IconMic, IconImage, IconPaperclip, IconMoreVertical } from '../icons';
+import { IconSend, IconTrash, IconMic, IconImage, IconPaperclip, IconMoreVertical, IconForward } from '../icons';
 
 const MAX_RECORDING_SECONDS = 120;
 const MAX_IMAGE_BYTES = 2.5 * 1024 * 1024;
@@ -89,6 +90,7 @@ export function GroupMessageThread({
   const [error, setError] = useState<string | undefined>();
   const [ready, setReady] = useState(false);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+  const [forwardingMessage, setForwardingMessage] = useState<CachedMessage | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -666,18 +668,33 @@ export function GroupMessageThread({
                         align={m.isOwn ? 'right' : 'left'}
                         ariaLabel="React to message"
                       />
-                      {m.isOwn && (
-                        <div className="relative">
-                          <button
-                            type="button"
-                            onClick={() => setActiveMenuId((id) => (id === m.id ? null : m.id))}
-                            aria-label="Message actions"
-                            className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setActiveMenuId((id) => (id === m.id ? null : m.id))}
+                          aria-label="Message actions"
+                          className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground"
+                        >
+                          <IconMoreVertical className="h-4 w-4" />
+                        </button>
+                        {activeMenuId === m.id && (
+                          <div
+                            className={cn(
+                              'absolute top-8 z-10 w-40 overflow-hidden rounded-xl border border-border bg-background py-1 shadow-lg',
+                              m.isOwn ? 'right-0' : 'left-0',
+                            )}
                           >
-                            <IconMoreVertical className="h-4 w-4" />
-                          </button>
-                          {activeMenuId === m.id && (
-                            <div className="absolute right-0 top-8 z-10 w-40 overflow-hidden rounded-xl border border-border bg-background py-1 shadow-lg">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setForwardingMessage(m);
+                                setActiveMenuId(null);
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+                            >
+                              <IconForward className="h-4 w-4" /> Forward
+                            </button>
+                            {m.isOwn && (
                               <button
                                 type="button"
                                 onClick={() => void handleDelete(m.id)}
@@ -685,10 +702,10 @@ export function GroupMessageThread({
                               >
                                 <IconTrash className="h-4 w-4" /> Delete
                               </button>
-                            </div>
-                          )}
-                        </div>
-                      )}
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -780,6 +797,21 @@ export function GroupMessageThread({
           </form>
         )}
       </div>
+
+      {forwardingMessage && (
+        <ForwardDialog
+          open
+          onClose={() => setForwardingMessage(null)}
+          currentUserId={currentUserId}
+          content={{
+            contentTypeHint: forwardingMessage.contentTypeHint as 'text' | 'voice' | 'image' | 'media',
+            text: forwardingMessage.text,
+            mediaBase64: forwardingMessage.mediaBase64,
+            attachment: forwardingMessage.attachment,
+            mediaDurationSec: forwardingMessage.mediaDurationSec,
+          }}
+        />
+      )}
     </div>
   );
 }

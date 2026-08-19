@@ -27,6 +27,7 @@ import {
 import { encryptAttachment } from '@/lib/crypto/attachment-crypto';
 import { uploadAttachmentCiphertext } from '@/lib/media-client';
 import { EmojiPicker } from './emoji-picker';
+import { ForwardDialog } from './forward-dialog';
 import { VoiceBubble, ImageBubble, FileBubble } from './bubbles';
 import {
   IconSend,
@@ -36,6 +37,7 @@ import {
   IconMic,
   IconTrash,
   IconReply,
+  IconForward,
   IconX,
   IconMoreVertical,
   IconChevronUp,
@@ -120,6 +122,7 @@ export function MessageThread({
   const [error, setError] = useState<string | undefined>();
   const [ready, setReady] = useState(false);
   const [replyingTo, setReplyingTo] = useState<CachedMessage | null>(null);
+  const [forwardingMessage, setForwardingMessage] = useState<CachedMessage | null>(null);
   const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -905,6 +908,16 @@ export function MessageThread({
                             >
                               <IconReply className="h-4 w-4" /> Reply
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setForwardingMessage(m);
+                                setActiveMenuId(null);
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+                            >
+                              <IconForward className="h-4 w-4" /> Forward
+                            </button>
                             {m.isOwn && (
                               <button
                                 type="button"
@@ -1057,6 +1070,21 @@ export function MessageThread({
           </form>
         )}
       </div>
+
+      {forwardingMessage && (
+        <ForwardDialog
+          open
+          onClose={() => setForwardingMessage(null)}
+          currentUserId={currentUserId}
+          content={{
+            contentTypeHint: forwardingMessage.contentTypeHint as 'text' | 'voice' | 'image' | 'media',
+            text: forwardingMessage.text,
+            mediaBase64: forwardingMessage.mediaBase64,
+            attachment: forwardingMessage.attachment,
+            mediaDurationSec: forwardingMessage.mediaDurationSec,
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -56,8 +56,10 @@ function previewLabel(preview: ConversationPreview | undefined): string {
 
 /** The one place that resolves "what name/avatar represents this row" for either
  * conversation shape (docs/13-roadmap.md's group chat pass) — every other place that
- * used to assume `c.otherUser` goes through this instead of re-deriving the branch. */
-function titleFor(c: ConversationSummary): string {
+ * used to assume `c.otherUser` goes through this instead of re-deriving the branch.
+ * Exported for forward-dialog.tsx's conversation picker, which needs the identical
+ * resolution rather than a second copy that could quietly drift from this one. */
+export function titleFor(c: ConversationSummary): string {
   return c.type === 'group' ? c.group.name : c.otherUser.displayName;
 }
 

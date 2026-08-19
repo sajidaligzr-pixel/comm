@@ -42,6 +42,7 @@ import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 import '../calls/call_controller.dart';
 import '../groups/group_session_controller.dart';
+import 'forward_dialog.dart' show showForwardSheet;
 
 const _uuid = Uuid();
 
@@ -966,6 +967,14 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                 _startReply(message);
               },
             ),
+            ListTile(
+              leading: const Icon(Icons.forward),
+              title: const Text('Forward'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _openForwardSheet(message);
+              },
+            ),
             if (message.isOwn)
               ListTile(
                 leading: Icon(
@@ -985,6 +994,15 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         ),
       ),
     );
+  }
+
+  /// Uses this State's own `context` (not the bottom-sheet builder's shadowed
+  /// one `_showMessageActions` closes over) — same reason `_confirmAndDelete`
+  /// below is its own method rather than an inline closure: the builder's
+  /// context is for a widget that's mid-removal by the time `onTap` runs its
+  /// second statement, but this screen's own `context` stays valid underneath.
+  void _openForwardSheet(CachedMessage message) {
+    showForwardSheet(context, currentUserId: _myUserId, message: message);
   }
 
   Future<void> _confirmAndDelete(CachedMessage message) async {
