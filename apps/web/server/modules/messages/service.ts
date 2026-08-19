@@ -6,6 +6,7 @@ import {
   getAllOtherMembersActiveDeviceIds,
 } from '../conversations/service';
 import { claimPendingUpload } from '../media/service';
+import { isEitherBlocked } from '../blocking/service';
 
 /**
  * Multi-device fan-out (docs/06-device-architecture.md's original target design,
@@ -139,6 +140,19 @@ export async function sendMessage(
   } else {
     if (!input.recipients || input.recipients.length === 0) {
       throw new AppError('VALIDATION_FAILED', 'At least one recipient device is required.');
+    }
+
+    // Blocked users (docs/13-roadmap.md) — checked in either direction, same
+    // generic failure a legitimate "nobody reachable" case gets (MESSAGE_FAILED,
+    // not a distinct code), so this can't be used to probe which direction a
+    // block runs. Direct conversations only — see blocking/service.ts's own
+    // note on why group messages aren't gated this way.
+    const otherMember = await prisma.conversationMember.findFirst({
+      where: { conversationId, userId: { not: ctx.userId } },
+      select: { userId: true },
+    });
+    if (otherMember && (await isEitherBlocked(ctx.userId, otherMember.userId))) {
+      throw new AppError('MESSAGE_FAILED', 'This message could not be delivered.');
     }
     // The REAL target set, resolved server-side — never trust the client's own idea
     // of who should receive this. Every other member's active devices (the

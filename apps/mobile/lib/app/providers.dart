@@ -17,6 +17,7 @@ import '../api/devices_api.dart';
 import '../api/media_api.dart';
 import '../api/calls_api.dart';
 import '../api/groups_api.dart';
+import '../api/blocking_api.dart';
 import '../api/admin_api.dart';
 import '../api/push_api.dart';
 import '../features/groups/group_session_controller.dart';
@@ -55,6 +56,9 @@ final callsApiProvider = Provider<CallsApi>(
 );
 final groupsApiProvider = Provider<GroupsApi>(
   (ref) => GroupsApi(ref.watch(apiClientProvider)),
+);
+final blockingApiProvider = Provider<BlockingApi>(
+  (ref) => BlockingApi(ref.watch(apiClientProvider)),
 );
 final adminApiProvider = Provider<AdminApi>(
   (ref) => AdminApi(ref.watch(apiClientProvider)),

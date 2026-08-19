@@ -135,6 +135,12 @@ export const ConversationSummary = z.discriminatedUnion('type', [
       username: z.string(),
       displayName: z.string(),
     }),
+    /** Whether the CALLER has blocked `otherUser` — drives the "Block"/"Unblock"
+     * toggle in the thread header. Deliberately does NOT reveal whether the
+     * other side blocked the caller (see docs/13-roadmap.md's blocked-users
+     * pass) — that stays a private fact the same way WhatsApp never tells you
+     * "this person blocked you," only that sends/calls silently don't land. */
+    callerHasBlockedOtherUser: z.boolean(),
   }),
   z.object({
     ...ConversationSummaryCommon,

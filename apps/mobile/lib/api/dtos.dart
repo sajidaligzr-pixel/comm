@@ -289,6 +289,10 @@ class ConversationSummary {
   final String? otherUserId;
   final String? otherUsername;
   final String? otherDisplayName;
+
+  /// Whether the CALLER has blocked `otherUserId` (docs/13-roadmap.md) — null
+  /// for a group conversation, same as the other `other*` fields.
+  final bool? callerHasBlockedOtherUser;
   // type == 'group'
   final String? groupId;
   final String? groupName;
@@ -305,6 +309,7 @@ class ConversationSummary {
     this.otherUserId,
     this.otherUsername,
     this.otherDisplayName,
+    this.callerHasBlockedOtherUser,
     this.groupId,
     this.groupName,
     this.groupMemberCount,
@@ -325,6 +330,7 @@ class ConversationSummary {
       otherUserId: otherUser?['id'] as String?,
       otherUsername: otherUser?['username'] as String?,
       otherDisplayName: otherUser?['displayName'] as String?,
+      callerHasBlockedOtherUser: json['callerHasBlockedOtherUser'] as bool?,
       groupId: group?['id'] as String?,
       groupName: group?['name'] as String?,
       groupMemberCount: group?['memberCount'] as int?,
@@ -343,6 +349,7 @@ class ConversationSummary {
     bool? archived,
     bool? pinned,
     String? disappearingTimer,
+    bool? callerHasBlockedOtherUser,
   }) => ConversationSummary(
     id: id,
     type: type,
@@ -354,6 +361,8 @@ class ConversationSummary {
     otherUserId: otherUserId,
     otherUsername: otherUsername,
     otherDisplayName: otherDisplayName,
+    callerHasBlockedOtherUser:
+        callerHasBlockedOtherUser ?? this.callerHasBlockedOtherUser,
     groupId: groupId,
     groupName: groupName,
     groupMemberCount: groupMemberCount,
@@ -406,6 +415,27 @@ class MessageReceiptDto {
         deliveredAt: json['deliveredAt'] as String?,
         readAt: json['readAt'] as String?,
       );
+}
+
+/// Blocked users (docs/13-roadmap.md) — mirrors apps/web's identical DTO
+/// (packages/types/src/blocking.ts).
+class BlockedUserDto {
+  final String userId;
+  final String username;
+  final String displayName;
+  final String blockedAt;
+  const BlockedUserDto({
+    required this.userId,
+    required this.username,
+    required this.displayName,
+    required this.blockedAt,
+  });
+  static BlockedUserDto fromJson(Map<String, dynamic> json) => BlockedUserDto(
+    userId: json['userId'] as String,
+    username: json['username'] as String,
+    displayName: json['displayName'] as String,
+    blockedAt: json['blockedAt'] as String,
+  );
 }
 
 class MessageAttachmentRef {

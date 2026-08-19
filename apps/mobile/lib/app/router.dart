@@ -26,6 +26,7 @@ import '../features/devices/devices_screen.dart';
 import '../features/groups/new_group_screen.dart';
 import '../features/groups/group_info_screen.dart';
 import '../features/admin/admin_screen.dart';
+import '../features/settings/blocked_users_screen.dart';
 import 'splash_screen.dart';
 
 /// Pure redirect logic, factored out of the `GoRouter` construction below purely so
@@ -113,6 +114,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/starred',
         builder: (context, state) => const StarredMessagesScreen(),
+      ),
+      GoRoute(
+        path: '/blocked',
+        builder: (context, state) => const BlockedUsersScreen(),
       ),
       GoRoute(
         path: '/devices',

@@ -64,6 +64,8 @@ model User {
   starredMessages         StarredMessage[]
   groupMemberships        GroupMember[]
   initiatedCalls          Call[]
+  blockedUsers            BlockedUser[]           @relation("BlockerOf")
+  blockedByUsers          BlockedUser[]           @relation("BlockedBy")
 
   @@map("users")
 }
@@ -221,6 +223,24 @@ model Session {
   @@index([userId])
   @@index([accessTokenFamily])
   @@map("sessions")
+}
+
+// docs/02-database-schema.md's original sketch, docs/13-roadmap.md's blocked-users
+// pass. Enforced server-side on every message/call path (createOrGetDirectConversation,
+// sendMessage, the call.* signaling handlers), never just hidden client-side —
+// docs/08-threat-model.md. Deliberately NOT enforced inside groups (see
+// server/modules/blocking/service.ts's own note on why that's a separate, harder
+// problem left out of this pass, same as WhatsApp's own scoping).
+model BlockedUser {
+  blockerUserId String   @map("blocker_user_id") @db.Uuid
+  blockedUserId String   @map("blocked_user_id") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  blocker User @relation("BlockerOf", fields: [blockerUserId], references: [id], onDelete: Cascade)
+  blocked User @relation("BlockedBy", fields: [blockedUserId], references: [id], onDelete: Cascade)
+
+  @@id([blockerUserId, blockedUserId])
+  @@map("blocked_users")
 }
 
 // ── Security & audit ──────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../api/api_client.dart';
 import '../../api/dtos.dart';
@@ -206,7 +207,16 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Devices')),
+      appBar: AppBar(
+        title: const Text('Devices'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.block),
+            tooltip: 'Blocked users',
+            onPressed: () => context.push('/blocked'),
+          ),
+        ],
+      ),
       body: _buildBody(),
     );
   }

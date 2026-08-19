@@ -9,6 +9,7 @@ import { GroupMessageThread } from '@/components/chat/group-message-thread';
 import { Avatar } from '@/components/chat/avatar';
 import { DisappearingTimerMenu } from '@/components/chat/disappearing-timer-menu';
 import { CallButton } from '@/components/chat/call-button';
+import { BlockUserButton } from '@/components/chat/block-user-button';
 import { IconArrowLeft } from '@/components/icons';
 
 const TIMER_LABEL: Partial<Record<DisappearingTimer, string>> = { h24: '24 hours', d7: '7 days', d30: '30 days' };
@@ -87,6 +88,11 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ id:
           <p className="truncate text-xs text-muted-foreground">{timerLabel ?? `@${conversation.otherUser.username}`}</p>
         </div>
         <DisappearingTimerMenu conversationId={conversationId} initialTimer={conversation.disappearingTimer} />
+        <BlockUserButton
+          username={conversation.otherUser.username}
+          displayName={conversation.otherUser.displayName}
+          initiallyBlocked={conversation.callerHasBlockedOtherUser}
+        />
         <CallButton
           conversationId={conversationId}
           otherUserId={conversation.otherUser.id}

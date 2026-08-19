@@ -12,3 +12,4 @@ export * from './push';
 export * from './media';
 export * from './groups';
 export * from './realtime';
+export * from './blocking';

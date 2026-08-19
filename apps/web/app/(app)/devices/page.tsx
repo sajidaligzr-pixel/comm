@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { getAuthContextOrRedirect } from '@/server/common/page-auth';
 import { listDevices } from '@/server/modules/devices/service';
 import { getOwnProfile } from '@/server/modules/users/service';
@@ -21,6 +22,9 @@ export default async function DevicesPage() {
         <BiometricUnlockToggle userId={ctx.userId} username={profile.username} />
         <DevicesList initialDevices={devices} />
         <LinkDevicePanel />
+        <Link href="/blocked" className="block text-sm font-medium text-primary hover:underline">
+          Blocked users
+        </Link>
       </div>
     </div>
   );

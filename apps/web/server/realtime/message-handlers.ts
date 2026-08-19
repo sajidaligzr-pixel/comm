@@ -23,6 +23,7 @@ import type { AuthContext } from '../common/auth';
 import { prisma } from '@comm/database';
 import { sendMessage, acknowledgeDelivered, markConversationRead, getMessageSenderDeviceId } from '../modules/messages/service';
 import { getAllOtherMembersActiveDeviceIds, requireConversationMembership } from '../modules/conversations/service';
+import { isEitherBlocked } from '../modules/blocking/service';
 import { createGroupKeyShare } from '../modules/groups/key-share-service';
 import { setPendingCall, clearPendingCall } from '../modules/calls/pending';
 import { recordCallInvited, recordCallAnswered, recordCallEnded } from '../modules/calls/history';
@@ -180,7 +181,13 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         await enforceRateLimit(RATE_LIMIT_RULES.callInvite, ctx.userId);
         const body = CallInviteEnvelope.parse(parsed);
         const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
-        if (targets.length > 0) {
+        // Blocked users (docs/13-roadmap.md) — silently no-ops, same as the
+        // "nobody reachable" branch just below, rather than throwing: a caller
+        // probing whether they're blocked should see the exact same outcome as
+        // calling someone whose devices all happen to be offline, not a
+        // distinct error that would confirm the block.
+        const blocked = targets.length > 0 && (await isEitherBlocked(ctx.userId, targets[0]!.userId));
+        if (targets.length > 0 && !blocked) {
           const caller = await prisma.user.findUnique({ where: { id: ctx.userId }, select: { displayName: true } });
           const fromDisplayName = caller?.displayName ?? 'Unknown';
           await recordCallInvited(body.callId, body.conversationId, ctx.userId);

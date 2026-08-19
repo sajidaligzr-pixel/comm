@@ -890,6 +890,63 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
   }
 
+  /// Block/unblock (docs/13-roadmap.md) — mirrors apps/web's `BlockUserButton`
+  /// exactly, including the confirm dialog and optimistic-then-revert shape.
+  Future<void> _toggleBlock() async {
+    final conversation = _conversation;
+    if (conversation == null || conversation.otherUserId == null) return;
+    final wasBlocked = conversation.callerHasBlockedOtherUser ?? false;
+    final next = !wasBlocked;
+    final displayName = conversation.displayTitle();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(next ? 'Block $displayName?' : 'Unblock $displayName?'),
+        content: next
+            ? Text(
+                "They won't be able to message or call you, and you won't be able to message or call them.",
+              )
+            : null,
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(next ? 'Block' : 'Unblock'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(
+      () => _conversation = conversation.copyWith(
+        callerHasBlockedOtherUser: next,
+      ),
+    );
+    try {
+      if (next) {
+        await ref.read(blockingApiProvider).block(conversation.otherUsername!);
+      } else {
+        await ref.read(blockingApiProvider).unblock(conversation.otherUserId!);
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(
+          () => _conversation = conversation.copyWith(
+            callerHasBlockedOtherUser: wasBlocked,
+          ),
+        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    }
+  }
+
   /// `alreadyMine` covers REST history backfill for this device's OWN earlier sent
   /// messages that never made it into the local cache (e.g. sent from a different
   /// device) — those ciphertexts can never be decrypted (a sending chain is
@@ -1831,6 +1888,21 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                     ),
                   )
                   .toList(),
+            ),
+          if (conversation != null &&
+              conversation.type == 'direct' &&
+              conversation.otherUserId != null)
+            IconButton(
+              icon: Icon(
+                Icons.block,
+                color: (conversation.callerHasBlockedOtherUser ?? false)
+                    ? Theme.of(context).colorScheme.error
+                    : null,
+              ),
+              tooltip: (conversation.callerHasBlockedOtherUser ?? false)
+                  ? 'Unblock'
+                  : 'Block',
+              onPressed: _toggleBlock,
             ),
           if (conversation != null &&
               conversation.type == 'direct' &&

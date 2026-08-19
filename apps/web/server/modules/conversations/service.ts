@@ -1,14 +1,17 @@
 import { prisma } from '@comm/database';
 import { AppError, type ConversationSummary, type DisappearingTimer } from '@comm/types';
+import { hasBlocked, isEitherBlocked } from '../blocking/service';
 
 /**
  * `direct` (1:1) conversations are Phase 3; `group` conversations shipped ahead of
  * the original Phase 5 slot (docs/13-roadmap.md's group chat pass) — `toSummary`
  * below branches on `conversation.type` and is the one place that distinction is
- * resolved into the two `ConversationSummary` union shapes. No block-check here yet:
- * the `/contacts` module (blocking) hasn't landed, so this can't yet refuse "start a
- * conversation with someone who blocked you" — tracked as a follow-up, not silently
- * skipped without comment.
+ * resolved into the two `ConversationSummary` union shapes. `createOrGetDirectConversation`
+ * refuses to START a new conversation with someone blocked in either direction
+ * (docs/13-roadmap.md's blocked-users pass) — an already-existing conversation
+ * still opens, matching WhatsApp's own "never hide chat history, just refuse new
+ * sends" behavior; `sendMessage` (messages/service.ts) is what actually enforces
+ * the "no new sends" half.
  */
 
 async function toSummary(conversationId: string, callerUserId: string): Promise<ConversationSummary> {
@@ -71,6 +74,7 @@ async function toSummary(conversationId: string, callerUserId: string): Promise<
     ...common,
     type: 'direct',
     otherUser: { id: other.id, username: other.username, displayName: other.displayName },
+    callerHasBlockedOtherUser: await hasBlocked(callerUserId, other.id),
   };
 }
 
@@ -92,6 +96,15 @@ export async function createOrGetDirectConversation(callerUserId: string, withUs
   });
   if (existing) {
     return toSummary(existing.id, callerUserId);
+  }
+
+  // Only gates a genuinely NEW conversation — an existing one (branch above)
+  // still opens regardless, same "never hide chat history" reasoning this
+  // function's own docstring gives. A generic error either way (never "they
+  // blocked you" vs. "you blocked them") so this can't be used to probe which
+  // direction a block runs.
+  if (await isEitherBlocked(callerUserId, target.id)) {
+    throw new AppError('FORBIDDEN', 'You cannot start a conversation with this user.');
   }
 
   const created = await prisma.conversation.create({
