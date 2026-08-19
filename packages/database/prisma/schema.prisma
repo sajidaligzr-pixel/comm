@@ -53,6 +53,7 @@ model User {
   createdByAdmin          Admin?                  @relation("AdminProvisionedUsers", fields: [createdByAdminId], references: [id], onDelete: SetNull)
   adminRole               Admin?                  @relation("AdminSelf")
   invites                 Invite[]
+  createdGroupInviteLinks GroupInviteLink[]
   devices                 Device[]
   sessions                Session[]
   securityEvents          SecurityEvent[]
@@ -608,25 +609,54 @@ model MessageAttachment {
 // ── Groups (docs/13-roadmap.md's group chat pass, ahead of the original Phase 5
 // slot) — real Megolm-style group ratchet, docs/05-crypto-architecture.md#group-encryption.
 //
-// Trimmed from docs/02-database-schema.md's fuller sketch: no `avatarObjectKey`
-// (group avatars aren't built this pass) and no `group_invite_links` table at all
-// (join-by-link is out of scope — members are added directly by an existing member,
-// admin-only for removal) — both dropped for the same "don't lay down schema for
-// code that doesn't exist yet" reason this file's header comment already states.
+// `avatarObjectKey` and `GroupInviteLink` were both originally trimmed from
+// docs/02-database-schema.md's fuller sketch ("don't lay down schema for code that
+// doesn't exist yet" — this file's header comment) and added in a later pass once
+// both features actually landed.
 
 model Group {
   id                   String   @id @default(uuid()) @db.Uuid
   name                 String
   description          String?
   onlyAdminsCanMessage Boolean  @default(false) @map("only_admins_can_message")
-  createdAt            DateTime @default(now()) @map("created_at")
+  // Points into object storage, not a public URL — same shape as
+  // `User.avatarObjectKey` (a signed download URL is minted per-request, see
+  // media/service.ts's `createDownloadUrl`). Null means "no avatar set," rendered
+  // as initials on both clients, same fallback the user-avatar path already uses.
+  avatarObjectKey String?  @map("avatar_object_key")
+  createdAt       DateTime @default(now()) @map("created_at")
 
   conversation Conversation?
   members      GroupMember[]
   sessions     GroupSession[]
   keyShares    GroupKeyShare[]
+  inviteLinks  GroupInviteLink[]
 
   @@map("groups")
+}
+
+/// A WhatsApp-style re-shareable "join via link" token — one admin-visible active
+/// link per group, revocable/regeneratable, not single-use. `token` is stored in
+/// PLAINTEXT, a deliberate divergence from `Invite.tokenHash`/
+/// `Session.refreshTokenHash`: those are single-reveal bearer secrets shown exactly
+/// once and never again, so hashing costs nothing. This is the opposite use case —
+/// an admin expects to reopen group settings at any later point and see/copy the
+/// same link again, which a hash can't support (one-way by design). Still full
+/// CSPRNG entropy either way (`generateSecureToken`, 24 random bytes, base64url) —
+/// unguessable regardless of which storage form holds it; only the
+/// "can it be shown again" tradeoff differs.
+model GroupInviteLink {
+  id          String    @id @default(uuid()) @db.Uuid
+  groupId     String    @map("group_id") @db.Uuid
+  token       String    @unique
+  createdById String    @map("created_by_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+
+  group     Group @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  createdBy User  @relation(fields: [createdById], references: [id], onDelete: Cascade)
+
+  @@map("group_invite_links")
 }
 
 model GroupMember {

@@ -599,6 +599,10 @@ class GroupSummary {
   final String name;
   final String? description;
   final bool onlyAdminsCanMessage;
+  // A freshly-minted signed download URL, not the raw object key — see
+  // GroupSummary.avatarUrl's own docstring (packages/types/src/groups.ts). Null
+  // means no avatar set; both clients fall back to initials.
+  final String? avatarUrl;
   final String callerRole;
   final List<GroupMemberDto> members;
   final String createdAt;
@@ -608,6 +612,7 @@ class GroupSummary {
     required this.name,
     required this.description,
     required this.onlyAdminsCanMessage,
+    required this.avatarUrl,
     required this.callerRole,
     required this.members,
     required this.createdAt,
@@ -618,12 +623,27 @@ class GroupSummary {
     name: json['name'] as String,
     description: json['description'] as String?,
     onlyAdminsCanMessage: json['onlyAdminsCanMessage'] as bool,
+    avatarUrl: json['avatarUrl'] as String?,
     callerRole: json['callerRole'] as String,
     members: (json['members'] as List)
         .map((e) => GroupMemberDto.fromJson(e as Map<String, dynamic>))
         .toList(),
     createdAt: json['createdAt'] as String,
   );
+}
+
+/// `GET`/`POST /api/groups/:id/invite-link` response — see
+/// `GroupInviteLink.token`'s own schema docstring (packages/database) for why the
+/// server always returns the raw, re-shareable token rather than a hash.
+class GroupInviteLinkDto {
+  final String token;
+  final String groupId;
+  const GroupInviteLinkDto({required this.token, required this.groupId});
+  static GroupInviteLinkDto fromJson(Map<String, dynamic> json) =>
+      GroupInviteLinkDto(
+        token: json['token'] as String,
+        groupId: json['groupId'] as String,
+      );
 }
 
 class GroupMemberTarget {

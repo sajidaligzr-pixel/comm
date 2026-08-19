@@ -22,7 +22,8 @@ class MediaApi {
 
   static final Dio _rawDio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 20), receiveTimeout: const Duration(minutes: 5)));
 
-  String _resolve(String url) => url.startsWith('/') ? '${AppConfig.apiBaseUrl}$url' : url;
+  static String resolve(String url) =>
+      url.startsWith('/') ? '${AppConfig.apiBaseUrl}$url' : url;
 
   Future<CreateUploadUrlResponse> _createUploadUrl(int encryptedSizeBytes) {
     return _client.request(
@@ -30,6 +31,21 @@ class MediaApi {
       body: {'encryptedSizeBytes': encryptedSizeBytes},
       parse: (data) => CreateUploadUrlResponse.fromJson(data as Map<String, dynamic>),
     );
+  }
+
+  /// The actual PUT-or-POST-with-fields branch every `UploadTarget` needs —
+  /// factored out (`static` so `GroupsApi`'s unencrypted avatar upload can call it
+  /// too, against a target minted by a completely different route) rather than
+  /// duplicating the two-shapes-of-presigned-upload branching a second time.
+  static Future<void> uploadRawBytes(UploadTarget target, Uint8List bytes) async {
+    final url = resolve(target.url);
+    if (target.method == 'PUT') {
+      await _rawDio.putUri(Uri.parse(url), data: Stream.value(bytes), options: Options(headers: {'content-length': bytes.length}));
+    } else {
+      final fields = target.fields ?? const {};
+      final formMap = <String, dynamic>{...fields, 'file': MultipartFile.fromBytes(bytes, filename: 'file')};
+      await _rawDio.postUri(Uri.parse(url), data: FormData.fromMap(formMap));
+    }
   }
 
   /// Uploads already-encrypted bytes (see crypto/attachment_crypto.dart) and returns
@@ -40,16 +56,7 @@ class MediaApi {
     }
 
     final minted = await _createUploadUrl(ciphertext.length);
-    final target = minted.target;
-    final url = _resolve(target.url);
-
-    if (target.method == 'PUT') {
-      await _rawDio.putUri(Uri.parse(url), data: Stream.value(ciphertext), options: Options(headers: {'content-length': ciphertext.length}));
-    } else {
-      final fields = target.fields ?? const {};
-      final formMap = <String, dynamic>{...fields, 'file': MultipartFile.fromBytes(ciphertext, filename: 'file')};
-      await _rawDio.postUri(Uri.parse(url), data: FormData.fromMap(formMap));
-    }
+    await uploadRawBytes(minted.target, ciphertext);
 
     return (objectKey: minted.objectKey, encryptedSizeBytes: ciphertext.length);
   }
@@ -60,7 +67,7 @@ class MediaApi {
       method: 'GET',
       parse: (data) => (data as Map<String, dynamic>)['url'] as String,
     );
-    final response = await _rawDio.getUri<List<int>>(Uri.parse(_resolve(res)), options: Options(responseType: ResponseType.bytes));
+    final response = await _rawDio.getUri<List<int>>(Uri.parse(resolve(res)), options: Options(responseType: ResponseType.bytes));
     return Uint8List.fromList(response.data ?? const []);
   }
 }

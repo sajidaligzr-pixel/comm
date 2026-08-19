@@ -1,7 +1,10 @@
 library;
 
+import 'dart:typed_data';
+
 import 'api_client.dart';
 import 'dtos.dart';
+import 'media_api.dart' show MediaApi;
 
 class GroupsApi {
   const GroupsApi(this._client);
@@ -38,6 +41,43 @@ class GroupsApi {
 
   Future<void> removeMember(String groupId, String userId) {
     return _client.requestVoid('/api/groups/$groupId/members/$userId', method: 'DELETE');
+  }
+
+  /// Mints an upload target, PUTs/POSTs `imageBytes` to it, then confirms — see
+  /// server/modules/groups/service.ts's "Group avatar" section for why this is a
+  /// separate, simpler pipeline than the encrypted message-attachment one
+  /// `MediaApi.uploadAttachmentCiphertext` uses (reused here only for the shared
+  /// PUT-or-POST branching, `MediaApi.uploadRawBytes`).
+  Future<GroupSummary> uploadAvatar(String groupId, Uint8List imageBytes) async {
+    final minted = await _client.request<CreateUploadUrlResponse>(
+      '/api/groups/$groupId/avatar',
+      method: 'POST',
+      parse: (data) => CreateUploadUrlResponse.fromJson(data as Map<String, dynamic>),
+    );
+    await MediaApi.uploadRawBytes(minted.target, imageBytes);
+    return _client.request(
+      '/api/groups/$groupId/avatar',
+      method: 'PATCH',
+      body: {'objectKey': minted.objectKey},
+      parse: (data) => GroupSummary.fromJson(data as Map<String, dynamic>),
+    );
+  }
+
+  Future<GroupInviteLinkDto> getInviteLink(String groupId) {
+    return _client.request(
+      '/api/groups/$groupId/invite-link',
+      method: 'GET',
+      parse: (data) => GroupInviteLinkDto.fromJson(data as Map<String, dynamic>),
+    );
+  }
+
+  /// "Reset link" — revokes whatever's currently active and mints a fresh one.
+  Future<GroupInviteLinkDto> resetInviteLink(String groupId) {
+    return _client.request(
+      '/api/groups/$groupId/invite-link',
+      method: 'POST',
+      parse: (data) => GroupInviteLinkDto.fromJson(data as Map<String, dynamic>),
+    );
   }
 
   Future<List<GroupMemberTarget>> memberDevices(String groupId) {

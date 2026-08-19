@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../api/api_client.dart';
+import '../../api/app_config.dart';
 import '../../api/dtos.dart';
 import '../../app/providers.dart';
 import '../../shared/widgets/error_state.dart';
@@ -20,6 +23,9 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
   GroupSummary? _group;
   String? _error;
   bool _loading = true;
+  bool _avatarBusy = false;
+  GroupInviteLinkDto? _inviteLink;
+  bool _inviteBusy = false;
 
   @override
   void initState() {
@@ -85,6 +91,73 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
     }
   }
 
+  /// Mirrors thread_screen.dart's `_pickAndSendPhoto` — pick from the gallery,
+  /// read the raw bytes, hand them to `GroupsApi.uploadAvatar` (server/modules/
+  /// groups/service.ts's "Group avatar" section — a plain, unencrypted upload,
+  /// unlike message media).
+  Future<void> _pickAvatar() async {
+    final picked = await ImagePicker().pickImage(
+      source: ImageSource.gallery,
+      imageQuality: 90,
+    );
+    if (picked == null) return;
+    final bytes = await picked.readAsBytes();
+    setState(() => _avatarBusy = true);
+    try {
+      final updated = await ref
+          .read(groupsApiProvider)
+          .uploadAvatar(widget.groupId, bytes);
+      if (mounted) setState(() => _group = updated);
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } finally {
+      if (mounted) setState(() => _avatarBusy = false);
+    }
+  }
+
+  Future<void> _getInviteLink() async {
+    setState(() => _inviteBusy = true);
+    try {
+      final link = await ref.read(groupsApiProvider).getInviteLink(widget.groupId);
+      if (mounted) setState(() => _inviteLink = link);
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } finally {
+      if (mounted) setState(() => _inviteBusy = false);
+    }
+  }
+
+  Future<void> _resetInviteLink() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reset invite link?'),
+        content: const Text('The current link will stop working.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Reset')),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() => _inviteBusy = true);
+    try {
+      final link = await ref.read(groupsApiProvider).resetInviteLink(widget.groupId);
+      if (mounted) setState(() => _inviteLink = link);
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } finally {
+      if (mounted) setState(() => _inviteBusy = false);
+    }
+  }
+
+  String _inviteUrl(GroupInviteLinkDto link) => '${AppConfig.apiBaseUrl}/join-group/${link.token}';
+
+  void _copyInviteLink(GroupInviteLinkDto link) {
+    Clipboard.setData(ClipboardData(text: _inviteUrl(link)));
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Invite link copied')));
+  }
+
   Future<void> _removeMember(GroupMemberDto member) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -127,7 +200,42 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
                   padding: const EdgeInsets.all(16),
                   child: Column(
                     children: [
-                      CircleAvatar(radius: 40, child: Text(group.name.isNotEmpty ? group.name[0].toUpperCase() : '?', style: const TextStyle(fontSize: 28))),
+                      Stack(
+                        children: [
+                          CircleAvatar(
+                            radius: 40,
+                            backgroundImage: group.avatarUrl != null
+                                ? NetworkImage(group.avatarUrl!)
+                                : null,
+                            child: group.avatarUrl == null
+                                ? Text(
+                                    group.name.isNotEmpty ? group.name[0].toUpperCase() : '?',
+                                    style: const TextStyle(fontSize: 28),
+                                  )
+                                : null,
+                          ),
+                          if (_isAdmin)
+                            Positioned(
+                              bottom: 0,
+                              right: 0,
+                              child: InkWell(
+                                onTap: _avatarBusy ? null : _pickAvatar,
+                                customBorder: const CircleBorder(),
+                                child: CircleAvatar(
+                                  radius: 12,
+                                  backgroundColor: Theme.of(context).colorScheme.primary,
+                                  child: _avatarBusy
+                                      ? const SizedBox(
+                                          width: 12,
+                                          height: 12,
+                                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                        )
+                                      : const Icon(Icons.camera_alt, size: 13, color: Colors.white),
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
                       const SizedBox(height: 12),
                       Text(group.name, style: Theme.of(context).textTheme.titleLarge),
                       if (group.description != null && group.description!.isNotEmpty) ...[
@@ -144,6 +252,32 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
                     subtitle: const Text('Other members can still read, react, and call.'),
                     value: group.onlyAdminsCanMessage,
                     onChanged: (v) => _toggleOnlyAdminsCanMessage(v),
+                  ),
+                  const Divider(),
+                  ListTile(
+                    title: const Text('Invite via link'),
+                    subtitle: _inviteLink == null
+                        ? const Text('Share a link so anyone can join this group.')
+                        : Text(_inviteUrl(_inviteLink!), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    trailing: _inviteBusy
+                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                        : _inviteLink == null
+                            ? TextButton(onPressed: _getInviteLink, child: const Text('Get link'))
+                            : Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.copy, size: 20),
+                                    tooltip: 'Copy link',
+                                    onPressed: () => _copyInviteLink(_inviteLink!),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.refresh, size: 20),
+                                    tooltip: 'Reset link',
+                                    onPressed: _resetInviteLink,
+                                  ),
+                                ],
+                              ),
                   ),
                 ],
                 const Divider(),

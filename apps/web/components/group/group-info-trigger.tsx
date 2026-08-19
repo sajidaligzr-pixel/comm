@@ -1,11 +1,12 @@
 'use client';
 
-import { useState } from 'react';
-import type { GroupSummary, GroupMemberDto } from '@comm/types';
+import { useRef, useState } from 'react';
+import type { GroupSummary, GroupMemberDto, CreateUploadUrlResponse, GroupInviteLinkDto } from '@comm/types';
 import { apiFetch, ApiError } from '@/lib/api-client';
+import { uploadRawBytes } from '@/lib/media-client';
 import { Avatar } from '../chat/avatar';
 import { Dialog } from '../ui/dialog';
-import { IconTrash, IconUsers } from '../icons';
+import { IconTrash, IconUsers, IconCopy, IconImage } from '../icons';
 
 /**
  * Group info — asked for as a home for the "only admins can message" toggle
@@ -41,7 +42,7 @@ export function GroupInfoTrigger({
         onClick={() => setOpen(true)}
         className="flex min-w-0 flex-1 items-center gap-2 rounded-lg py-1 text-left hover:bg-muted"
       >
-        <Avatar name={group.name} size="sm" />
+        <Avatar name={group.name} imageUrl={group.avatarUrl} size="sm" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-foreground">{group.name}</p>
           <p className="truncate text-xs text-muted-foreground">
@@ -65,7 +66,66 @@ function GroupInfoBody({
 }): React.JSX.Element {
   const [error, setError] = useState<string | undefined>();
   const [busy, setBusy] = useState(false);
+  const [inviteLink, setInviteLink] = useState<GroupInviteLinkDto | null>(null);
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const isAdmin = group.callerRole === 'admin';
+
+  function inviteUrl(link: GroupInviteLinkDto): string {
+    return `${window.location.origin}/join-group/${link.token}`;
+  }
+
+  async function loadInviteLink() {
+    setInviteBusy(true);
+    setError(undefined);
+    try {
+      setInviteLink(await apiFetch<GroupInviteLinkDto>(`/api/groups/${group.id}/invite-link`));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load the invite link.');
+    } finally {
+      setInviteBusy(false);
+    }
+  }
+
+  async function resetInviteLink() {
+    if (!window.confirm('Reset the invite link? The current one will stop working.')) return;
+    setInviteBusy(true);
+    setError(undefined);
+    try {
+      setInviteLink(await apiFetch<GroupInviteLinkDto>(`/api/groups/${group.id}/invite-link`, { method: 'POST' }));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not reset the invite link.');
+    } finally {
+      setInviteBusy(false);
+    }
+  }
+
+  async function copyInviteLink(link: GroupInviteLinkDto) {
+    await navigator.clipboard.writeText(inviteUrl(link));
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }
+
+  async function pickAvatar(file: File) {
+    setBusy(true);
+    setError(undefined);
+    try {
+      const { objectKey, target } = await apiFetch<CreateUploadUrlResponse>(`/api/groups/${group.id}/avatar`, {
+        method: 'POST',
+      });
+      await uploadRawBytes(target, file);
+      const updated = await apiFetch<GroupSummary>(`/api/groups/${group.id}/avatar`, {
+        method: 'PATCH',
+        body: { objectKey },
+      });
+      onGroupChange(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update the group photo.');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function toggleOnlyAdminsCanMessage(next: boolean) {
     setBusy(true);
@@ -120,7 +180,34 @@ function GroupInfoBody({
   return (
     <div className="space-y-4">
       <div className="flex flex-col items-center gap-2 text-center">
-        <Avatar name={group.name} size="lg" />
+        <div className="relative">
+          <Avatar name={group.name} imageUrl={group.avatarUrl} size="lg" />
+          {isAdmin && (
+            <>
+              <button
+                type="button"
+                onClick={() => avatarInputRef.current?.click()}
+                disabled={busy}
+                aria-label="Change group photo"
+                title="Change group photo"
+                className="absolute -bottom-1 -right-1 flex h-6 w-6 items-center justify-center rounded-full border-2 border-background bg-primary text-primary-foreground disabled:opacity-50"
+              >
+                <IconImage className="h-3 w-3" />
+              </button>
+              <input
+                ref={avatarInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = '';
+                  if (file) void pickAvatar(file);
+                }}
+              />
+            </>
+          )}
+        </div>
         <p className="text-base font-semibold text-foreground">{group.name}</p>
         {group.description && <p className="text-sm text-muted-foreground">{group.description}</p>}
       </div>
@@ -139,6 +226,43 @@ function GroupInfoBody({
             className="h-5 w-5 flex-shrink-0 accent-primary"
           />
         </label>
+      )}
+
+      {isAdmin && (
+        <div className="rounded-lg border border-border px-3 py-2.5">
+          <p className="text-sm font-medium text-foreground">Invite via link</p>
+          {inviteLink ? (
+            <div className="mt-1.5 space-y-2">
+              <p className="truncate rounded-md bg-muted px-2 py-1.5 text-xs text-muted-foreground">{inviteUrl(inviteLink)}</p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void copyInviteLink(inviteLink)}
+                  className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                >
+                  <IconCopy className="h-3.5 w-3.5" /> {copied ? 'Copied' : 'Copy'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void resetInviteLink()}
+                  disabled={inviteBusy}
+                  className="text-xs font-medium text-muted-foreground hover:underline disabled:opacity-50"
+                >
+                  Reset link
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void loadInviteLink()}
+              disabled={inviteBusy}
+              className="mt-1 text-xs font-medium text-primary hover:underline disabled:opacity-50"
+            >
+              {inviteBusy ? 'Loading…' : 'Get invite link'}
+            </button>
+          )}
+        </div>
       )}
 
       {error && <p className="text-sm text-danger">{error}</p>}

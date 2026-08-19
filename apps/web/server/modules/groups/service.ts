@@ -1,6 +1,18 @@
+import { randomUUID } from 'node:crypto';
 import { prisma } from '@comm/database';
-import { AppError, type GroupSummary, type GroupMemberDto } from '@comm/types';
+import {
+  AppError,
+  type GroupSummary,
+  type GroupMemberDto,
+  type CreateUploadUrlResponse,
+  type GroupInviteLinkDto,
+  type GroupInvitePeekDto,
+} from '@comm/types';
+import { generateSecureToken } from '@comm/security';
+import { getObjectStorage } from '@comm/storage';
 import { requireConversationMembership, getGroupMemberPrimaryDevices } from '../conversations/service';
+
+const AVATAR_MAX_BYTES = 5 * 1024 * 1024; // 5 MiB — a group icon, not a general file attachment
 
 /**
  * Group CRUD + membership (docs/13-roadmap.md's group chat pass, ahead of the
@@ -33,12 +45,18 @@ async function toGroupSummary(groupId: string, callerUserId: string): Promise<Gr
     joinedAt: m.joinedAt.toISOString(),
   }));
 
+  // Minted fresh per-request, same as message-attachment downloads — see
+  // GroupSummary.avatarUrl's own docstring for why this isn't just the raw
+  // objectKey handed to the client.
+  const avatarUrl = group.avatarObjectKey ? await getObjectStorage().createDownloadUrl(group.avatarObjectKey) : null;
+
   return {
     id: group.id,
     conversationId: group.conversation!.id,
     name: group.name,
     description: group.description,
     onlyAdminsCanMessage: group.onlyAdminsCanMessage,
+    avatarUrl,
     callerRole: self.role,
     members,
     createdAt: group.createdAt.toISOString(),
@@ -235,6 +253,137 @@ export async function removeGroupMember(groupId: string, callerUserId: string, t
       await tx.groupSession.update({ where: { id: latestSession.id }, data: { supersededAt: new Date() } });
     }
     await tx.groupSession.create({ data: { groupId, epoch: nextEpoch } });
+  });
+
+  return toGroupSummary(groupId, callerUserId);
+}
+
+// ── Group avatar ──────────────────────────────────────────────────────────────
+// Deliberately NOT the message-attachment pipeline (media/service.ts) — that one's
+// Redis-tracked pending-upload/quota bookkeeping exists to bound per-account
+// *message* content under a cap; a group icon is a single small image with no
+// analogous per-account growth concern, so it goes straight through
+// `getObjectStorage()` instead. Not E2E encrypted, unlike message content — same
+// trust model `User.avatarObjectKey` already documents (server-visible, plain
+// object storage, gated by membership on read).
+
+export async function createGroupAvatarUploadUrl(groupId: string, callerUserId: string): Promise<CreateUploadUrlResponse> {
+  await requireGroupAdmin(groupId, callerUserId);
+  const objectKey = randomUUID();
+  const target = await getObjectStorage().createUploadTarget(objectKey, AVATAR_MAX_BYTES);
+  return { objectKey, target };
+}
+
+/** No verification the object actually exists at `objectKey` — same trust level
+ * this app already extends to a completed upload elsewhere (nothing server-side
+ * probes storage to confirm bytes landed); worst case a bogus key just fails to
+ * render for the group, not a cross-account issue. */
+export async function confirmGroupAvatar(groupId: string, callerUserId: string, objectKey: string): Promise<GroupSummary> {
+  await requireGroupAdmin(groupId, callerUserId);
+  await prisma.group.update({ where: { id: groupId }, data: { avatarObjectKey: objectKey } });
+  return toGroupSummary(groupId, callerUserId);
+}
+
+export async function removeGroupAvatar(groupId: string, callerUserId: string): Promise<GroupSummary> {
+  await requireGroupAdmin(groupId, callerUserId);
+  await prisma.group.update({ where: { id: groupId }, data: { avatarObjectKey: null } });
+  return toGroupSummary(groupId, callerUserId);
+}
+
+// ── Group invite links ───────────────────────────────────────────────────────
+// See GroupInviteLink's own schema docstring for why the token is stored in
+// plaintext rather than hashed like every other token in this schema.
+
+async function activeInviteLink(groupId: string) {
+  return prisma.groupInviteLink.findFirst({ where: { groupId, revokedAt: null }, orderBy: { createdAt: 'desc' } });
+}
+
+/** Idempotent — returns the existing active link if one exists rather than always
+ * minting a new one, so opening "Invite via link" repeatedly doesn't invalidate a
+ * link someone already shared. Use `regenerateGroupInviteLink` to force a fresh one. */
+export async function getOrCreateGroupInviteLink(groupId: string, callerUserId: string): Promise<GroupInviteLinkDto> {
+  await requireGroupAdmin(groupId, callerUserId);
+  const existing = await activeInviteLink(groupId);
+  if (existing) return { token: existing.token, groupId };
+
+  const created = await prisma.groupInviteLink.create({
+    data: { groupId, token: generateSecureToken(24), createdById: callerUserId },
+  });
+  return { token: created.token, groupId };
+}
+
+/** Revokes any current link and mints a new one — the "Reset link" action
+ * (WhatsApp's own naming for this exact operation): anyone still holding the old
+ * link can no longer use it, without needing to know who they were. */
+export async function regenerateGroupInviteLink(groupId: string, callerUserId: string): Promise<GroupInviteLinkDto> {
+  await requireGroupAdmin(groupId, callerUserId);
+  await prisma.groupInviteLink.updateMany({ where: { groupId, revokedAt: null }, data: { revokedAt: new Date() } });
+  const created = await prisma.groupInviteLink.create({
+    data: { groupId, token: generateSecureToken(24), createdById: callerUserId },
+  });
+  return { token: created.token, groupId };
+}
+
+export async function revokeGroupInviteLink(groupId: string, callerUserId: string): Promise<void> {
+  await requireGroupAdmin(groupId, callerUserId);
+  await prisma.groupInviteLink.updateMany({ where: { groupId, revokedAt: null }, data: { revokedAt: new Date() } });
+}
+
+/** Before committing to join — mirrors devices/service.ts's `getDeviceLinkInfo`
+ * (an identical "resolve what this token points to first" shape for device-linking
+ * tokens). Requires auth (unlike account-invite redemption, which IS how you get an
+ * account) but not group membership — that's exactly what this is deciding. */
+export async function peekGroupInvite(token: string, callerUserId: string): Promise<GroupInvitePeekDto> {
+  const link = await prisma.groupInviteLink.findUnique({
+    where: { token },
+    include: { group: { include: { conversation: true, members: { where: { removedAt: null } } } } },
+  });
+  if (!link || link.revokedAt) {
+    throw new AppError('NOT_FOUND', 'This invite link is invalid or has been reset.');
+  }
+  const alreadyMember = link.group.members.some((m) => m.userId === callerUserId);
+  return {
+    groupId: link.group.id,
+    groupName: link.group.name,
+    memberCount: link.group.members.length,
+    alreadyMember,
+    conversationId: alreadyMember ? link.group.conversation!.id : null,
+  };
+}
+
+/** The self-service counterpart to `addGroupMember` — same reactivate-or-create
+ * membership logic (a former member re-joining via link gets a fresh `joinedAt`,
+ * same as being re-added by an existing member would), same "no epoch bump, current
+ * session only, no retroactive history" semantics (see `addGroupMember`'s own
+ * docstring). Publishing `group.members-changed` is the caller route's job, exactly
+ * like every other group-membership mutation in this file. */
+export async function joinGroupViaInviteLink(token: string, callerUserId: string): Promise<GroupSummary> {
+  const link = await prisma.groupInviteLink.findUnique({ where: { token }, include: { group: { include: { conversation: true } } } });
+  if (!link || link.revokedAt) {
+    throw new AppError('NOT_FOUND', 'This invite link is invalid or has been reset.');
+  }
+  const groupId = link.group.id;
+  const conversationId = link.group.conversation!.id;
+
+  const existing = await prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId: callerUserId } } });
+  if (existing && !existing.removedAt) {
+    return toGroupSummary(groupId, callerUserId); // already a member — join is a no-op, not an error
+  }
+
+  await prisma.$transaction(async (tx) => {
+    if (existing) {
+      await tx.groupMember.update({
+        where: { groupId_userId: { groupId, userId: callerUserId } },
+        data: { removedAt: null, role: 'member', joinedAt: new Date() },
+      });
+    } else {
+      await tx.groupMember.create({ data: { groupId, userId: callerUserId, role: 'member' } });
+    }
+    await tx.conversationMember.upsert({
+      where: { conversationId_userId: { conversationId, userId: callerUserId } },
+      create: { conversationId, userId: callerUserId },
+      update: {},
+    });
   });
 
   return toGroupSummary(groupId, callerUserId);

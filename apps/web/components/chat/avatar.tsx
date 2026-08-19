@@ -37,13 +37,32 @@ const SIZES = {
 
 export function Avatar({
   name,
+  imageUrl,
   size = 'md',
   className,
 }: {
   name: string;
+  /** A group's `avatarUrl` (GroupSummary) or, eventually, a user's own — a signed
+   * download URL, already resolved server-side, not a raw object key. Renders the
+   * initials fallback (unchanged) whenever this is null/undefined, exactly the same
+   * as before this prop existed — every existing call site keeps working untouched. */
+  imageUrl?: string | null;
   size?: keyof typeof SIZES;
   className?: string;
 }): React.JSX.Element {
+  if (imageUrl) {
+    return (
+      // Plain <img>, not next/image — a signed, short-lived per-request URL (see
+      // GroupSummary.avatarUrl's own docstring) isn't a stable asset next/image's
+      // optimizer/cache should be handed.
+      <img
+        src={imageUrl}
+        alt=""
+        className={cn('flex-shrink-0 select-none rounded-full object-cover', SIZES[size], className)}
+      />
+    );
+  }
+
   return (
     <span
       className={cn(

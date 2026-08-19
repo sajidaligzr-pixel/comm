@@ -4,10 +4,10 @@ import { MessageEnvelopeUpload, X3dhInitPayload } from './messages';
 /**
  * `/groups` — docs/13-roadmap.md's group chat pass (real Megolm-style group ratchet,
  * docs/05-crypto-architecture.md#group-encryption), ahead of the original Phase 5
- * slot. Trimmed scope vs. the original design doc: no invite links (members are
- * added directly by an existing member; removal is admin-only), no promote/demote
- * UI yet (the `role` field and its enforcement exist; no route changes it after
- * creation).
+ * slot. Group avatars and invite links landed in a later pass (see `GroupSummary`'s
+ * `avatarObjectKey`/`avatarUrl` and `GroupInviteLinkDto` below). Still trimmed vs.
+ * the original design doc: no promote/demote UI yet (the `role` field and its
+ * enforcement exist; no route changes it after creation).
  */
 
 export const GroupRole = z.enum(['member', 'admin']);
@@ -28,6 +28,12 @@ export const GroupSummary = z.object({
   name: z.string(),
   description: z.string().nullable(),
   onlyAdminsCanMessage: z.boolean(),
+  /** A freshly-minted signed download URL (server/modules/media, `getObjectStorage()
+   * .createDownloadUrl`), not the raw `avatarObjectKey` — minted per-request, same
+   * pattern message-attachment downloads already use, rather than handing back a
+   * durable object key the client would have to separately resolve. Null when no
+   * avatar is set; both clients fall back to initials, same as a user with none. */
+  avatarUrl: z.string().nullable(),
   /** The CALLING user's own role — every response is scoped to who's asking, same
    * spirit as `ConversationSummary` never leaking data the caller isn't party to. */
   callerRole: GroupRole,
@@ -35,6 +41,39 @@ export const GroupSummary = z.object({
   createdAt: z.string().datetime(),
 });
 export type GroupSummary = z.infer<typeof GroupSummary>;
+
+/** `POST /api/groups/:id/avatar/upload-url` response — same shape as
+ * `CreateUploadUrlResponse` (media.ts) reused directly rather than re-declared,
+ * since it's the identical "here's where to PUT the bytes" contract; group avatars
+ * just skip that flow's `MessageAttachment`/quota bookkeeping entirely (a single
+ * small image per group, not per-message content under a per-account cap). */
+export const GroupAvatarConfirmRequest = z.object({ objectKey: z.string() });
+export type GroupAvatarConfirmRequest = z.infer<typeof GroupAvatarConfirmRequest>;
+
+/**
+ * WhatsApp-style "join via link" (docs/13-roadmap.md's Groups "Remaining" note).
+ * `token` here is always the RAW token (see `GroupInviteLink.token`'s own schema
+ * docstring for why it's stored, not just hashed, server-side) — safe to keep
+ * returning as plaintext to an already-authorized admin on every fetch.
+ */
+export const GroupInviteLinkDto = z.object({
+  token: z.string(),
+  groupId: z.string().uuid(),
+});
+export type GroupInviteLinkDto = z.infer<typeof GroupInviteLinkDto>;
+
+/** `GET /api/groups/invite/:token` — a peek, before committing to actually join
+ * (mirrors `getDeviceLinkInfo`'s identical "show what this token resolves to first"
+ * shape for device-linking). `alreadyMember` lets the client skip straight to "Open
+ * chat" instead of "Join" for a link the caller has already redeemed. */
+export const GroupInvitePeekDto = z.object({
+  groupId: z.string().uuid(),
+  groupName: z.string(),
+  memberCount: z.number().int().nonnegative(),
+  alreadyMember: z.boolean(),
+  conversationId: z.string().uuid().nullable(),
+});
+export type GroupInvitePeekDto = z.infer<typeof GroupInvitePeekDto>;
 
 const GroupName = z.string().trim().min(1, 'Group name is required.').max(100, 'Group name is too long.');
 const GroupDescription = z.string().trim().max(500, 'Description is too long.');
