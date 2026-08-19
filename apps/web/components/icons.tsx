@@ -274,6 +274,36 @@ export function IconArchive({ className }: IconProps): React.JSX.Element {
   );
 }
 
+/** Filled when a chat/message is pinned — `IconProps.className` alone drives
+ * whether it reads as filled (pass a `fill-current` utility class) since this
+ * one shape covers both the outline and filled treatments other icons here
+ * don't need to distinguish. */
+export function IconPin({ className }: IconProps): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">
+      <path d="M12 17v5" />
+      <path d="M8 11V6a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v5l2 3H6l2-3Z" />
+    </svg>
+  );
+}
+
+export function IconStar({ className, filled }: IconProps & { filled?: boolean }): React.JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill={filled ? 'currentColor' : 'none'}
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="m12 3 2.6 5.9 6.4.6-4.8 4.3 1.4 6.3L12 16.9 6.4 20.1l1.4-6.3-4.8-4.3 6.4-.6L12 3Z" />
+    </svg>
+  );
+}
+
 export function IconFingerprint({ className }: IconProps): React.JSX.Element {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" className={className} aria-hidden="true">

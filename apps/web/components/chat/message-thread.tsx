@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import type { MessageDto, MessageDeletionReason, DeviceSummary } from '@comm/types';
+import type { MessageDto, MessageDeletionReason, DeviceSummary, StarredMessageDto } from '@comm/types';
 import { utf8ToBytes, bytesToBase64 } from '@comm/crypto';
 import { cn } from '@/lib/cn';
 import { formatBubbleTime, formatDateSeparator, formatRecordingTime, isSameCalendarDay } from '@/lib/format';
@@ -47,6 +47,7 @@ import {
   IconImage,
   IconPaperclip,
   IconSearch,
+  IconStar,
 } from '../icons';
 
 interface DeliveryStatus {
@@ -137,6 +138,11 @@ export function MessageThread({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchIndex, setSearchIndex] = useState(0);
+  // Cross-conversation by nature (GET /api/messages/starred returns every one of
+  // the caller's starred messages, not just this conversation's) — fetched once
+  // per thread mount and just filtered by membership implicitly (a message id is
+  // globally unique, so checking `.has(id)` needs no conversationId scoping).
+  const [starredIds, setStarredIds] = useState<Set<string>>(new Set());
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -283,6 +289,42 @@ export function MessageThread({
     const interval = setInterval(poll, 8_000);
     return () => clearInterval(interval);
   }, [conversationId, currentUserId]);
+
+  // Independent of the big load() effect below — a starred-ids miss/failure
+  // shouldn't block message history from loading, and vice versa.
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch<StarredMessageDto[]>('/api/messages/starred')
+      .then((rows) => {
+        if (!cancelled) setStarredIds(new Set(rows.map((r) => r.messageId)));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function handleToggleStar(messageId: string) {
+    setActiveMenuId(null);
+    const wasStarred = starredIds.has(messageId);
+    setStarredIds((prev) => {
+      const next = new Set(prev);
+      if (wasStarred) next.delete(messageId);
+      else next.add(messageId);
+      return next;
+    });
+    try {
+      await apiFetch(`/api/messages/${messageId}/star`, { method: wasStarred ? 'DELETE' : 'POST' });
+    } catch {
+      // Revert — same optimistic-then-revert shape as handleToggleArchive (chats-shell.tsx).
+      setStarredIds((prev) => {
+        const next = new Set(prev);
+        if (wasStarred) next.add(messageId);
+        else next.delete(messageId);
+        return next;
+      });
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -950,6 +992,7 @@ export function MessageThread({
                         m.isOwn ? 'text-primary-foreground/70' : 'text-muted-foreground',
                       )}
                     >
+                      {starredIds.has(m.id) && <IconStar className="h-2.5 w-2.5" filled />}
                       {formatBubbleTime(m.sentAt)}
                       {ticksFor(m)}
                     </p>
@@ -1028,6 +1071,14 @@ export function MessageThread({
                               className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
                             >
                               <IconForward className="h-4 w-4" /> Forward
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleToggleStar(m.id)}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted"
+                            >
+                              <IconStar className="h-4 w-4" filled={starredIds.has(m.id)} />
+                              {starredIds.has(m.id) ? 'Unstar' : 'Star'}
                             </button>
                             {m.isOwn && (
                               <button

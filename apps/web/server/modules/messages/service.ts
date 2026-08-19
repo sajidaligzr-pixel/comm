@@ -1,5 +1,5 @@
 import { prisma, Prisma } from '@comm/database';
-import { AppError, type SendMessageRequest, type MessageDto } from '@comm/types';
+import { AppError, type SendMessageRequest, type MessageDto, type StarredMessageDto } from '@comm/types';
 import {
   requireConversationMembership,
   getGroupMemberPrimaryDevices,
@@ -373,4 +373,48 @@ export async function deleteMessage(callerUserId: string, messageId: string): Pr
     }),
   ]);
   return { conversationId: message.conversationId };
+}
+
+/**
+ * Starring (docs/13-roadmap.md's pinned/starred pass — see `StarredMessage`'s own
+ * doc comment in schema.prisma for why this is a plain metadata table, not routed
+ * through the E2E message pipeline the way reactions are). Membership-gated the
+ * same way every other message action is: you can only star a message in a
+ * conversation you're actually a member of — `requireConversationMembership`
+ * throws FORBIDDEN for a non-member, and a nonexistent message is NOT_FOUND,
+ * mirroring `deleteMessage`'s own lookup-then-authorize shape.
+ */
+async function requireMessageMembership(callerUserId: string, messageId: string): Promise<{ conversationId: string }> {
+  const message = await prisma.message.findUnique({ where: { id: messageId }, select: { conversationId: true } });
+  if (!message) throw new AppError('NOT_FOUND', 'Message not found.');
+  await requireConversationMembership(callerUserId, message.conversationId);
+  return { conversationId: message.conversationId };
+}
+
+export async function starMessage(callerUserId: string, messageId: string): Promise<void> {
+  await requireMessageMembership(callerUserId, messageId);
+  // Idempotent — starring an already-starred message (e.g. a retried request, or
+  // two of the caller's own devices racing) is a no-op, not an error.
+  await prisma.starredMessage.upsert({
+    where: { userId_messageId: { userId: callerUserId, messageId } },
+    create: { userId: callerUserId, messageId },
+    update: {},
+  });
+}
+
+export async function unstarMessage(callerUserId: string, messageId: string): Promise<void> {
+  await prisma.starredMessage.deleteMany({ where: { userId: callerUserId, messageId } });
+}
+
+export async function listStarredMessages(callerUserId: string): Promise<StarredMessageDto[]> {
+  const rows = await prisma.starredMessage.findMany({
+    where: { userId: callerUserId },
+    orderBy: { createdAt: 'desc' },
+    include: { message: { select: { conversationId: true } } },
+  });
+  return rows.map((row) => ({
+    messageId: row.messageId,
+    conversationId: row.message.conversationId,
+    starredAt: row.createdAt.toISOString(),
+  }));
 }

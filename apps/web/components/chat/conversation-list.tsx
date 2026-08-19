@@ -7,7 +7,7 @@ import { cn } from '@/lib/cn';
 import { formatConversationTimestamp } from '@/lib/format';
 import { deletedPlaceholderText } from '@/lib/message-content';
 import { Avatar } from './avatar';
-import { IconArchive } from '../icons';
+import { IconArchive, IconPin } from '../icons';
 
 /**
  * A real hydration mismatch found live (and now fixed): `formatConversationTimestamp`
@@ -68,6 +68,7 @@ export function ConversationList({
   previews,
   openId,
   onToggleArchive,
+  onTogglePin,
 }: {
   conversations: ConversationSummary[];
   previews: Record<string, ConversationPreview | undefined>;
@@ -75,6 +76,12 @@ export function ConversationList({
   /** Archiving is a per-caller view preference (WhatsApp's "Archive chat") — see
    * `ConversationSummary.archived`'s docstring in packages/types. */
   onToggleArchive: (conversationId: string, archived: boolean) => void;
+  /** Same per-caller-view-preference shape as archiving — see
+   * `ConversationSummary.pinned`'s docstring. Callers are expected to have
+   * already sorted `conversations` pinned-first (chats-shell.tsx) — this
+   * component only renders the toggle and the "is pinned" indicator, it
+   * doesn't re-sort its own input. */
+  onTogglePin: (conversationId: string, pinned: boolean) => void;
 }): React.JSX.Element {
   if (conversations.length === 0) {
     return (
@@ -101,7 +108,10 @@ export function ConversationList({
             <Avatar name={titleFor(c)} />
             <div className="min-w-0 flex-1">
               <div className="flex items-baseline justify-between gap-2">
-                <p className="truncate text-[15px] font-medium text-foreground">{titleFor(c)}</p>
+                <p className="flex min-w-0 items-center gap-1 truncate text-[15px] font-medium text-foreground">
+                  <span className="truncate">{titleFor(c)}</span>
+                  {c.pinned && <IconPin className="h-3 w-3 flex-shrink-0 fill-current text-muted-foreground" />}
+                </p>
                 <span className={cn('flex-shrink-0 text-xs', unread > 0 ? 'font-semibold text-primary' : 'text-muted-foreground')}>
                   <ConversationTimestamp iso={c.lastMessageAt} />
                 </span>
@@ -122,6 +132,22 @@ export function ConversationList({
                 )}
               </div>
             </div>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onTogglePin(c.id, !c.pinned);
+              }}
+              title={c.pinned ? 'Unpin chat' : 'Pin chat'}
+              aria-label={c.pinned ? 'Unpin chat' : 'Pin chat'}
+              className={cn(
+                'flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full transition-opacity hover:bg-background hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100',
+                c.pinned ? 'text-primary opacity-100' : 'text-muted-foreground opacity-0',
+              )}
+            >
+              <IconPin className={cn('h-4 w-4', c.pinned && 'fill-current')} />
+            </button>
             <button
               type="button"
               onClick={(e) => {

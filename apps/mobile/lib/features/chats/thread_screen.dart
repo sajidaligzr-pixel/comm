@@ -285,6 +285,11 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// for why this exists at all.
   final Set<String> _pendingIds = {};
 
+  /// Cross-conversation by nature (GET /api/messages/starred returns every one
+  /// of the caller's starred messages) — fetched once per thread mount, mirrors
+  /// apps/web's identical `starredIds` state (message-thread.tsx).
+  Set<String> _starredIds = {};
+
   /// The message a long-press has staged to reply to — mirrors web's
   /// `replyingTo` (message-thread.tsx) exactly: shown as a preview strip above
   /// the composer, cleared the instant a send actually starts (not after it
@@ -459,6 +464,53 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       const Duration(seconds: 8),
       (_) => _pollDeliveryStatus(),
     );
+
+    _loadStarred();
+  }
+
+  Future<void> _loadStarred() async {
+    try {
+      final rows = await ref.read(messagesApiProvider).listStarred();
+      if (mounted) {
+        setState(() => _starredIds = rows.map((r) => r.messageId).toSet());
+      }
+    } on ApiException catch (_) {
+      // Best-effort — an empty/stale starred set just means no star badges
+      // show up until the next thread visit; never worth blocking on.
+    }
+  }
+
+  Future<void> _toggleStar(CachedMessage message) async {
+    final wasStarred = _starredIds.contains(message.id);
+    setState(() {
+      _starredIds = {..._starredIds};
+      if (wasStarred) {
+        _starredIds.remove(message.id);
+      } else {
+        _starredIds.add(message.id);
+      }
+    });
+    try {
+      if (wasStarred) {
+        await ref.read(messagesApiProvider).unstar(message.id);
+      } else {
+        await ref.read(messagesApiProvider).star(message.id);
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() {
+          _starredIds = {..._starredIds};
+          if (wasStarred) {
+            _starredIds.add(message.id);
+          } else {
+            _starredIds.remove(message.id);
+          }
+        });
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    }
   }
 
   /// See `_statusPollTimer`'s own docstring for why this exists at all. Skips the
@@ -1100,6 +1152,21 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
               onTap: () {
                 Navigator.of(context).pop();
                 _openForwardSheet(message);
+              },
+            ),
+            ListTile(
+              leading: Icon(
+                _starredIds.contains(message.id)
+                    ? Icons.star
+                    : Icons.star_border,
+                color: _starredIds.contains(message.id)
+                    ? WhatsAppColors.tealAccent
+                    : null,
+              ),
+              title: Text(_starredIds.contains(message.id) ? 'Unstar' : 'Star'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _toggleStar(message);
               },
             ),
             if (message.isOwn)
@@ -1766,6 +1833,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                       onReactTap: (emoji) => _react(message, emoji),
                       searchQuery: _searchOpen ? normalizedSearchQuery : '',
                       isActiveSearchMatch: message.id == activeSearchMatchId,
+                      starred: _starredIds.contains(message.id),
                     );
                   },
                 ),
@@ -2145,6 +2213,7 @@ class _MessageBubble extends StatelessWidget {
     this.onReactTap,
     this.searchQuery = '',
     this.isActiveSearchMatch = false,
+    this.starred = false,
   });
   final CachedMessage message;
   final void Function(AttachmentDescriptor) onDownload;
@@ -2174,6 +2243,10 @@ class _MessageBubble extends StatelessWidget {
   /// same yellow ring web's message-thread.tsx uses for the current match.
   final String searchQuery;
   final bool isActiveSearchMatch;
+
+  /// See `StarredMessage`'s doc comment in schema.prisma — resolved once per
+  /// build by the parent from `_ThreadScreenState._starredIds`.
+  final bool starred;
 
   @override
   Widget build(BuildContext context) {
@@ -2381,6 +2454,14 @@ class _MessageBubble extends StatelessWidget {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      if (starred) ...[
+                        Icon(
+                          Icons.star,
+                          size: 10,
+                          color: fgColor.withValues(alpha: 0.7),
+                        ),
+                        const SizedBox(width: 3),
+                      ],
                       Text(
                         _formatBubbleTime(message.sentAt),
                         style: TextStyle(

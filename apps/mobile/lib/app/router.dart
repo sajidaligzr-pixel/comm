@@ -20,6 +20,7 @@ import '../features/auth/change_password_screen.dart';
 import '../features/calls/call_history_screen.dart';
 import '../features/chats/archived_chats_screen.dart';
 import '../features/chats/chats_list_screen.dart';
+import '../features/chats/starred_messages_screen.dart';
 import '../features/chats/thread_screen.dart';
 import '../features/devices/devices_screen.dart';
 import '../features/groups/new_group_screen.dart';
@@ -108,6 +109,10 @@ final routerProvider = Provider<GoRouter>((ref) {
       GoRoute(
         path: '/chats/archived',
         builder: (context, state) => const ArchivedChatsScreen(),
+      ),
+      GoRoute(
+        path: '/starred',
+        builder: (context, state) => const StarredMessagesScreen(),
       ),
       GoRoute(
         path: '/devices',

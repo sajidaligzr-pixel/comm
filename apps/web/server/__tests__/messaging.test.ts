@@ -12,7 +12,15 @@ import {
 import type { NewDeviceRegistration, SendMessageRequest } from '@comm/types';
 import { registerDevice } from '../modules/devices/service';
 import { createOrGetDirectConversation, requireConversationMembership, getConversation } from '../modules/conversations/service';
-import { sendMessage, listMessages, deleteMessage, markConversationRead } from '../modules/messages/service';
+import {
+  sendMessage,
+  listMessages,
+  deleteMessage,
+  markConversationRead,
+  starMessage,
+  unstarMessage,
+  listStarredMessages,
+} from '../modules/messages/service';
 import { getKeyBundle } from '../modules/keys/service';
 import { createActiveUser, deleteTestUser } from './helpers';
 
@@ -311,6 +319,62 @@ describe('messaging (real crypto end-to-end)', () => {
     const page = await listMessages(bob.userId, bobDeviceId, conversation.id, undefined, 10);
     const reactionDto = page.items.find((m) => m.contentTypeHint === 'reaction');
     expect(reactionDto).toBeDefined();
+  });
+
+  /**
+   * Starring (docs/13-roadmap.md's pinned/starred pass) — a plain metadata
+   * table, unlike reactions, since a star carries no content to protect (see
+   * `StarredMessage`'s doc comment in schema.prisma). This covers the
+   * authorization boundary `starMessage`/`unstarMessage` share with every other
+   * message action: only an actual member of the message's conversation can
+   * star it.
+   */
+  it('starring a message: only a member can star it, listStarredMessages returns it, unstarring removes it', async () => {
+    const { alice, bob, aliceDevice, aliceDeviceId, bobDeviceId, conversation } = await setupConversation();
+
+    const bundle = await getKeyBundle(bob.userId, bobDeviceId);
+    const publicBundle: PublicKeyBundle = {
+      identityAgreementKey: Buffer.from(bundle.identityKey.agreementPublicKey, 'base64'),
+      identitySigningKey: Buffer.from(bundle.identityKey.signingPublicKey, 'base64'),
+      signedPreKeyId: bundle.signedPreKey.keyId,
+      signedPreKeyPublic: Buffer.from(bundle.signedPreKey.publicKey, 'base64'),
+      signedPreKeySignature: Buffer.from(bundle.signedPreKey.signature, 'base64'),
+      oneTimePreKeyId: bundle.oneTimePreKey?.keyId ?? null,
+      oneTimePreKeyPublic: bundle.oneTimePreKey ? Buffer.from(bundle.oneTimePreKey.publicKey, 'base64') : null,
+    };
+    const { session, x3dhInit } = createOutboundSession(aliceDevice.identity, publicBundle);
+    const envelope = encryptMessage(session, new TextEncoder().encode('worth remembering'));
+    const messageId = crypto.randomUUID();
+    await sendMessage(
+      { userId: alice.userId, deviceId: aliceDeviceId },
+      conversation.id,
+      {
+        messageId,
+        envelopeType: 'x3dh_ratchet_1to1',
+        recipients: [{ deviceId: bobDeviceId, envelope, x3dhInit }],
+        contentTypeHint: 'text',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+
+    const outsider = await createActiveUser();
+    createdUserIds.push(outsider.userId);
+    await expect(starMessage(outsider.userId, messageId)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+
+    await starMessage(bob.userId, messageId);
+    // Idempotent — starring an already-starred message is a no-op, not an error.
+    await starMessage(bob.userId, messageId);
+
+    const starred = await listStarredMessages(bob.userId);
+    expect(starred).toHaveLength(1);
+    expect(starred[0]).toMatchObject({ messageId, conversationId: conversation.id });
+
+    // Alice's own star list is unaffected — starring is per-user.
+    expect(await listStarredMessages(alice.userId)).toHaveLength(0);
+
+    await unstarMessage(bob.userId, messageId);
+    expect(await listStarredMessages(bob.userId)).toHaveLength(0);
   });
 
   it('deleting a message tombstones it: ciphertext is actually nulled, not just flagged', async () => {

@@ -50,6 +50,7 @@ async function toSummary(conversationId: string, callerUserId: string): Promise<
     lastMessageAt: lastMessage?.serverReceivedAt.toISOString() ?? null,
     unreadCount,
     archived: self.archived,
+    pinned: self.pinned,
   };
 
   if (conversation.type === 'group') {
@@ -144,17 +145,20 @@ export async function getConversation(callerUserId: string, conversationId: stri
 export async function updateConversationSettings(
   callerUserId: string,
   conversationId: string,
-  changes: { disappearingTimer?: DisappearingTimer; archived?: boolean },
+  changes: { disappearingTimer?: DisappearingTimer; archived?: boolean; pinned?: boolean },
 ): Promise<ConversationSummary> {
   await requireConversationMembership(callerUserId, conversationId);
 
   if (changes.disappearingTimer !== undefined) {
     await prisma.conversation.update({ where: { id: conversationId }, data: { disappearingTimer: changes.disappearingTimer } });
   }
-  if (changes.archived !== undefined) {
+  if (changes.archived !== undefined || changes.pinned !== undefined) {
     await prisma.conversationMember.update({
       where: { conversationId_userId: { conversationId, userId: callerUserId } },
-      data: { archived: changes.archived },
+      data: {
+        ...(changes.archived !== undefined ? { archived: changes.archived } : {}),
+        ...(changes.pinned !== undefined ? { pinned: changes.pinned } : {}),
+      },
     });
   }
 

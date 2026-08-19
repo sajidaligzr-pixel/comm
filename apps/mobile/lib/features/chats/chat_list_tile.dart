@@ -20,7 +20,18 @@ Widget buildChatListTile(
         c.displayTitle().isNotEmpty ? c.displayTitle()[0].toUpperCase() : '?',
       ),
     ),
-    title: Text(c.displayTitle()),
+    title: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Flexible(
+          child: Text(c.displayTitle(), overflow: TextOverflow.ellipsis),
+        ),
+        if (c.pinned) ...[
+          const SizedBox(width: 4),
+          const Icon(Icons.push_pin, size: 14, color: Colors.grey),
+        ],
+      ],
+    ),
     subtitle: c.type == 'group'
         ? Text('${c.groupMemberCount ?? 0} members')
         : null,

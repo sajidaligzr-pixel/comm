@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import type { ConversationSummary, MessageDto, MessageDeletionReason } from '@comm/types';
 import { cn } from '@/lib/cn';
@@ -13,7 +14,7 @@ import { decodeMessagePlaintext } from '@/lib/message-content';
 import { ConversationList, type ConversationPreview } from './conversation-list';
 import { NewChatForm } from './new-chat-form';
 import { NewGroupForm } from './new-group-form';
-import { IconSearch, IconEdit, IconX, IconArchive, IconChevronUp, IconUsers } from '../icons';
+import { IconSearch, IconEdit, IconX, IconArchive, IconChevronUp, IconUsers, IconStar } from '../icons';
 import { Input } from '../ui/input';
 import { Dialog } from '../ui/dialog';
 
@@ -266,6 +267,17 @@ export function ChatsShell({
     }
   }
 
+  /** Same optimistic-then-revert shape as `handleToggleArchive` above. */
+  async function handleTogglePin(conversationId: string, pinned: boolean) {
+    const previous = conversations;
+    setConversations((prev) => prev.map((c) => (c.id === conversationId ? { ...c, pinned } : c)));
+    try {
+      await apiFetch(`/api/conversations/${conversationId}`, { method: 'PATCH', body: { pinned } });
+    } catch {
+      setConversations(previous);
+    }
+  }
+
   const isThreadOpen = openId !== null;
   const query = search.trim().toLowerCase();
   const matchesQuery = (c: ConversationSummary) => {
@@ -273,7 +285,12 @@ export function ChatsShell({
     if (c.type === 'group') return c.group.name.toLowerCase().includes(query);
     return c.otherUser.displayName.toLowerCase().includes(query) || c.otherUser.username.toLowerCase().includes(query);
   };
-  const activeFiltered = conversations.filter((c) => !c.archived && matchesQuery(c));
+  // Pinned-first, same as WhatsApp's own chat list — a plain stable sort (Array#sort
+  // is stable in every JS engine this app targets) keeps everything else in whatever
+  // order it already was (most-recent-first, from listConversations/toSummary).
+  const activeFiltered = conversations
+    .filter((c) => !c.archived && matchesQuery(c))
+    .sort((a, b) => Number(b.pinned) - Number(a.pinned));
   const archivedFiltered = conversations.filter((c) => c.archived && matchesQuery(c));
 
   return (
@@ -286,18 +303,28 @@ export function ChatsShell({
       >
         <div className="flex flex-shrink-0 items-center justify-between gap-2 px-4 py-3">
           <h1 className="text-xl font-semibold text-foreground">Chats</h1>
-          <button
-            type="button"
-            onClick={() => setComposeOpen((v) => !v)}
-            aria-label={composeOpen ? 'Close new chat' : 'New chat'}
-            aria-expanded={composeOpen}
-            className={cn(
-              'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
-              composeOpen && 'bg-muted text-foreground',
-            )}
-          >
-            {composeOpen ? <IconX className="h-5 w-5" /> : <IconEdit className="h-5 w-5" />}
-          </button>
+          <div className="flex items-center gap-1">
+            <Link
+              href="/starred"
+              aria-label="Starred messages"
+              title="Starred messages"
+              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <IconStar className="h-5 w-5" />
+            </Link>
+            <button
+              type="button"
+              onClick={() => setComposeOpen((v) => !v)}
+              aria-label={composeOpen ? 'Close new chat' : 'New chat'}
+              aria-expanded={composeOpen}
+              className={cn(
+                'flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+                composeOpen && 'bg-muted text-foreground',
+              )}
+            >
+              {composeOpen ? <IconX className="h-5 w-5" /> : <IconEdit className="h-5 w-5" />}
+            </button>
+          </div>
         </div>
 
         {composeOpen && (
@@ -351,6 +378,7 @@ export function ChatsShell({
               previews={previews}
               openId={openId}
               onToggleArchive={(id, archived) => void handleToggleArchive(id, archived)}
+              onTogglePin={(id, pinned) => void handleTogglePin(id, pinned)}
             />
           )}
           <ConversationList
@@ -358,6 +386,7 @@ export function ChatsShell({
             previews={previews}
             openId={openId}
             onToggleArchive={(id, archived) => void handleToggleArchive(id, archived)}
+            onTogglePin={(id, pinned) => void handleTogglePin(id, pinned)}
           />
         </div>
       </aside>

@@ -284,6 +284,7 @@ class ConversationSummary {
   final String? lastMessageAt;
   final int unreadCount;
   final bool archived;
+  final bool pinned;
   // type == 'direct'
   final String? otherUserId;
   final String? otherUsername;
@@ -300,6 +301,7 @@ class ConversationSummary {
     required this.lastMessageAt,
     required this.unreadCount,
     required this.archived,
+    required this.pinned,
     this.otherUserId,
     this.otherUsername,
     this.otherDisplayName,
@@ -319,6 +321,7 @@ class ConversationSummary {
       lastMessageAt: json['lastMessageAt'] as String?,
       unreadCount: json['unreadCount'] as int,
       archived: json['archived'] as bool,
+      pinned: json['pinned'] as bool? ?? false,
       otherUserId: otherUser?['id'] as String?,
       otherUsername: otherUser?['username'] as String?,
       otherDisplayName: otherUser?['displayName'] as String?,
@@ -333,23 +336,49 @@ class ConversationSummary {
       ? (otherDisplayName ?? otherUsername ?? 'Unknown')
       : (groupName ?? 'Group');
 
-  /// Only the fields chats_list_screen.dart's optimistic archive toggle and
-  /// thread_screen.dart's disappearing-timer menu actually need to change —
-  /// not a general-purpose copyWith over every field.
-  ConversationSummary copyWith({bool? archived, String? disappearingTimer}) =>
-      ConversationSummary(
-        id: id,
-        type: type,
-        disappearingTimer: disappearingTimer ?? this.disappearingTimer,
-        lastMessageAt: lastMessageAt,
-        unreadCount: unreadCount,
-        archived: archived ?? this.archived,
-        otherUserId: otherUserId,
-        otherUsername: otherUsername,
-        otherDisplayName: otherDisplayName,
-        groupId: groupId,
-        groupName: groupName,
-        groupMemberCount: groupMemberCount,
+  /// Only the fields chats_list_screen.dart's optimistic archive/pin toggles
+  /// and thread_screen.dart's disappearing-timer menu actually need to change
+  /// — not a general-purpose copyWith over every field.
+  ConversationSummary copyWith({
+    bool? archived,
+    bool? pinned,
+    String? disappearingTimer,
+  }) => ConversationSummary(
+    id: id,
+    type: type,
+    disappearingTimer: disappearingTimer ?? this.disappearingTimer,
+    lastMessageAt: lastMessageAt,
+    unreadCount: unreadCount,
+    archived: archived ?? this.archived,
+    pinned: pinned ?? this.pinned,
+    otherUserId: otherUserId,
+    otherUsername: otherUsername,
+    otherDisplayName: otherDisplayName,
+    groupId: groupId,
+    groupName: groupName,
+    groupMemberCount: groupMemberCount,
+  );
+}
+
+/// `GET /api/messages/starred` — mirrors apps/web's identical DTO
+/// (packages/types/src/messages.ts), metadata-only for the same reason: the
+/// server has no plaintext to give back (E2E). The client resolves each entry
+/// against its own local decrypted cache (`loadCachedMessages` for
+/// `conversationId`, then find by `messageId`).
+class StarredMessageDto {
+  final String messageId;
+  final String conversationId;
+  final String starredAt;
+  const StarredMessageDto({
+    required this.messageId,
+    required this.conversationId,
+    required this.starredAt,
+  });
+  static StarredMessageDto fromJson(Map<String, dynamic> json) =>
+      StarredMessageDto(
+        messageId: json['messageId'] as String,
+        conversationId: json['conversationId'] as String,
+        starredAt: json['starredAt'] as String,
       );
 }
 
@@ -393,6 +422,7 @@ class SendMessageRequest {
   /// Group sends only — the one shared envelope every member decrypts.
   final MessageEnvelopeUpload? envelope;
   final X3dhInitPayload? x3dhInit;
+
   /// Direct sends only — one entry per target device. Exactly one of
   /// `envelope`/`recipients` must be set (mirrors `SendMessageRequest`'s own
   /// `.refine()` in packages/types/src/messages.ts).
@@ -419,7 +449,8 @@ class SendMessageRequest {
     'envelopeType': envelopeType,
     if (envelope != null) 'envelope': envelope!.toJson(),
     if (envelope != null) 'x3dhInit': x3dhInit?.toJson(),
-    if (recipients != null) 'recipients': recipients!.map((r) => r.toJson()).toList(),
+    if (recipients != null)
+      'recipients': recipients!.map((r) => r.toJson()).toList(),
     'contentTypeHint': contentTypeHint,
     'replyToMessageId': replyToMessageId,
     'sentAt': sentAt,

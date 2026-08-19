@@ -16,10 +16,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   });
 }
 
-// Two mutable conversation settings today: the disappearing-message timer (shared)
-// and the archived flag (per-caller) — see UpdateConversationRequest's docstring.
-// Membership-gated inside the service, not here — same pattern as every other
-// conversation-scoped route.
+// Three mutable conversation settings today: the disappearing-message timer
+// (shared) and the archived/pinned flags (both per-caller) — see
+// UpdateConversationRequest's docstring. Membership-gated inside the service,
+// not here — same pattern as every other conversation-scoped route.
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   return handleRoute(async () => {
     const ctx = await requireAuth(req);

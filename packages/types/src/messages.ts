@@ -103,6 +103,9 @@ const ConversationSummaryCommon = {
    * that affects what the other participant(s) see. Lives on `ConversationMember`,
    * not `Conversation` (server/modules/conversations/service.ts). */
   archived: z.boolean(),
+  /** Same per-member-view-preference shape as `archived` above — pins this
+   * conversation to the top of the CALLER's own list only. */
+  pinned: z.boolean(),
 };
 
 /**
@@ -152,8 +155,9 @@ export const UpdateConversationRequest = z
   .object({
     disappearingTimer: DisappearingTimer.optional(),
     archived: z.boolean().optional(),
+    pinned: z.boolean().optional(),
   })
-  .refine((v) => v.disappearingTimer !== undefined || v.archived !== undefined, {
+  .refine((v) => v.disappearingTimer !== undefined || v.archived !== undefined || v.pinned !== undefined, {
     message: 'At least one setting must be provided.',
   });
 export type UpdateConversationRequest = z.infer<typeof UpdateConversationRequest>;
@@ -237,3 +241,19 @@ export const MarkReadRequest = z.object({
   upToMessageId: z.string().uuid(),
 });
 export type MarkReadRequest = z.infer<typeof MarkReadRequest>;
+
+/**
+ * `GET /api/messages/starred` — see `StarredMessage`'s doc comment in
+ * schema.prisma for why this is metadata-only, never plaintext: the server
+ * genuinely has no content to give back (E2E), so this just tells the client
+ * WHICH message, in WHICH conversation, to look up in its own local decrypted
+ * cache (`loadCachedMessages(kek, conversationId)`, then find by id) — a
+ * client that never decrypted that message has nothing to show, same honest
+ * limitation as every other view in this app.
+ */
+export const StarredMessageDto = z.object({
+  messageId: z.string().uuid(),
+  conversationId: z.string().uuid(),
+  starredAt: z.string().datetime(),
+});
+export type StarredMessageDto = z.infer<typeof StarredMessageDto>;

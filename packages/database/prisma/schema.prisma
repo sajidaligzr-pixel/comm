@@ -61,6 +61,7 @@ model User {
   conversationMemberships ConversationMember[]
   sentMessages            Message[]
   messageReactions        MessageReaction[]
+  starredMessages         StarredMessage[]
   groupMemberships        GroupMember[]
   initiatedCalls          Call[]
 
@@ -367,6 +368,10 @@ model ConversationMember {
   joinedAt          DateTime  @default(now()) @map("joined_at")
   mutedUntil        DateTime? @map("muted_until")
   archived          Boolean   @default(false)
+  // Per-member, same as `archived` above — WhatsApp's "Pin chat" is a private view
+  // preference (sorts to the top of YOUR OWN list only), not something the other
+  // participant(s) see or are affected by. docs/13-roadmap.md's pinned-chats pass.
+  pinned            Boolean   @default(false)
   lastReadMessageId String?   @map("last_read_message_id") @db.Uuid
 
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
@@ -425,6 +430,7 @@ model Message {
   senderDevice Device             @relation(fields: [senderDeviceId], references: [id], onDelete: Restrict)
   recipients   MessageRecipient[]
   reactions    MessageReaction[]
+  starredBy    StarredMessage[]
   attachment   MessageAttachment?
 
   @@index([conversationId, serverReceivedAt])
@@ -517,6 +523,30 @@ model MessageReaction {
 
   @@id([messageId, userId, emoji])
   @@map("message_reactions")
+}
+
+/// docs/13-roadmap.md's pinned/starred pass. Unlike `MessageReaction` above, a
+/// server-visible star carries no meaningful content to protect — it's just "this
+/// user marked this message id," not a value someone else chose to communicate —
+/// so this is a plain metadata table, not routed through the E2E message pipeline
+/// the way reactions are. Cross-device synced (star from your phone, see it on
+/// desktop) precisely because it lives server-side. Rendering a starred entry still
+/// requires the viewing device's own local decrypted cache (server/modules/
+/// messages/service.ts's `listStarredMessages` returns only ids/timestamps, never
+/// plaintext) — Double Ratchet message keys are single-use, so a device that never
+/// decrypted a given message still can't show it here either, same honest
+/// limitation every other view in this app already has.
+model StarredMessage {
+  userId    String   @map("user_id") @db.Uuid
+  messageId String   @map("message_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@id([userId, messageId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("starred_messages")
 }
 
 // ── Media attachments (docs/13-roadmap.md's file-attachment pass) ────────────────

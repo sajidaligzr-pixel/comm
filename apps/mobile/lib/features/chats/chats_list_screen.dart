@@ -249,6 +249,30 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
     }
   }
 
+  /// Same optimistic-then-revert shape as `_toggleArchive` above — mirrors
+  /// apps/web's `handleTogglePin` (chats-shell.tsx) exactly.
+  Future<void> _togglePin(ConversationSummary c) async {
+    final pinned = !c.pinned;
+    final previous = _conversations;
+    setState(() {
+      _conversations = _conversations
+          ?.map((x) => x.id == c.id ? x.copyWith(pinned: pinned) : x)
+          .toList();
+    });
+    try {
+      await ref
+          .read(conversationsApiProvider)
+          .updateSettings(c.id, pinned: pinned);
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() => _conversations = previous);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(e.message)));
+      }
+    }
+  }
+
   /// "Delete chat" — see message_cache.dart's `clearCachedMessages` and
   /// `markConversationLocallyDeleted` docstrings for exactly what this does and
   /// doesn't do (WhatsApp-parity scope: clears this device's own view, not the
@@ -295,6 +319,16 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
           children: [
             ListTile(
               leading: Icon(
+                c.pinned ? Icons.push_pin : Icons.push_pin_outlined,
+              ),
+              title: Text(c.pinned ? 'Unpin chat' : 'Pin chat'),
+              onTap: () {
+                Navigator.of(context).pop();
+                _togglePin(c);
+              },
+            ),
+            ListTile(
+              leading: Icon(
                 c.archived ? Icons.unarchive_outlined : Icons.archive_outlined,
               ),
               title: Text(c.archived ? 'Unarchive chat' : 'Archive chat'),
@@ -332,6 +366,11 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
               tooltip: 'Admin',
               onPressed: () => context.push('/admin'),
             ),
+          IconButton(
+            icon: const Icon(Icons.star_border),
+            tooltip: 'Starred messages',
+            onPressed: () => context.push('/starred'),
+          ),
           IconButton(
             icon: const Icon(Icons.call_outlined),
             tooltip: 'Calls',
@@ -393,9 +432,14 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
     }
 
     final archivedCount = conversations.where((c) => c.archived).length;
-    final visible = conversations
-        .where((c) => !c.archived && !_locallyDeleted.contains(c.id))
-        .toList();
+    // Pinned-first, same as web's chats-shell.tsx — List.sort is stable in
+    // Dart, so everything else stays in whatever order it already was
+    // (most-recent-first, from the server).
+    final visible =
+        conversations
+            .where((c) => !c.archived && !_locallyDeleted.contains(c.id))
+            .toList()
+          ..sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
 
     if (visible.isEmpty && archivedCount == 0) {
       return const EmptyState(
