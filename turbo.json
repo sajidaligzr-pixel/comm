@@ -1,5 +1,20 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  // Found live: CI (GitHub Actions, which sets `CI=true`) failed `npm run test`'s
+  // turbo-mediated path with every DB-touching test throwing "DATABASE_URL is not
+  // set," while a SIBLING step in the exact same job running `npm run
+  // db:migrate:deploy` directly (no turbo involved) saw it fine — proving the
+  // workflow's own `env:` block was never the problem, turbo's own env handling
+  // was. Turborepo defaults to a stricter, allowlist-based env mode specifically
+  // when it detects a CI environment (to keep remote-cache keys deterministic
+  // across machines) — this repo has remote caching disabled everywhere ("Remote
+  // caching disabled" in every run), so that protection buys nothing here and
+  // was only ever silently breaking the one thing that needed the full
+  // environment: real DATABASE_URL/REDIS_URL/JWT_*/etc. reaching the actual test
+  // process. `loose` makes every task see the same full parent environment
+  // locally and in CI alike — the actual desired behavior, made explicit instead
+  // of accidentally CI-environment-dependent.
+  "envMode": "loose",
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
