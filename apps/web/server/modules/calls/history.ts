@@ -69,6 +69,7 @@ export async function listCallHistory(userId: string, limit: number): Promise<Ca
     include: {
       conversation: {
         include: {
+          group: true,
           members: {
             where: { userId: { not: userId } },
             include: { user: { select: { id: true, username: true, displayName: true } } },
@@ -79,11 +80,17 @@ export async function listCallHistory(userId: string, limit: number): Promise<Ca
   });
 
   return calls.map((call) => {
-    const other = call.conversation.members[0]?.user ?? null;
+    // Group calls (docs/13-roadmap.md) have no single "other party" the way a 1:1
+    // call's `members[0]` derivation already assumed — that would silently pick
+    // an arbitrary OTHER member (not necessarily even someone who joined the
+    // call) and mislabel the entry, so this branches on conversation type instead.
+    const isGroup = call.conversation.type === 'group';
+    const other = isGroup ? null : (call.conversation.members[0]?.user ?? null);
     return {
       id: call.id,
       conversationId: call.conversationId,
       otherUser: other,
+      groupName: isGroup ? (call.conversation.group?.name ?? null) : null,
       direction: call.initiatorUserId === userId ? 'outgoing' : 'incoming',
       status: call.status,
       startedAt: call.startedAt?.toISOString() ?? null,

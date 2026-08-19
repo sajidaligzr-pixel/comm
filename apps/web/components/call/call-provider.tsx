@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { onRealtimeEvent, sendRealtimeEvent } from '@/lib/realtime-client';
 import { apiFetch } from '@/lib/api-client';
 import type { IceServersResponse, IceServer, CallSessionDescription, CallIceCandidateInit, CallRejectReason } from '@comm/types';
+import { getActiveCallKind, setActiveCallKind } from '@/lib/call-coordination';
 import { CallOverlay } from './call-overlay';
 
 /**
@@ -143,6 +144,11 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
 
   const teardown = useCallback((finalStatus: string) => {
     const idAtTeardown = callRef.current?.callId ?? null;
+    // Cleared immediately, not deferred to the 'ended' cooldown's setTimeout below
+    // — a fresh incoming call (1:1 or group) arriving during that ~2.5s window is
+    // meant to preempt it (see that setTimeout's own comment), so this must stop
+    // blocking the other provider the instant this call actually ends, not after.
+    setActiveCallKind(null);
 
     if (ringTimeoutRef.current) {
       clearTimeout(ringTimeoutRef.current);
@@ -269,7 +275,7 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
 
   const startCall = useCallback(
     (conversationId: string, otherUserId: string, otherDisplayName: string) => {
-      if (phaseRef.current !== 'idle') return;
+      if (phaseRef.current !== 'idle' || getActiveCallKind()) return;
 
       void (async () => {
         setMicError(null);
@@ -281,6 +287,7 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
           return;
         }
         localStreamRef.current = stream;
+        setActiveCallKind('1:1');
 
         const callId = crypto.randomUUID();
         const next: ActiveCall = { callId, conversationId, otherUserId, otherDisplayName, direction: 'outgoing' };
@@ -413,8 +420,12 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
         fromDisplayName: string;
         sdp: CallSessionDescription;
       };
-      if (phaseRef.current !== 'idle' && phaseRef.current !== 'ended') {
-        // Already on (or wrapping up) a call — decline as busy, no second ring UI.
+      // Busy if already on (or wrapping up) a 1:1 call, OR mid a group call — the
+      // group-call side has no per-invitee "busy" signal to send back the way 1:1
+      // does (see call-coordination.ts's own docstring), so this 1:1 ring is the
+      // one place that asymmetry has to be handled: reject as busy exactly like
+      // the same-kind case just below.
+      if ((phaseRef.current !== 'idle' && phaseRef.current !== 'ended') || getActiveCallKind() === 'group') {
         sendRealtimeEvent({ type: 'call.reject', conversationId: p.conversationId, callId: p.callId, reason: 'busy' });
         return;
       }
@@ -428,6 +439,7 @@ export function CallProvider({ children }: { children: React.ReactNode }): React
       };
       callRef.current = next;
       phaseRef.current = 'incoming';
+      setActiveCallKind('1:1');
       setCall(next);
       setPhase('incoming');
       setStatusText('Incoming call…');

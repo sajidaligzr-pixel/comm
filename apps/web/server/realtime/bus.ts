@@ -4,6 +4,7 @@ import {
   MESSAGE_EVENTS_CHANNEL,
   CALL_EVENTS_CHANNEL,
   GROUP_EVENTS_CHANNEL,
+  GROUP_CALL_EVENTS_CHANNEL,
   type DeviceEvent,
   type MessageEvent,
   type MessageDto,
@@ -13,6 +14,8 @@ import {
   type CallIceCandidateInit,
   type CallRejectReason,
   type GroupEvent,
+  type GroupCallEvent,
+  type GroupCallParticipant,
 } from '@comm/types';
 
 /**
@@ -30,10 +33,12 @@ export {
   MESSAGE_EVENTS_CHANNEL,
   CALL_EVENTS_CHANNEL,
   GROUP_EVENTS_CHANNEL,
+  GROUP_CALL_EVENTS_CHANNEL,
   type DeviceEvent,
   type MessageEvent,
   type CallEvent,
   type GroupEvent,
+  type GroupCallEvent,
 };
 
 export async function publishDeviceRevoked(deviceId: string): Promise<void> {
@@ -144,4 +149,84 @@ export async function publishGroupKeyShare(targetDeviceId: string, groupId: stri
 
 export async function publishGroupMembersChanged(targetDeviceId: string, groupId: string, conversationId: string): Promise<void> {
   await publishGroupEvent({ type: 'group.members-changed', targetDeviceId, groupId, conversationId });
+}
+
+async function publishGroupCallEvent(event: GroupCallEvent): Promise<void> {
+  await getRedisClient().publish(GROUP_CALL_EVENTS_CHANNEL, JSON.stringify(event));
+}
+
+export async function publishGroupCallInvited(
+  targetDeviceId: string,
+  conversationId: string,
+  callId: string,
+  fromUserId: string,
+  fromDisplayName: string,
+  groupName: string,
+): Promise<void> {
+  await publishGroupCallEvent({ type: 'group-call.invited', targetDeviceId, conversationId, callId, fromUserId, fromDisplayName, groupName });
+}
+
+export async function publishGroupCallRoster(
+  targetDeviceId: string,
+  conversationId: string,
+  callId: string,
+  participants: GroupCallParticipant[],
+): Promise<void> {
+  await publishGroupCallEvent({ type: 'group-call.roster', targetDeviceId, conversationId, callId, participants });
+}
+
+export async function publishGroupCallParticipantJoined(
+  targetDeviceId: string,
+  conversationId: string,
+  callId: string,
+  participant: GroupCallParticipant,
+): Promise<void> {
+  await publishGroupCallEvent({ type: 'group-call.participant-joined', targetDeviceId, conversationId, callId, participant });
+}
+
+export async function publishGroupCallParticipantLeft(
+  targetDeviceId: string,
+  conversationId: string,
+  callId: string,
+  userId: string,
+  deviceId: string,
+): Promise<void> {
+  await publishGroupCallEvent({ type: 'group-call.participant-left', targetDeviceId, conversationId, callId, userId, deviceId });
+}
+
+export async function publishGroupCallEnded(targetDeviceId: string, conversationId: string, callId: string): Promise<void> {
+  await publishGroupCallEvent({ type: 'group-call.ended', targetDeviceId, conversationId, callId });
+}
+
+export async function publishGroupCallOffer(
+  targetDeviceId: string,
+  conversationId: string,
+  callId: string,
+  fromUserId: string,
+  fromDeviceId: string,
+  sdp: CallSessionDescription,
+): Promise<void> {
+  await publishGroupCallEvent({ type: 'group-call.offer', targetDeviceId, conversationId, callId, fromUserId, fromDeviceId, sdp });
+}
+
+export async function publishGroupCallAnswer(
+  targetDeviceId: string,
+  conversationId: string,
+  callId: string,
+  fromUserId: string,
+  fromDeviceId: string,
+  sdp: CallSessionDescription,
+): Promise<void> {
+  await publishGroupCallEvent({ type: 'group-call.answer', targetDeviceId, conversationId, callId, fromUserId, fromDeviceId, sdp });
+}
+
+export async function publishGroupCallIceCandidate(
+  targetDeviceId: string,
+  conversationId: string,
+  callId: string,
+  fromUserId: string,
+  fromDeviceId: string,
+  candidate: CallIceCandidateInit,
+): Promise<void> {
+  await publishGroupCallEvent({ type: 'group-call.ice-candidate', targetDeviceId, conversationId, callId, fromUserId, fromDeviceId, candidate });
 }

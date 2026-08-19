@@ -17,6 +17,12 @@ import {
   CallRejectRequest,
   CallEndRequest,
   SendGroupKeyShareRequest,
+  GroupCallStartRequest,
+  GroupCallJoinRequest,
+  GroupCallLeaveRequest,
+  GroupCallOfferRequest,
+  GroupCallAnswerRequest,
+  GroupCallIceCandidateRequest,
 } from '@comm/types';
 import { RATE_LIMIT_RULES } from '@comm/security';
 import type { AuthContext } from '../common/auth';
@@ -28,6 +34,7 @@ import { createGroupKeyShare } from '../modules/groups/key-share-service';
 import { setPendingCall, clearPendingCall } from '../modules/calls/pending';
 import { recordCallInvited, recordCallAnswered, recordCallEnded } from '../modules/calls/history';
 import { declineCall } from '../modules/calls/service';
+import { startGroupCall, joinGroupCall, leaveGroupCall, assertValidGroupCallTarget } from '../modules/calls/group-service';
 import {
   publishNewMessage,
   publishDelivered,
@@ -40,6 +47,9 @@ import {
   publishCallRejected,
   publishCallEnded,
   publishGroupKeyShare,
+  publishGroupCallOffer,
+  publishGroupCallAnswer,
+  publishGroupCallIceCandidate,
 } from './bus';
 import { enforceRateLimit } from '../common/rate-limit';
 
@@ -71,6 +81,12 @@ const CallIceCandidateEnvelope = CallIceCandidateRequest.extend({ type: z.litera
 const CallRejectEnvelope = CallRejectRequest.extend({ type: z.literal('call.reject') });
 const CallEndEnvelope = CallEndRequest.extend({ type: z.literal('call.end') });
 const GroupKeyShareEnvelope = SendGroupKeyShareRequest.extend({ type: z.literal('group.key-share') });
+const GroupCallStartEnvelope = GroupCallStartRequest.extend({ type: z.literal('group-call.start') });
+const GroupCallJoinEnvelope = GroupCallJoinRequest.extend({ type: z.literal('group-call.join') });
+const GroupCallLeaveEnvelope = GroupCallLeaveRequest.extend({ type: z.literal('group-call.leave') });
+const GroupCallOfferEnvelope = GroupCallOfferRequest.extend({ type: z.literal('group-call.offer') });
+const GroupCallAnswerEnvelope = GroupCallAnswerRequest.extend({ type: z.literal('group-call.answer') });
+const GroupCallIceCandidateEnvelope = GroupCallIceCandidateRequest.extend({ type: z.literal('group-call.ice-candidate') });
 
 function errorEvent(err: unknown): OutboundWsEvent {
   if (err instanceof AppError) {
@@ -311,6 +327,60 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
         const body = GroupKeyShareEnvelope.parse(parsed);
         const { dto, targetDeviceId } = await createGroupKeyShare(ctx.userId, ctx.deviceId, body);
         await publishGroupKeyShare(targetDeviceId, dto.groupId, dto.id);
+        return null;
+      }
+
+      // Group calls (docs/13-roadmap.md) — a separate namespace from call.* above;
+      // see GroupCallEvent's own docstring (packages/types/src/realtime.ts) and
+      // group-service.ts's module docstring for the full reasoning. start/join/leave
+      // are membership-fan-out events (same `getAllOtherMembersActiveDeviceIds`-style
+      // broadcast call.invite/ringing/end already use, just scoped to the roster
+      // instead of "the other member"); offer/answer/ice-candidate are pairwise —
+      // each names its target explicitly and the server relays to exactly that one
+      // device, never broadcasts (see `assertValidGroupCallTarget`'s own docstring
+      // for why the named target is still verified, not trusted blindly).
+      case 'group-call.start': {
+        await enforceRateLimit(RATE_LIMIT_RULES.groupCallStart, ctx.userId);
+        const body = GroupCallStartEnvelope.parse(parsed);
+        await startGroupCall(ctx.userId, ctx.deviceId, body.conversationId, body.callId);
+        return null;
+      }
+
+      case 'group-call.join': {
+        await enforceRateLimit(RATE_LIMIT_RULES.groupCallSignal, ctx.userId);
+        const body = GroupCallJoinEnvelope.parse(parsed);
+        await joinGroupCall(ctx.userId, ctx.deviceId, body.conversationId, body.callId);
+        return null;
+      }
+
+      case 'group-call.leave': {
+        await enforceRateLimit(RATE_LIMIT_RULES.groupCallSignal, ctx.userId);
+        const body = GroupCallLeaveEnvelope.parse(parsed);
+        await leaveGroupCall(ctx.userId, ctx.deviceId, body.conversationId, body.callId);
+        return null;
+      }
+
+      case 'group-call.offer': {
+        await enforceRateLimit(RATE_LIMIT_RULES.groupCallSignal, ctx.userId);
+        const body = GroupCallOfferEnvelope.parse(parsed);
+        await assertValidGroupCallTarget(ctx.userId, body.conversationId, body.targetUserId, body.targetDeviceId);
+        await publishGroupCallOffer(body.targetDeviceId, body.conversationId, body.callId, ctx.userId, ctx.deviceId, body.sdp);
+        return null;
+      }
+
+      case 'group-call.answer': {
+        await enforceRateLimit(RATE_LIMIT_RULES.groupCallSignal, ctx.userId);
+        const body = GroupCallAnswerEnvelope.parse(parsed);
+        await assertValidGroupCallTarget(ctx.userId, body.conversationId, body.targetUserId, body.targetDeviceId);
+        await publishGroupCallAnswer(body.targetDeviceId, body.conversationId, body.callId, ctx.userId, ctx.deviceId, body.sdp);
+        return null;
+      }
+
+      case 'group-call.ice-candidate': {
+        await enforceRateLimit(RATE_LIMIT_RULES.groupCallSignal, ctx.userId);
+        const body = GroupCallIceCandidateEnvelope.parse(parsed);
+        await assertValidGroupCallTarget(ctx.userId, body.conversationId, body.targetUserId, body.targetDeviceId);
+        await publishGroupCallIceCandidate(body.targetDeviceId, body.conversationId, body.callId, ctx.userId, ctx.deviceId, body.candidate);
         return null;
       }
 

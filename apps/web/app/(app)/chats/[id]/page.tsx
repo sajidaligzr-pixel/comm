@@ -9,6 +9,7 @@ import { GroupMessageThread } from '@/components/chat/group-message-thread';
 import { Avatar } from '@/components/chat/avatar';
 import { DisappearingTimerMenu } from '@/components/chat/disappearing-timer-menu';
 import { CallButton } from '@/components/chat/call-button';
+import { GroupCallButton } from '@/components/chat/group-call-button';
 import { BlockUserButton } from '@/components/chat/block-user-button';
 import { IconArrowLeft } from '@/components/icons';
 
@@ -58,8 +59,7 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ id:
             </p>
           </div>
           <DisappearingTimerMenu conversationId={conversationId} initialTimer={conversation.disappearingTimer} />
-          {/* No call button here — group calls are explicitly out of scope
-              (docs/13-roadmap.md's Voice calling pass: 1:1 only). */}
+          <GroupCallButton conversationId={conversationId} groupName={group.name} />
         </div>
         <GroupMessageThread
           conversationId={conversationId}

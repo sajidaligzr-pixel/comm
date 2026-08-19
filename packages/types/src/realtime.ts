@@ -1,5 +1,5 @@
 import type { MessageDto, MessageDeletionReason } from './messages';
-import type { CallSessionDescription, CallIceCandidateInit, CallRejectReason } from './calls';
+import type { CallSessionDescription, CallIceCandidateInit, CallRejectReason, GroupCallParticipant } from './calls';
 
 /**
  * Shared between `apps/web` (publishes most of these from Route Handlers/WS
@@ -13,6 +13,7 @@ export const DEVICE_EVENTS_CHANNEL = 'comm:device-events';
 export const MESSAGE_EVENTS_CHANNEL = 'comm:message-events';
 export const CALL_EVENTS_CHANNEL = 'comm:call-events';
 export const GROUP_EVENTS_CHANNEL = 'comm:group-events';
+export const GROUP_CALL_EVENTS_CHANNEL = 'comm:group-call-events';
 
 export type DeviceEvent = { type: 'revoked'; deviceId: string };
 
@@ -62,3 +63,63 @@ export type CallEvent =
 export type GroupEvent =
   | { type: 'group.key-share'; targetDeviceId: string; groupId: string; keyShareId: string }
   | { type: 'group.members-changed'; targetDeviceId: string; groupId: string; conversationId: string };
+
+/**
+ * Group call signaling (docs/13-roadmap.md) — see calls.ts's own module docstring
+ * for the full protocol reasoning (why this is a separate namespace from `CallEvent`
+ * above, why every peer-to-peer signal names its target explicitly). Own Redis
+ * channel too (`GROUP_CALL_EVENTS_CHANNEL`), not reusing `CALL_EVENTS_CHANNEL` —
+ * same "additive, zero risk to the already-shipped 1:1 path" reasoning as the rest
+ * of this feature.
+ */
+export type GroupCallEvent =
+  | {
+      type: 'group-call.invited';
+      targetDeviceId: string;
+      conversationId: string;
+      callId: string;
+      fromUserId: string;
+      fromDisplayName: string;
+      groupName: string;
+    }
+  /** Sent ONLY to the joining device, right after `group-call.join` — informs
+   * its UI who's already on the call (so it can render a tile per existing
+   * participant right away) before any of their offers have arrived. The
+   * joiner does NOT use this to open connections itself — see
+   * `group-call.participant-joined` below for which side actually initiates. */
+  | { type: 'group-call.roster'; targetDeviceId: string; conversationId: string; callId: string; participants: GroupCallParticipant[] }
+  /** Fanned to every EXISTING participant when someone new joins — by
+   * convention, existing participants always initiate the offer TO a new
+   * joiner (avoids glare: the joiner never opens an offer to someone already
+   * in the call, only answers the offers it receives, matching `group-call.roster`'s
+   * own docstring above). */
+  | { type: 'group-call.participant-joined'; targetDeviceId: string; conversationId: string; callId: string; participant: GroupCallParticipant }
+  | { type: 'group-call.participant-left'; targetDeviceId: string; conversationId: string; callId: string; userId: string; deviceId: string }
+  | { type: 'group-call.ended'; targetDeviceId: string; conversationId: string; callId: string }
+  | {
+      type: 'group-call.offer';
+      targetDeviceId: string;
+      conversationId: string;
+      callId: string;
+      fromUserId: string;
+      fromDeviceId: string;
+      sdp: CallSessionDescription;
+    }
+  | {
+      type: 'group-call.answer';
+      targetDeviceId: string;
+      conversationId: string;
+      callId: string;
+      fromUserId: string;
+      fromDeviceId: string;
+      sdp: CallSessionDescription;
+    }
+  | {
+      type: 'group-call.ice-candidate';
+      targetDeviceId: string;
+      conversationId: string;
+      callId: string;
+      fromUserId: string;
+      fromDeviceId: string;
+      candidate: CallIceCandidateInit;
+    };

@@ -136,4 +136,14 @@ export const RATE_LIMIT_RULES = {
   // times a minute, so this stays generous rather than tight.
   callPendingCheck: { namespace: 'calls:pending-check', windowSeconds: 60, max: 60 } satisfies RateLimitRule,
   callHistory: { namespace: 'calls:history', windowSeconds: 60, max: 30 } satisfies RateLimitRule,
+  // Ringing a whole group at once is more disruptive than a 1:1 ring (every
+  // member's every device), not less — kept exactly as tight as callInvite
+  // rather than given extra headroom for the larger fan-out.
+  groupCallStart: { namespace: 'group-calls:start', windowSeconds: 60, max: 6 } satisfies RateLimitRule,
+  // Covers join/leave/offer/answer/ice-candidate together — deliberately more
+  // generous than 1:1's callSignal (120/min): a mesh call is pairwise, so one
+  // join near a full room opens up to GROUP_CALL_MAX_PARTICIPANTS-1 simultaneous
+  // offer/answer/ICE exchanges instead of 1:1's single pair, multiplying normal
+  // signaling volume by roughly that same factor.
+  groupCallSignal: { namespace: 'group-calls:signal', windowSeconds: 60, max: 400 } satisfies RateLimitRule,
 } as const;

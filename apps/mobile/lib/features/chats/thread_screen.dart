@@ -41,6 +41,7 @@ import '../../shared/widgets/error_state.dart';
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 import '../calls/call_controller.dart';
+import '../calls/group_call_controller.dart';
 import '../groups/group_session_controller.dart';
 import 'forward_dialog.dart' show showForwardSheet;
 import 'message_info_sheet.dart' show showMessageInfoSheet;
@@ -1915,6 +1916,17 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                   .startCall(
                     widget.conversationId,
                     conversation.otherUserId!,
+                    conversation.displayTitle(),
+                  ),
+            ),
+          if (isGroup)
+            IconButton(
+              icon: const Icon(Icons.call),
+              tooltip: 'Start group call',
+              onPressed: () => ref
+                  .read(groupCallControllerProvider.notifier)
+                  .startGroupCall(
+                    widget.conversationId,
                     conversation.displayTitle(),
                   ),
             ),

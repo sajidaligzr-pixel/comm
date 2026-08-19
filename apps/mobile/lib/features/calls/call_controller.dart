@@ -23,6 +23,7 @@ import 'package:uuid/uuid.dart';
 import '../../api/calls_api.dart';
 import '../../app/providers.dart';
 import '../../realtime/ws_client.dart';
+import 'call_coordination.dart';
 import 'call_kit.dart' show endCallKit, setCallKitConnected;
 import 'call_state.dart';
 
@@ -189,6 +190,12 @@ class CallController extends StateNotifier<CallUiState> {
     // rather than at each of those call sites individually, covers every one of them
     // at once, including paths a push-woken call's own UI never touches (e.g. the
     // caller cancelling before this device even opens the app).
+    //
+    // Cleared immediately, not deferred to the 'ended' cooldown's Timer below — a
+    // fresh incoming call (1:1 or group) arriving during that ~2.5s window is meant
+    // to preempt it, so this must stop blocking GroupCallController the instant
+    // this call actually ends, not after.
+    setActiveCallKind(null);
     final callId = state.call?.callId;
     if (callId != null) unawaited(endCallKit(callId));
     unawaited(_stopRinging());
@@ -229,7 +236,7 @@ class CallController extends StateNotifier<CallUiState> {
     String otherUserId,
     String otherDisplayName,
   ) async {
-    if (state.phase != CallPhase.idle) return;
+    if (state.phase != CallPhase.idle || getActiveCallKind() != null) return;
     if (!await _ensureMicPermission()) {
       state = state.copyWith(
         micError: 'Microphone access is needed to make a call.',
@@ -247,6 +254,7 @@ class CallController extends StateNotifier<CallUiState> {
       return;
     }
     _localStream = stream;
+    setActiveCallKind(ActiveCallKind.oneToOne);
 
     final callId = _uuid.v4();
     final call = ActiveCall(
@@ -449,8 +457,13 @@ class CallController extends StateNotifier<CallUiState> {
   }
 
   void _onRing(Map<String, dynamic> payload) {
-    if (state.phase != CallPhase.idle && state.phase != CallPhase.ended) {
-      // Already on (or wrapping up) a call — decline as busy, no second ring UI.
+    // Busy if already on (or wrapping up) a 1:1 call, OR mid a group call — the
+    // group-call side has no per-invitee "busy" signal to send back the way 1:1
+    // does (see call_coordination.dart's own docstring), so this is the one
+    // place that asymmetry has to be handled: reject as busy exactly like the
+    // same-kind case just below.
+    if ((state.phase != CallPhase.idle && state.phase != CallPhase.ended) ||
+        getActiveCallKind() == ActiveCallKind.group) {
       _realtime.send({
         'type': 'call.reject',
         'conversationId': payload['conversationId'],
@@ -471,6 +484,7 @@ class CallController extends StateNotifier<CallUiState> {
       otherDisplayName: payload['fromDisplayName'] as String,
       isOutgoing: false,
     );
+    setActiveCallKind(ActiveCallKind.oneToOne);
     state = state.copyWith(
       phase: CallPhase.incoming,
       call: call,

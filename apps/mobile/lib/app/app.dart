@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../features/calls/call_overlay.dart';
+import '../features/calls/group_call_overlay.dart';
 import 'providers.dart' show realtimeClientProvider;
 import 'router.dart';
 
@@ -127,6 +128,13 @@ class _CommAppState extends ConsumerState<CommApp> with WidgetsBindingObserver {
       // Mounted once, above every route, exactly like CallProvider's placement in
       // apps/web's (app)/layout.tsx — an incoming call has to ring no matter which
       // screen is open, not just while a specific chat thread is on screen.
+      // GroupCallOverlay is a SEPARATE, sibling widget (same "mount once, ring
+      // anywhere" reasoning) — see group_call_controller.dart's own docstring for
+      // why it's not merged into CallOverlay/CallController despite the identical
+      // placement; cross-coordination (call_coordination.dart) keeps at most one
+      // of the two ever actually active, so stacking both here is safe — the
+      // idle one always renders SizedBox.shrink()/an invite banner, never both
+      // full-screen at once.
       //
       // Positioned.fill is load-bearing, not decorative: a bare Stack sizes each
       // non-positioned child by its own natural size, and CallOverlay's content
@@ -140,6 +148,7 @@ class _CommAppState extends ConsumerState<CommApp> with WidgetsBindingObserver {
         children: [
           if (child != null) child,
           const Positioned.fill(child: CallOverlay()),
+          const Positioned.fill(child: GroupCallOverlay()),
         ],
       ),
     );

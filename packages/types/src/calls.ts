@@ -138,6 +138,11 @@ export const CallHistoryEntry = z.object({
       displayName: z.string(),
     })
     .nullable(),
+  /** Set instead of `otherUser` for a group call (docs/13-roadmap.md) — group
+   * calls have no single "other party" to derive the way a 1:1 call's `otherUser`
+   * already did (the conversation's other member, always). Exactly one of
+   * `otherUser`/`groupName` is ever non-null. */
+  groupName: z.string().nullable(),
   direction: z.enum(['incoming', 'outgoing']),
   status: z.enum(['answered', 'missed', 'declined']),
   startedAt: z.string().nullable(),
@@ -156,3 +161,70 @@ export const PendingCallResponse = z
   })
   .nullable();
 export type PendingCallResponse = z.infer<typeof PendingCallResponse>;
+
+/**
+ * Group calls (docs/13-roadmap.md) — a SEPARATE signaling namespace from the 1:1
+ * events above, deliberately not reusing them: those broadcast one SDP/ICE payload
+ * to "the other member" (correct for exactly one peer, via
+ * `getAllOtherMembersActiveDeviceIds`'s blanket fan-out); a mesh call's
+ * offer/answer/ICE legs are inherently PAIRWISE between whichever two participants
+ * are negotiating, so every signaling payload here names its target explicitly
+ * (`targetUserId`/`targetDeviceId`) and the server relays to exactly that one
+ * device, never broadcasts. Audio-only, same as 1:1 — no video plumbing exists
+ * anywhere in this app yet.
+ *
+ * Mesh, not an SFU: every participant opens a direct `RTCPeerConnection` to every
+ * OTHER participant (N-1 connections each). That degrades past a handful of people
+ * (each participant's upload bandwidth multiplies by N-1), which is exactly why
+ * `GROUP_CALL_MAX_PARTICIPANTS` exists — a real SFU (a genuinely new media-server
+ * service) is the right answer if usage ever outgrows this, not attempted here per
+ * this project's "no extra infrastructure unless the code actually needs it yet"
+ * posture (docs/13-roadmap.md).
+ *
+ * No `call_participants` table — the LIVE roster during an active call is tracked
+ * in Redis (server/modules/calls/group-roster.ts), ephemeral by nature (who's
+ * currently connected), while `Call` (schema.prisma, reused as-is) still records
+ * one history row per call exactly like a 1:1 call does.
+ */
+export const GROUP_CALL_MAX_PARTICIPANTS = 6;
+
+export const GroupCallStartRequest = z.object({
+  conversationId: z.string().uuid(), // must be a `group` conversation
+  callId: z.string().uuid(),
+});
+export type GroupCallStartRequest = z.infer<typeof GroupCallStartRequest>;
+
+export const GroupCallJoinRequest = z.object({
+  conversationId: z.string().uuid(),
+  callId: z.string().uuid(),
+});
+export type GroupCallJoinRequest = z.infer<typeof GroupCallJoinRequest>;
+
+export const GroupCallLeaveRequest = z.object({
+  conversationId: z.string().uuid(),
+  callId: z.string().uuid(),
+});
+export type GroupCallLeaveRequest = z.infer<typeof GroupCallLeaveRequest>;
+
+const GroupCallPeerSignalBase = {
+  conversationId: z.string().uuid(),
+  callId: z.string().uuid(),
+  targetUserId: z.string().uuid(),
+  targetDeviceId: z.string().uuid(),
+};
+
+export const GroupCallOfferRequest = z.object({ ...GroupCallPeerSignalBase, sdp: CallSessionDescription });
+export type GroupCallOfferRequest = z.infer<typeof GroupCallOfferRequest>;
+
+export const GroupCallAnswerRequest = z.object({ ...GroupCallPeerSignalBase, sdp: CallSessionDescription });
+export type GroupCallAnswerRequest = z.infer<typeof GroupCallAnswerRequest>;
+
+export const GroupCallIceCandidateRequest = z.object({ ...GroupCallPeerSignalBase, candidate: CallIceCandidateInit });
+export type GroupCallIceCandidateRequest = z.infer<typeof GroupCallIceCandidateRequest>;
+
+export const GroupCallParticipant = z.object({
+  userId: z.string().uuid(),
+  deviceId: z.string().uuid(),
+  displayName: z.string(),
+});
+export type GroupCallParticipant = z.infer<typeof GroupCallParticipant>;
