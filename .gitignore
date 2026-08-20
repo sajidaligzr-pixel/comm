@@ -47,3 +47,4 @@ google-services.json
 # touches TRACKED files, so an ignored file placed here survives every future
 # deploy untouched.
 /apps/web/public/downloads/
+GoogleService-Info.plist
