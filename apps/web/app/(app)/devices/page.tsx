@@ -5,6 +5,7 @@ import { getOwnProfile } from '@/server/modules/users/service';
 import { DevicesList } from '@/components/devices-list';
 import { LinkDevicePanel } from '@/components/link-device-panel';
 import { BiometricUnlockToggle } from '@/components/biometric-unlock-toggle';
+import { DeleteAccountSection } from '@/components/delete-account-section';
 
 export default async function DevicesPage() {
   const ctx = await getAuthContextOrRedirect();
@@ -25,6 +26,7 @@ export default async function DevicesPage() {
         <Link href="/blocked" className="block text-sm font-medium text-primary hover:underline">
           Blocked users
         </Link>
+        <DeleteAccountSection />
       </div>
     </div>
   );

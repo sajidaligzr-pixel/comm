@@ -232,6 +232,28 @@ class AuthController extends StateNotifier<AuthState> {
     state = const AuthSignedOut();
   }
 
+  /// Apple App Store Review Guideline 5.1.1(v) — in-app account deletion. Deliberately
+  /// does NOT catch [ApiException] the way [logout] does: if the server call fails
+  /// (wrong password, network error), the account still exists server-side, so local
+  /// state must NOT be wiped — that would lock the user out of a still-live account.
+  /// Only once the server confirms deletion do we wipe every local trace (unlike
+  /// [logout], which preserves the local identity for a "returning device" login —
+  /// there's no next login to preserve it for once the account itself is gone).
+  Future<void> deleteAccount(String password) async {
+    final current = state;
+    final username = current is AuthSignedIn ? current.profile.username : null;
+
+    await _authApi.deleteAccount(password: password);
+
+    await wipeLocalIdentity();
+    await wipeCryptoDb();
+    if (username != null) await clearRememberedDeviceId(username);
+    await _apiClient.clearCookies();
+    clearUnlockedIdentity();
+    clearActiveAccount();
+    state = const AuthSignedOut();
+  }
+
   /// "Forget this device" — explicit, destructive, separate from logout. Wipes the
   /// local identity/session cache (crypto/local_identity.dart, storage/blob_store.dart)
   /// so a future login on this phone registers as a brand-new device.

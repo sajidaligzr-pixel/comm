@@ -225,6 +225,66 @@ export async function changePassword(
 }
 
 /**
+ * Self-service account deletion — Apple App Store Review Guideline 5.1.1(v) requires
+ * this be reachable from inside the app itself, not just a support/website flow.
+ *
+ * Soft-delete, not a row-level DELETE: `UserStatus.deleted` already existed (schema.
+ * prisma) and login already refuses anything but `status === 'active'` (the check
+ * just above `changePassword` in this same file), so setting it here is sufficient
+ * to block sign-in forever — no separate enforcement needed. A hard delete would
+ * cascade through `sentMessages`/`conversationMemberships`/`groupMemberships` and
+ * either orphan every conversation this account ever participated in or silently
+ * erase the other participant's own message history (their copy of a direct
+ * conversation still legitimately depends on this row existing) — the same reason
+ * WhatsApp/Signal-style clients leave a "this account no longer exists" tombstone
+ * rather than actually removing the row. PII is scrubbed (name/about/avatar) so the
+ * tombstone doesn't keep leaking anything; `username` deliberately stays as-is,
+ * since it's `@unique` and leaving it intact is what permanently reserves it against
+ * reuse (see docs/02-database-schema.md), not something dropped without a second
+ * account picking it up.
+ *
+ * Every session and device is revoked unconditionally (unlike `changePassword`,
+ * which spares the caller's own current session) — there is no "current session"
+ * left to spare once the account is gone. The Firebase/APNs push token and any
+ * uploaded avatar object in storage are not separately purged here; both are
+ * inert once every device is revoked and are cleaned up the same way any other
+ * orphaned object-storage/push-token row already would be, not a gap specific to
+ * this flow.
+ */
+export async function deleteOwnAccount(userId: string, password: string): Promise<void> {
+  const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
+
+  const passwordOk = await verifyPassword(password, user.passwordHash ?? '');
+  if (!passwordOk) {
+    throw new AppError('AUTH_INVALID', 'Password is incorrect.');
+  }
+
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: userId },
+      data: {
+        status: 'deleted',
+        passwordHash: null,
+        mustChangePassword: false,
+        displayName: 'Deleted account',
+        about: null,
+        avatarObjectKey: null,
+      },
+    }),
+    prisma.session.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    }),
+    prisma.device.updateMany({
+      where: { userId, status: 'active' },
+      data: { status: 'revoked', revokedAt: new Date(), revokedReason: 'user' },
+    }),
+  ]);
+
+  await recordSecurityEvent({ userId, eventType: 'account_deleted' });
+}
+
+/**
  * Used only by the `(app)` layout guard to decide whether to redirect to
  * /change-password — deliberately NOT folded into `getAuthContextOrRedirect` itself,
  * since that function is also used to protect /change-password, and baking this

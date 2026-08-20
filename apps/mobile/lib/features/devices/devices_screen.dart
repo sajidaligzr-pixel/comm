@@ -368,6 +368,19 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
               ),
             ),
           ],
+          const Divider(height: 1),
+          ListTile(
+            leading: Icon(
+              Icons.delete_forever_outlined,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            title: Text(
+              'Delete account',
+              style: TextStyle(color: Theme.of(context).colorScheme.error),
+            ),
+            subtitle: const Text('Permanently delete your account. This can\'t be undone.'),
+            onTap: () => context.push('/delete-account'),
+          ),
         ],
       ),
     );

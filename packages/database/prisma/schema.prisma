@@ -273,6 +273,7 @@ enum SecurityEventType {
   suspicious_login
   account_provisioned
   account_suspended
+  account_deleted
 }
 
 // ── Privacy & notifications (schema laid down now; Phase 2 seeds sane defaults on

@@ -58,4 +58,11 @@ class AuthApi {
       body: {'currentPassword': currentPassword, 'newPassword': newPassword},
     );
   }
+
+  /// Apple App Store Review Guideline 5.1.1(v) — in-app account deletion. See
+  /// server/modules/auth/service.ts's `deleteOwnAccount` docstring for exactly what
+  /// this does server-side (soft-delete, not a row-level DELETE).
+  Future<void> deleteAccount({required String password}) {
+    return _client.requestVoid('/api/auth/delete-account', body: {'password': password});
+  }
 }

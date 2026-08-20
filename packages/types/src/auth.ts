@@ -62,3 +62,13 @@ export const ChangePasswordRequest = z.object({
   newPassword: Password,
 });
 export type ChangePasswordRequest = z.infer<typeof ChangePasswordRequest>;
+
+// Apple App Store Review Guideline 5.1.1(v) requires an in-app path to delete an
+// account, not just a support-ticket/website flow — this is that path's request
+// shape. Re-verifying the current password (rather than trusting the session alone)
+// mirrors ChangePasswordRequest above: an irreversible action gets the same
+// re-authentication bar as a security-sensitive one, not just "already logged in."
+export const DeleteAccountRequest = z.object({
+  password: Password,
+});
+export type DeleteAccountRequest = z.infer<typeof DeleteAccountRequest>;
