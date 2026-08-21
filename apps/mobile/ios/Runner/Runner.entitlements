@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- development here matches a debug/Simulator build's own APNs sandbox; Xcode
+	     swaps this to "production" automatically for an Archive/App-Store build when
+	     using automatic signing (docs on this repeated in project.pbxproj's own
+	     comment next to CODE_SIGN_ENTITLEMENTS, since that's the non-obvious part).
+	     Registering the actual Push Notifications capability against App ID
+	     com.comm.commMobile still needs an Apple ID signed into Xcode with the
+	     Developer Program team selected — this file alone doesn't do that, it's
+	     just the entitlement Xcode's signing step will act on once it is. -->
+	<key>aps-environment</key>
+	<string>development</string>
+</dict>
+</plist>

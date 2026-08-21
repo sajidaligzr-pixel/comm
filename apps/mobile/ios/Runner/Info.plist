@@ -60,5 +60,15 @@
 	     the actual prompt. -->
 	<key>NSFaceIDUsageDescription</key>
 	<string>Comm can use Face ID to unlock the app instead of your password.</string>
+	<!-- Lets a push actually wake the app to run firebaseMessagingBackgroundHandler
+	     (features/notifications/push_notifications.dart) while backgrounded, not just
+	     while foregrounded — the iOS half of what AndroidManifest.xml's equivalent
+	     already covers. Requires the Push Notifications capability + a real APNs
+	     entitlement to do anything (see Runner.entitlements) — inert without those,
+	     not harmful to have present ahead of them. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 </dict>
 </plist>
