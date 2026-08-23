@@ -30,7 +30,7 @@ import { encryptAttachment } from '@/lib/crypto/attachment-crypto';
 import { uploadAttachmentCiphertext } from '@/lib/media-client';
 import { EmojiPicker } from './emoji-picker';
 import { ForwardDialog } from './forward-dialog';
-import { VoiceBubble, ImageBubble, ViewOnceImageBubble, FileBubble } from './bubbles';
+import { VoiceBubble, ImageBubble, ViewOnceImageBubble, FileBubble, MediaImageBubble, MediaVideoBubble } from './bubbles';
 import {
   IconSend,
   IconCheck,
@@ -1007,6 +1007,10 @@ export function MessageThread({
                       ) : (
                         <ViewOnceImageBubble base64={m.mediaBase64} onOpen={() => void handleViewOnceOpened(m.id)} />
                       )
+                    ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('image/') ? (
+                      <MediaImageBubble attachment={m.attachment} isOwn={m.isOwn} />
+                    ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('video/') ? (
+                      <MediaVideoBubble attachment={m.attachment} isOwn={m.isOwn} />
                     ) : m.contentTypeHint === 'media' && m.attachment ? (
                       <FileBubble attachment={m.attachment} isOwn={m.isOwn} />
                     ) : (

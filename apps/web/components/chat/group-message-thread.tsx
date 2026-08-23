@@ -47,7 +47,7 @@ import { Avatar } from './avatar';
 import { EmojiPicker } from './emoji-picker';
 import { ForwardDialog } from './forward-dialog';
 import { MessageInfoDialog } from './message-info-dialog';
-import { VoiceBubble, ImageBubble, FileBubble } from './bubbles';
+import { VoiceBubble, ImageBubble, FileBubble, MediaImageBubble, MediaVideoBubble } from './bubbles';
 import {
   IconSend,
   IconTrash,
@@ -771,6 +771,10 @@ export function GroupMessageThread({
                       // normal photo here, an honest simplification rather than a
                       // broken/blank bubble.
                       <ImageBubble base64={m.mediaBase64} />
+                    ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('image/') ? (
+                      <MediaImageBubble attachment={m.attachment} isOwn={m.isOwn} />
+                    ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('video/') ? (
+                      <MediaVideoBubble attachment={m.attachment} isOwn={m.isOwn} />
                     ) : m.contentTypeHint === 'media' && m.attachment ? (
                       <FileBubble attachment={m.attachment} isOwn={m.isOwn} />
                     ) : (

@@ -104,6 +104,13 @@ dependencies:
   package_info_plus: ^8.1.0
   android_intent_plus: ^6.1.0
 
+  # Fullscreen playback for a `contentTypeHint: 'media'` attachment whose mimeType
+  # is video/* (thread_screen.dart's `_MediaVideoBubble`) — matches WhatsApp's
+  # tap-to-play behavior for a video message, mirroring the inline-image-thumbnail
+  # treatment `image`-type messages already got. Decrypted bytes are written to a
+  # temp file first (this plugin plays from a file/URL, not raw bytes in memory).
+  video_player: ^2.11.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

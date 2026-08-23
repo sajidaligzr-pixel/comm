@@ -24,6 +24,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:uuid/uuid.dart';
+import 'package:video_player/video_player.dart';
 
 import '../../api/api_client.dart';
 import '../../api/dtos.dart';
@@ -301,6 +302,15 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// of the caller's starred messages) — fetched once per thread mount, mirrors
   /// apps/web's identical `starredIds` state (message-thread.tsx).
   Set<String> _starredIds = {};
+
+  /// In-memory only, keyed by `objectKey` — decrypted bytes for a `media`
+  /// attachment, fetched via `_ensureMediaDecrypted` below. Deliberately NOT part
+  /// of `message_cache.dart`'s persistent encrypted store: that cache holds every
+  /// message this device has ever seen, and letting full-size photo/video bytes
+  /// pile up in it would bloat local storage for something already recoverable
+  /// from object storage on demand. A session-lifetime cache is enough to make
+  /// re-scrolling a thread not re-download the same image repeatedly.
+  final Map<String, Future<Uint8List>> _mediaFutures = {};
 
   /// The message a long-press has staged to reply to — mirrors web's
   /// `replyingTo` (message-thread.tsx) exactly: shown as a preview strip above
@@ -1748,19 +1758,42 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     await _sendFile(picked!.bytes!, picked.name, 'application/octet-stream');
   }
 
+  /// Downloads + decrypts a `media` attachment's ciphertext exactly once per
+  /// objectKey for the life of this screen, memoized so every caller (the eager
+  /// image-thumbnail fetch, a tapped video, the "save to disk" file row) shares
+  /// one in-flight/completed result instead of each re-downloading the same
+  /// object. A failed attempt is evicted (not cached forever) so a later retry —
+  /// `_MediaImageBubble`'s tap-to-retry, or just tapping the file row again —
+  /// genuinely re-fetches rather than replaying the same error indefinitely.
+  Future<Uint8List> _ensureMediaDecrypted(AttachmentDescriptor descriptor) {
+    final cached = _mediaFutures[descriptor.objectKey];
+    if (cached != null) return cached;
+
+    final future = () async {
+      final ciphertext = await ref
+          .read(mediaApiProvider)
+          .downloadAttachmentCiphertext(descriptor.objectKey);
+      return attach_crypto.decryptAttachment(
+        ciphertext,
+        base64ToBytes(descriptor.key),
+        base64ToBytes(descriptor.nonce),
+      );
+    }();
+    _mediaFutures[descriptor.objectKey] = future;
+    // Side-effect-only listener on the same Future instance — does not replace
+    // what other listeners (FutureBuilder, the try/catch below) see or receive.
+    unawaited(
+      future.then((_) {}, onError: (_) => _mediaFutures.remove(descriptor.objectKey)),
+    );
+    return future;
+  }
+
   Future<void> _downloadAttachment(AttachmentDescriptor descriptor) async {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Downloading ${descriptor.fileName}…')),
     );
     try {
-      final ciphertext = await ref
-          .read(mediaApiProvider)
-          .downloadAttachmentCiphertext(descriptor.objectKey);
-      final plaintext = await attach_crypto.decryptAttachment(
-        ciphertext,
-        base64ToBytes(descriptor.key),
-        base64ToBytes(descriptor.nonce),
-      );
+      final plaintext = await _ensureMediaDecrypted(descriptor);
 
       final dir = await getApplicationDocumentsDirectory();
       final savedDir = Directory('${dir.path}/comm-downloads')
@@ -2017,6 +2050,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                       key: _keyFor(message.id),
                       message: message,
                       onDownload: _downloadAttachment,
+                      ensureMediaDecrypted: _ensureMediaDecrypted,
                       status: _status[message.id],
                       pending: _pendingIds.contains(message.id),
                       replySource: message.replyToMessageId != null
@@ -2418,6 +2452,7 @@ class _MessageBubble extends StatelessWidget {
     super.key,
     required this.message,
     required this.onDownload,
+    required this.ensureMediaDecrypted,
     this.status,
     this.pending = false,
     this.replySource,
@@ -2431,6 +2466,7 @@ class _MessageBubble extends StatelessWidget {
   });
   final CachedMessage message;
   final void Function(AttachmentDescriptor) onDownload;
+  final Future<Uint8List> Function(AttachmentDescriptor) ensureMediaDecrypted;
   final ({bool delivered, bool read})? status;
 
   /// True while this is an optimistically-rendered bubble still waiting on the
@@ -2630,6 +2666,16 @@ class _MessageBubble extends StatelessWidget {
                                   onOpen: () =>
                                       onViewOnceOpen?.call(message.id),
                                 ))
+                        : attachment != null && attachment.mimeType.startsWith('image/')
+                        ? _MediaImageBubble(
+                            attachment: attachment,
+                            ensureDecrypted: ensureMediaDecrypted,
+                          )
+                        : attachment != null && attachment.mimeType.startsWith('video/')
+                        ? _MediaVideoBubble(
+                            attachment: attachment,
+                            ensureDecrypted: ensureMediaDecrypted,
+                          )
                         : attachment != null
                         ? InkWell(
                             onTap: () => onDownload(attachment),
@@ -2997,6 +3043,289 @@ class _ViewOnceImageBubbleState extends State<_ViewOnceImageBubble> {
             Icon(Icons.remove_red_eye_outlined, size: 24),
             SizedBox(height: 4),
             Text('Tap to view photo', style: TextStyle(fontSize: 12)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A `contentTypeHint: 'media'` attachment whose mimeType is `image/*` — unlike
+/// `_InlineImageBubble` above, the bytes aren't already sitting in the decrypted
+/// plaintext (the `media` pipeline only carries a small descriptor; the actual
+/// ciphertext lives in object storage), so this fetches them via
+/// `ensureDecrypted` (`_ensureMediaDecrypted`) and shows a spinner meanwhile.
+/// Only images get this eager-fetch treatment: a picked photo is small/expected
+/// enough (this app compresses on send) that matching WhatsApp's inline-
+/// thumbnail behavior is worth it, unlike an arbitrary file attachment (still
+/// the plain download-on-tap row below) or a video (`_MediaVideoBubble`,
+/// deliberately lazy — see its own docstring).
+class _MediaImageBubble extends StatefulWidget {
+  const _MediaImageBubble({
+    required this.attachment,
+    required this.ensureDecrypted,
+  });
+  final AttachmentDescriptor attachment;
+  final Future<Uint8List> Function(AttachmentDescriptor) ensureDecrypted;
+
+  @override
+  State<_MediaImageBubble> createState() => _MediaImageBubbleState();
+}
+
+class _MediaImageBubbleState extends State<_MediaImageBubble> {
+  late Future<Uint8List> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = widget.ensureDecrypted(widget.attachment);
+  }
+
+  void _retry() {
+    setState(() => _future = widget.ensureDecrypted(widget.attachment));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<Uint8List>(
+      future: _future,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return GestureDetector(
+            onTap: _retry,
+            child: Container(
+              width: 220,
+              height: 220,
+              decoration: BoxDecoration(
+                color: Colors.black12,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.error_outline, size: 28),
+                  SizedBox(height: 6),
+                  Text('Couldn\'t load photo — tap to retry', style: TextStyle(fontSize: 12)),
+                ],
+              ),
+            ),
+          );
+        }
+        if (!snapshot.hasData) {
+          return const SizedBox(
+            width: 220,
+            height: 220,
+            child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+          );
+        }
+        final bytes = snapshot.data!;
+        return GestureDetector(
+          onTap: () => _showFullscreenImage(context, bytes),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Image.memory(bytes, width: 220, height: 220, fit: BoxFit.cover),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// A `contentTypeHint: 'media'` attachment whose mimeType is `video/*`.
+/// Deliberately lazy, unlike `_MediaImageBubble` above: a video can be large
+/// enough that eagerly fetching one just to show a thumbnail would be exactly
+/// the "defeats the point of the object-storage pipeline" cost the plain file
+/// row's own download-on-tap design already avoids. Tapping downloads+decrypts
+/// (spinner meanwhile), writes the bytes to a temp file — `video_player` plays
+/// from a file/URL, not raw in-memory bytes — then opens a fullscreen player.
+class _MediaVideoBubble extends StatefulWidget {
+  const _MediaVideoBubble({
+    required this.attachment,
+    required this.ensureDecrypted,
+  });
+  final AttachmentDescriptor attachment;
+  final Future<Uint8List> Function(AttachmentDescriptor) ensureDecrypted;
+
+  @override
+  State<_MediaVideoBubble> createState() => _MediaVideoBubbleState();
+}
+
+class _MediaVideoBubbleState extends State<_MediaVideoBubble> {
+  bool _loading = false;
+  String? _error;
+
+  Future<void> _open() async {
+    if (_loading) return;
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final bytes = await widget.ensureDecrypted(widget.attachment);
+      final dir = await getTemporaryDirectory();
+      // Keeps the real file extension (not a hardcoded .mp4) — video_player's
+      // platform players can lean on it for format detection, and this app's
+      // media pipeline already carries the sender's original file name.
+      final file = File(
+        '${dir.path}/comm-video-preview-${widget.attachment.objectKey}-${widget.attachment.fileName}',
+      );
+      if (!await file.exists()) {
+        await file.writeAsBytes(bytes, flush: true);
+      }
+      if (mounted) await _showFullscreenVideo(context, file);
+    } catch (_) {
+      if (mounted) setState(() => _error = 'Couldn\'t load video');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: _open,
+      child: Container(
+        width: 220,
+        height: 220,
+        decoration: BoxDecoration(
+          color: Colors.black87,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Center(
+          child: _loading
+              ? const CircularProgressIndicator(strokeWidth: 2, color: Colors.white)
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _error != null ? Icons.error_outline : Icons.play_circle_fill,
+                      color: Colors.white,
+                      size: 48,
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      _error ?? _formatBytes(widget.attachment.sizeBytes),
+                      style: const TextStyle(color: Colors.white70, fontSize: 12),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Opens a fullscreen video player over the current screen — the video
+/// counterpart to `_showFullscreenImage` above, same `PageRouteBuilder` chrome
+/// (transparent barrier, tap-anywhere-to-toggle, a close button). Owns the
+/// `VideoPlayerController` for the lifetime of the route and disposes it on the
+/// way out, since each open is a fresh decrypt-to-tempfile (`_MediaVideoBubble`
+/// above), not a long-lived shared controller.
+Future<void> _showFullscreenVideo(BuildContext context, File file) async {
+  final controller = VideoPlayerController.file(file);
+  await controller.initialize();
+  await controller.play();
+  if (!context.mounted) {
+    await controller.dispose();
+    return;
+  }
+  await Navigator.of(context).push(
+    PageRouteBuilder<void>(
+      opaque: false,
+      barrierColor: Colors.black87,
+      pageBuilder: (context, _, _) => _FullscreenVideoPlayer(controller: controller),
+    ),
+  );
+  await controller.dispose();
+}
+
+class _FullscreenVideoPlayer extends StatefulWidget {
+  const _FullscreenVideoPlayer({required this.controller});
+  final VideoPlayerController controller;
+
+  @override
+  State<_FullscreenVideoPlayer> createState() => _FullscreenVideoPlayerState();
+}
+
+class _FullscreenVideoPlayerState extends State<_FullscreenVideoPlayer> {
+  @override
+  void initState() {
+    super.initState();
+    widget.controller.addListener(_onTick);
+  }
+
+  @override
+  void dispose() {
+    widget.controller.removeListener(_onTick);
+    super.dispose();
+  }
+
+  void _onTick() {
+    if (mounted) setState(() {});
+  }
+
+  void _togglePlay() {
+    if (widget.controller.value.isPlaying) {
+      widget.controller.pause();
+    } else {
+      widget.controller.play();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final value = widget.controller.value;
+    return Scaffold(
+      backgroundColor: Colors.transparent,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            Center(
+              child: value.isInitialized
+                  ? AspectRatio(
+                      aspectRatio: value.aspectRatio,
+                      child: GestureDetector(
+                        onTap: _togglePlay,
+                        child: VideoPlayer(widget.controller),
+                      ),
+                    )
+                  : const CircularProgressIndicator(color: Colors.white),
+            ),
+            Positioned(
+              right: 8,
+              top: 8,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ),
+            if (value.isInitialized)
+              Positioned(
+                left: 16,
+                right: 16,
+                bottom: 24,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    VideoProgressIndicator(
+                      widget.controller,
+                      allowScrubbing: true,
+                      colors: const VideoProgressColors(
+                        playedColor: WhatsAppColors.tealAccent,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    IconButton(
+                      icon: Icon(
+                        value.isPlaying ? Icons.pause : Icons.play_arrow,
+                        color: Colors.white,
+                        size: 36,
+                      ),
+                      onPressed: _togglePlay,
+                    ),
+                  ],
+                ),
+              ),
           ],
         ),
       ),
