@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 7,
+  "buildNumber": 8,
   "versionName": "1.0.0",
   "apkUrl": "/downloads/comm-latest.apk",
-  "releaseNotes": "Delete your account from Settings > Devices. This update is required."
+  "releaseNotes": "Photos and videos now show inline in chat, just like text. Tap to view fullscreen. This update is required."
 }
