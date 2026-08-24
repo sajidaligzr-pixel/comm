@@ -1103,15 +1103,49 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     return cached;
   }
 
+  /// Scrolls to the true bottom of the thread — not just "animate to whatever
+  /// maxScrollExtent looks like right after this frame." `ListView.builder` only
+  /// builds/measures items near wherever it's currently scrolled; on first mount
+  /// that's the TOP, so everything below the initial viewport+cache extent is
+  /// only an ESTIMATED height (`RenderSliverList` extrapolates from whatever's
+  /// already been laid out) until the list actually scrolls close enough to
+  /// build those items for real. A single scroll-then-done call trusts that
+  /// estimate, which this app's genuinely mixed bubble heights (a one-line text
+  /// message next to a 220px image/video bubble, `thread_screen.dart`'s
+  /// `_MediaImageBubble`/`_MediaVideoBubble`) make unreliable for anything but a
+  /// short thread — consistently landing short of the real bottom, exactly the
+  /// reported "doesn't scroll all the way, I have to do it myself" bug.
+  ///
+  /// Fixed with a settle phase after the initial animated scroll: re-check
+  /// `maxScrollExtent` on subsequent frames and jump again each time it grew,
+  /// until it stops changing (the list has now actually built out to the true
+  /// bottom) or a bounded number of attempts is spent — never an unbounded loop
+  /// against a metric that could legitimately keep shifting (a live incoming
+  /// message arriving during this same window).
   void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
+    Future<void> settle(int attemptsLeft, double lastExtent) async {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || !_scrollController.hasClients || attemptsLeft <= 0) {
+        return;
       }
+      final extent = _scrollController.position.maxScrollExtent;
+      if (extent == lastExtent) return; // stable — the true bottom was reached
+      _scrollController.jumpTo(extent);
+      await settle(attemptsLeft - 1, extent);
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      final extent = _scrollController.position.maxScrollExtent;
+      unawaited(
+        _scrollController
+            .animateTo(
+              extent,
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOut,
+            )
+            .then((_) => settle(6, extent)),
+      );
     });
   }
 
