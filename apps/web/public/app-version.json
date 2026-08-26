@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 12,
+  "buildNumber": 13,
   "versionName": "1.0.0",
   "apkUrl": "/downloads/comm-latest.apk",
-  "releaseNotes": "Fixed a crash on login introduced by the last update. This update is required."
+  "releaseNotes": "Fixed a crash on opening the app. Live location sharing is temporarily paused while this is fixed properly — everything else is unaffected. This update is required."
 }

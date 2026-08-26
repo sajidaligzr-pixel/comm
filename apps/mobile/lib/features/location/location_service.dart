@@ -41,6 +41,19 @@ const _reportInterval = Duration(seconds: 60);
 const _notificationChannelId = 'comm_location';
 const _foregroundNotificationId = 4200;
 
+/// Emergency kill switch — flipped off after a live report that the app was
+/// crashing immediately on open (not just at login as the previous,
+/// narrower ProGuard-only fix addressed). The most likely remaining cause is
+/// Android itself throwing inside the native Service's onStartCommand/
+/// startForeground callback when it actually spins up — a failure that
+/// happens *after* the awaited `startService()` call below returns, in a
+/// native callback outside anything a Dart `try/catch` in this file can
+/// reach, so the existing try/catch was never going to catch it. Disabling
+/// the start entirely (rather than guessing further at the native cause
+/// blind) is the fast, safe way to get the app usable again; re-enable only
+/// after reproducing and confirming a fix with real device logs.
+const _kBackgroundLocationEnabled = false;
+
 class LocationService {
   LocationService._();
 
@@ -50,6 +63,7 @@ class LocationService {
   /// resolves, and again on every app resume) — does nothing if location was never
   /// granted, and never starts a second background service instance.
   static Future<void> ensureStarted() async {
+    if (!_kBackgroundLocationEnabled) return;
     if (_started) return;
     final status = await Permission.locationWhenInUse.status;
     if (!status.isGranted) return;
