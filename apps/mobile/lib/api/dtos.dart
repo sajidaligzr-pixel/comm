@@ -827,3 +827,63 @@ class ProvisionUserResult {
         expiresAt: json['expiresAt'] as String,
       );
 }
+
+// --- Live location sharing (mirrors packages/types/src/locations.ts) -------------
+// A deliberate, narrow exception to this app's E2E model — see
+// docs/09-trust-boundaries.md's "Live location sharing" section.
+
+class LiveLocationDto {
+  final String userId;
+  final String username;
+  final String displayName;
+  final double latitude;
+  final double longitude;
+  final double? accuracyM;
+  final double? headingDeg;
+  final double? speedMps;
+  final String recordedAt;
+  final String updatedAt;
+  const LiveLocationDto({
+    required this.userId,
+    required this.username,
+    required this.displayName,
+    required this.latitude,
+    required this.longitude,
+    required this.accuracyM,
+    required this.headingDeg,
+    required this.speedMps,
+    required this.recordedAt,
+    required this.updatedAt,
+  });
+  static LiveLocationDto fromJson(Map<String, dynamic> json) => LiveLocationDto(
+    userId: json['userId'] as String,
+    username: json['username'] as String,
+    displayName: json['displayName'] as String,
+    latitude: (json['latitude'] as num).toDouble(),
+    longitude: (json['longitude'] as num).toDouble(),
+    accuracyM: (json['accuracyM'] as num?)?.toDouble(),
+    headingDeg: (json['headingDeg'] as num?)?.toDouble(),
+    speedMps: (json['speedMps'] as num?)?.toDouble(),
+    recordedAt: json['recordedAt'] as String,
+    updatedAt: json['updatedAt'] as String,
+  );
+}
+
+class LocationViewerDto {
+  final String userId;
+  final String username;
+  final String displayName;
+  final String grantedAt;
+  const LocationViewerDto({
+    required this.userId,
+    required this.username,
+    required this.displayName,
+    required this.grantedAt,
+  });
+  static LocationViewerDto fromJson(Map<String, dynamic> json) => LocationViewerDto(
+    userId: json['userId'] as String,
+    username: json['username'] as String,
+    displayName: json['displayName'] as String,
+    grantedAt: json['grantedAt'] as String,
+  );
+}

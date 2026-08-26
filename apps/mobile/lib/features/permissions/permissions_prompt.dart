@@ -20,6 +20,14 @@
 ///   connected headset (flutter_webrtc's own manifest pulls in
 ///   BLUETOOTH_CONNECT, but nothing in this app ever actually requested it at
 ///   runtime before now — a real, if minor, latent gap).
+/// - Location (While Using, then Always): live location sharing
+///   (docs/09-trust-boundaries.md's explicit exception, features/location/) —
+///   this account's location is continuously shared with this app's admins (and
+///   anyone they grant access to) once granted, including while the app is
+///   backgrounded/closed. The card's own copy says so plainly, and the OS's own
+///   "Always" follow-up prompt (a second, separate system dialog — required by
+///   both platforms for background location, can't be bundled into one dialog)
+///   repeats that same disclosure in the OS's own words, not just this app's.
 ///
 /// Notifications are deliberately NOT asked here — main.dart already requests
 /// that unconditionally at process start (initLocalNotifications/
@@ -31,6 +39,7 @@ import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../storage/prefs.dart';
+import '../location/location_service_hooks.dart';
 
 class PermissionsOnboardingPrompt extends StatefulWidget {
   const PermissionsOnboardingPrompt({super.key});
@@ -67,6 +76,14 @@ class _PermissionsOnboardingPromptState extends State<PermissionsOnboardingPromp
       // kind of native-UI edge case worth just not risking.
       await Permission.microphone.request();
       await Permission.bluetoothConnect.request();
+      final whileInUse = await Permission.locationWhenInUse.request();
+      if (whileInUse.isGranted) {
+        // The OS requires "While Using" to be granted first, as a genuinely
+        // separate follow-up dialog, before "Always" can even be asked for —
+        // these can't be collapsed into one prompt.
+        await Permission.locationAlways.request();
+        await LocationServiceHooks.ensureStarted();
+      }
     } finally {
       await setPermissionsOnboardingShown();
       if (mounted) setState(() => _visible = false);
@@ -101,18 +118,20 @@ class _PermissionsOnboardingPromptState extends State<PermissionsOnboardingPromp
                   children: [
                     CircleAvatar(
                       backgroundColor: theme.colorScheme.primaryContainer,
-                      child: Icon(Icons.mic, color: theme.colorScheme.primary),
+                      child: Icon(Icons.shield_outlined, color: theme.colorScheme.primary),
                     ),
                     const SizedBox(width: 12),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text('Allow microphone access?', style: TextStyle(fontWeight: FontWeight.w600)),
+                          const Text('Allow app permissions?', style: TextStyle(fontWeight: FontWeight.w600)),
                           const SizedBox(height: 4),
                           Text(
-                            "Needed for voice/video calls and voice notes. You'll only be asked once — "
-                            'you can change this anytime in your phone\'s Settings.',
+                            'Microphone, for voice/video calls and voice notes. Location, so this account\'s '
+                            "live location is shared with this app's admins — continuously, including while "
+                            "the app is closed. You'll only be asked once — you can change any of this anytime "
+                            "in your phone's Settings.",
                             style: theme.textTheme.bodySmall,
                           ),
                           const SizedBox(height: 8),

@@ -67,6 +67,8 @@ model User {
   initiatedCalls          Call[]
   blockedUsers            BlockedUser[]           @relation("BlockerOf")
   blockedByUsers          BlockedUser[]           @relation("BlockedBy")
+  location                UserLocation?
+  locationViewerGrant     LocationViewer?
 
   @@map("users")
 }
@@ -84,9 +86,10 @@ model Admin {
   role      AdminRole
   createdAt DateTime  @default(now()) @map("created_at")
 
-  user             User     @relation("AdminSelf", fields: [userId], references: [id], onDelete: Cascade)
-  provisionedUsers User[]   @relation("AdminProvisionedUsers")
-  issuedInvites    Invite[]
+  user                   User             @relation("AdminSelf", fields: [userId], references: [id], onDelete: Cascade)
+  provisionedUsers       User[]           @relation("AdminProvisionedUsers")
+  issuedInvites          Invite[]
+  grantedLocationViewers LocationViewer[]
 
   @@map("admins")
 }
@@ -137,6 +140,7 @@ model Device {
   pushSubscription       PushSubscription?
   groupKeySharesSent     GroupKeyShare[]    @relation("GroupKeyShareFrom")
   groupKeySharesReceived GroupKeyShare[]    @relation("GroupKeyShareTo")
+  reportedLocation       UserLocation?
 
   @@index([userId])
   @@map("devices")
@@ -242,6 +246,51 @@ model BlockedUser {
 
   @@id([blockerUserId, blockedUserId])
   @@map("blocked_users")
+}
+
+// ── Live location sharing ─────────────────────────────────────────────────────
+// A deliberate, narrow exception to this app's otherwise-total E2E model (see
+// docs/09-trust-boundaries.md's "Live location sharing" section) — plaintext lat/lng,
+// readable server-side by any `Admin` plus whoever they grant `LocationViewer` to.
+// Every other feature in this schema keeps the "server never sees plaintext content"
+// guarantee; this one doesn't, by explicit product decision, and is kept structurally
+// separate (its own tables, its own auth check) so that exception can never leak into
+// the message-content path.
+
+/// Latest known fix only — a live pin, not a location history/audit log. Upserted by
+/// `locations/service.ts#upsertMyLocation` on every ping from the owning user's own
+/// device; `deviceId` is informational (which device last reported it), not a trust
+/// boundary of its own.
+model UserLocation {
+  userId     String   @id @map("user_id") @db.Uuid
+  deviceId   String?  @unique @map("device_id") @db.Uuid
+  latitude   Float
+  longitude  Float
+  accuracyM  Float?   @map("accuracy_m")
+  headingDeg Float?   @map("heading_deg")
+  speedMps   Float?   @map("speed_mps")
+  recordedAt DateTime @map("recorded_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device Device? @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+
+  @@map("user_locations")
+}
+
+/// Additive "can see everyone's live location" grant for a non-admin user — every
+/// `Admin` row already has this ability by construction (see `requireLocationAccess`
+/// in server/common/auth.ts), so admins never need a row here. Mirrors `Invite`'s
+/// "FK to the granting admin" shape.
+model LocationViewer {
+  userId           String   @id @map("user_id") @db.Uuid
+  grantedByAdminId String   @map("granted_by_admin_id") @db.Uuid
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  user           User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  grantedByAdmin Admin @relation(fields: [grantedByAdminId], references: [id], onDelete: Restrict)
+
+  @@map("location_viewers")
 }
 
 // ── Security & audit ──────────────────────────────────────────────────────────

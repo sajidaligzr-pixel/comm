@@ -20,6 +20,7 @@ import '../notifications/push_notifications.dart' show registerPushToken;
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 import '../auth/biometric_enroll_prompt.dart';
+import '../location/location_service_hooks.dart';
 import '../permissions/permissions_prompt.dart';
 import 'chat_list_tile.dart';
 
@@ -35,6 +36,7 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
   Set<String> _locallyDeleted = {};
   String? _error;
   bool _isAdmin = false;
+  bool _canSeeMap = false;
   // Mirrors web's chats-shell.tsx `search` state/`matchesQuery` filter exactly —
   // name-only, chat-list-level (not message content; that's a much bigger, still
   // separate follow-up needing a real local index — docs/13-roadmap.md's Search
@@ -68,6 +70,12 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
       registerPushToken(ref.read(pushApiProvider));
     }
     _checkAdmin();
+    _checkLocationAccess();
+    // Speculative and idempotent (see LocationService.ensureStarted's own
+    // docstring) — re-arms the background reporting service on every app
+    // (re)launch, since the "already started" flag is per-process and location
+    // permission may have been granted in a previous run.
+    LocationServiceHooks.ensureStarted();
     // Fallback for the plain "opened the app normally, no notification tapped"
     // case — main.dart's tap handler already triggers this directly for a tapped
     // call notification, but a call could still be waiting even if the app was
@@ -104,6 +112,21 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
     } on ApiException {
       // Not an admin (FORBIDDEN) or a transient network error either way — just
       // leave the nav entry hidden, same fail-closed rule as biometric_unlock.dart.
+    }
+  }
+
+  /// Same "success alone implies access" convenience as `_checkAdmin` above, for
+  /// the Location Map nav entry — shown to an Admin OR a granted LocationViewer
+  /// (locations_api.dart's `listLive` is gated by `requireLocationAccess`, not
+  /// `requireAdmin`, so this is a genuinely different/broader check than
+  /// `_isAdmin`, not a duplicate of it).
+  Future<void> _checkLocationAccess() async {
+    try {
+      await ref.read(locationsApiProvider).listLive();
+      if (mounted) setState(() => _canSeeMap = true);
+    } on ApiException {
+      // Not authorized (FORBIDDEN) or a transient network error — leave the nav
+      // entry hidden either way, same fail-closed rule as `_checkAdmin`.
     }
   }
 
@@ -379,6 +402,12 @@ class _ChatsListScreenState extends ConsumerState<ChatsListScreen>
               icon: const Icon(Icons.admin_panel_settings_outlined),
               tooltip: 'Admin',
               onPressed: () => context.push('/admin'),
+            ),
+          if (_canSeeMap)
+            IconButton(
+              icon: const Icon(Icons.map_outlined),
+              tooltip: 'Live location',
+              onPressed: () => context.push('/map'),
             ),
           IconButton(
             icon: const Icon(Icons.star_border),

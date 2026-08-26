@@ -43,7 +43,14 @@ If/when contact discovery ships (see [13-roadmap](13-roadmap.md) — not in the 
 
 ## Admin capability, precisely
 
-Admins (`admins` table, [02-database-schema](02-database-schema.md)) can: provision accounts, issue reset invites, suspend/reactivate accounts, view abuse reports (including reporter-submitted evidence, which the reporter explicitly attached from their own decrypted view), view rate-limit/security-event aggregates, and revoke a device on behalf of a locked-out user. Admins **cannot**: read any user's message content, read any user's private keys (none exist server-side to read), or silently decrypt a conversation to "investigate" it without that conversation's own participants explicitly reporting/sharing content. This is the "admins operate the infrastructure; they do not own the user's private conversations" principle from master-prompt §60, made concrete.
+Admins (`admins` table, [02-database-schema](02-database-schema.md)) can: provision accounts, issue reset invites, suspend/reactivate accounts, view abuse reports (including reporter-submitted evidence, which the reporter explicitly attached from their own decrypted view), view rate-limit/security-event aggregates, revoke a device on behalf of a locked-out user, and — see the explicit exception below — see every user's live location. Admins **cannot**: read any user's message content, read any user's private keys (none exist server-side to read), or silently decrypt a conversation to "investigate" it without that conversation's own participants explicitly reporting/sharing content. This is the "admins operate the infrastructure; they do not own the user's private conversations" principle from master-prompt §60, made concrete — narrowed, as of live location sharing, to message *content* specifically rather than "everything about the user," per the exception below.
+
+## Live location sharing — an explicit exception
+
+Unlike everything else in this document, live location sharing is a deliberate, narrow break from the "server never sees plaintext content" model, not an oversight: `user_locations` (`packages/database/prisma/schema.prisma`) stores each sharing user's latest lat/lng in plaintext, readable server-side by any admin plus anyone an admin grants a `location_viewers` row to. This was a specific product decision, made with the tradeoff stated plainly: any admin (and anyone they grant) can see a sharing user's real-time physical location, not merely infrastructure/routing metadata about their app usage. It is scoped as narrowly as the feature allows:
+- Only current position (`user_locations` holds one row per user, the latest fix — no location *history* is retained).
+- Only reachable via `requireLocationAccess`/`requireAdmin` (`server/common/auth.ts`), re-derived from the database on every call, same posture as every other authorization check in this app.
+- Structurally separate from the message-content path — its own tables, its own routes (`/api/locations*`), its own realtime channel (`LOCATION_EVENTS_CHANNEL`) — so this exception can never leak into (or be confused with) the E2E message-content guarantee, which is otherwise unchanged and total.
 
 ## Summary table
 
@@ -57,3 +64,4 @@ Admins (`admins` table, [02-database-schema](02-database-schema.md)) can: provis
 | Call media content | ✅ | ❌ | ❌ (encrypted transit only) | n/a |
 | Call metadata (who/when/duration) | ✅ | ✅ | ✅ | n/a |
 | Push payload | ✅ (decrypted locally) | Opaque trigger only | n/a | Generic text only |
+| Live location | ✅ | ✅ (admins/granted viewers only — explicit exception above) | ✅ (transits) | n/a |

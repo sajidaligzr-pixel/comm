@@ -27,8 +27,12 @@ const nextConfig = {
           // microphone=(self) — not (*) — allows getUserMedia only for this
           // same-origin app itself (components/chat/message-thread.tsx's voice
           // message recorder), never a third-party iframe embedding this page.
-          // camera/geolocation stay fully denied: no feature here uses either yet.
-          { key: 'Permissions-Policy', value: 'camera=(), microphone=(self), geolocation=()' },
+          // camera stays fully denied: no feature here uses it. geolocation=(self) —
+          // not (*) — is the live-location-sharing feature's browser-Geolocation-API
+          // permission (docs/09-trust-boundaries.md's live-location exception),
+          // scoped the same way microphone is: this same-origin app only, never a
+          // third-party iframe embedding this page.
+          { key: 'Permissions-Policy', value: 'camera=(), microphone=(self), geolocation=(self)' },
           // Only meaningful — and only sent — in production: the dev server is plain
           // http://localhost, and HSTS on an insecure origin is a browser no-op at
           // best and a footgun at worst (it would apply to the real domain the

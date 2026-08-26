@@ -16,6 +16,7 @@ import '../../api/users_api.dart';
 import '../../app/providers.dart';
 import '../../crypto/kek_holder.dart';
 import '../../crypto/local_identity.dart';
+import '../location/location_service_hooks.dart';
 import '../../storage/active_account.dart';
 import '../../storage/blob_store.dart' show wipeCryptoDb;
 import '../../storage/prefs.dart';
@@ -210,6 +211,7 @@ class AuthController extends StateNotifier<AuthState> {
       // client: a failed logout call shouldn't trap the user in a signed-in UI they
       // can no longer act on).
     }
+    await LocationServiceHooks.stop();
     await _apiClient.clearCookies();
     clearUnlockedIdentity();
     clearActiveAccount();
@@ -226,6 +228,7 @@ class AuthController extends StateNotifier<AuthState> {
   /// this happened.
   Future<void> forceSignOut() async {
     if (state is! AuthSignedIn && state is! AuthNeedsUnlock) return;
+    await LocationServiceHooks.stop();
     await _apiClient.clearCookies();
     clearUnlockedIdentity();
     clearActiveAccount();
@@ -245,6 +248,7 @@ class AuthController extends StateNotifier<AuthState> {
 
     await _authApi.deleteAccount(password: password);
 
+    await LocationServiceHooks.stop();
     await wipeLocalIdentity();
     await wipeCryptoDb();
     if (username != null) await clearRememberedDeviceId(username);

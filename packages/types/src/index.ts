@@ -11,5 +11,6 @@ export * from './calls';
 export * from './push';
 export * from './media';
 export * from './groups';
+export * from './locations';
 export * from './realtime';
 export * from './blocking';

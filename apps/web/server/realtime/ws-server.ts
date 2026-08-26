@@ -11,11 +11,13 @@ import {
   CALL_EVENTS_CHANNEL,
   GROUP_EVENTS_CHANNEL,
   GROUP_CALL_EVENTS_CHANNEL,
+  LOCATION_EVENTS_CHANNEL,
   type DeviceEvent,
   type MessageEvent,
   type CallEvent,
   type GroupEvent,
   type GroupCallEvent,
+  type LocationEvent,
 } from './bus';
 import { handleInboundWsMessage } from './message-handlers';
 
@@ -91,7 +93,14 @@ function forwardToDevice(deviceId: string, payload: unknown): void {
 export function initRealtimeSubscriber(): void {
   const subscriber = createRedisSubscriber();
   subscriber
-    .subscribe(DEVICE_EVENTS_CHANNEL, MESSAGE_EVENTS_CHANNEL, CALL_EVENTS_CHANNEL, GROUP_EVENTS_CHANNEL, GROUP_CALL_EVENTS_CHANNEL)
+    .subscribe(
+      DEVICE_EVENTS_CHANNEL,
+      MESSAGE_EVENTS_CHANNEL,
+      CALL_EVENTS_CHANNEL,
+      GROUP_EVENTS_CHANNEL,
+      GROUP_CALL_EVENTS_CHANNEL,
+      LOCATION_EVENTS_CHANNEL,
+    )
     .catch((err) => {
       console.error('[realtime] failed to subscribe to realtime channels', err);
     });
@@ -153,6 +162,17 @@ export function initRealtimeSubscriber(): void {
       let event: GroupCallEvent;
       try {
         event = JSON.parse(raw) as GroupCallEvent;
+      } catch {
+        return;
+      }
+      forwardToDevice(event.targetDeviceId, event);
+      return;
+    }
+
+    if (channel === LOCATION_EVENTS_CHANNEL) {
+      let event: LocationEvent;
+      try {
+        event = JSON.parse(raw) as LocationEvent;
       } catch {
         return;
       }

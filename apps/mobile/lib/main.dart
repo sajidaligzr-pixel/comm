@@ -5,6 +5,8 @@ import 'api/api_client.dart';
 import 'app/app.dart';
 import 'app/router.dart';
 import 'features/calls/call_kit.dart' show initCallKit;
+import 'features/location/location_service.dart';
+import 'features/location/location_service_hooks.dart';
 import 'features/notifications/local_notifications.dart';
 import 'features/notifications/push_notifications.dart';
 
@@ -14,6 +16,14 @@ Future<void> main() async {
   // reads `ApiClient.instance` synchronously, which throws until this has run (see
   // that class's own guard).
   await ApiClient.initialize();
+
+  // Wires the real implementation behind the hooks indirection widely-imported
+  // app code (permissions_prompt.dart, chats_list_screen.dart, auth_controller.dart)
+  // actually calls — see location_service_hooks.dart's own docstring for why this
+  // indirection exists (in short: location_service.dart is only safely importable
+  // from here, never from anything a unit test might reach).
+  LocationServiceHooks.ensureStarted = LocationService.ensureStarted;
+  LocationServiceHooks.stop = LocationService.stop;
 
   // An explicit ProviderContainer (rather than a plain `ProviderScope`) so
   // initLocalNotifications' tap handler below — a plugin callback with no

@@ -19,6 +19,7 @@ import '../api/calls_api.dart';
 import '../api/groups_api.dart';
 import '../api/blocking_api.dart';
 import '../api/admin_api.dart';
+import '../api/locations_api.dart';
 import '../api/push_api.dart';
 import '../features/groups/group_session_controller.dart';
 import '../features/notifications/message_notifier.dart';
@@ -62,6 +63,9 @@ final blockingApiProvider = Provider<BlockingApi>(
 );
 final adminApiProvider = Provider<AdminApi>(
   (ref) => AdminApi(ref.watch(apiClientProvider)),
+);
+final locationsApiProvider = Provider<LocationsApi>(
+  (ref) => LocationsApi(ref.watch(apiClientProvider)),
 );
 final pushApiProvider = Provider<PushApi>(
   (ref) => PushApi(ref.watch(apiClientProvider)),

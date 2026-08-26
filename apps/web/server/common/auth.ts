@@ -84,6 +84,25 @@ export async function requireAdmin(ctx: AuthContext): Promise<{ adminId: string;
 }
 
 /**
+ * Authorization for the live-location-sharing feature (docs/09-trust-boundaries.md's
+ * "Live location sharing" exception) — passes for any `Admin` (every admin can see
+ * everyone's live location by construction) OR any user holding an additive
+ * `LocationViewer` grant, re-derived from the database every call, same posture as
+ * `requireAdmin` above. Deliberately its own check rather than reusing `requireAdmin`
+ * directly: a granted viewer should see the map without gaining any of `Admin`'s other
+ * (account-provisioning) powers.
+ */
+export async function requireLocationAccess(ctx: AuthContext): Promise<void> {
+  const [admin, viewer] = await Promise.all([
+    prisma.admin.findUnique({ where: { userId: ctx.userId } }),
+    prisma.locationViewer.findUnique({ where: { userId: ctx.userId } }),
+  ]);
+  if (!admin && !viewer) {
+    throw new AppError('FORBIDDEN', 'You do not have permission to do that.');
+  }
+}
+
+/**
  * Double-submit CSRF check for authenticated, state-changing requests. Cookies alone
  * don't protect against CSRF (a cross-origin form/script can trigger a cookie-bearing
  * request); a cross-origin page cannot read this site's cookie value to also send it

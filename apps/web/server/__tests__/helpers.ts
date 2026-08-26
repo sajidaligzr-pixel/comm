@@ -72,6 +72,10 @@ export async function deleteTestUser(userId: string): Promise<void> {
   const admin = await prisma.admin.findUnique({ where: { userId } });
   if (admin) {
     await prisma.invite.deleteMany({ where: { issuedByAdminId: admin.id } });
+    // Same reasoning, same `onDelete: Restrict` shape, for `location_viewers.granted_by_admin_id`
+    // (packages/database/prisma/schema.prisma) — a viewer grant issued by this admin
+    // would otherwise block deleting the admin row itself.
+    await prisma.locationViewer.deleteMany({ where: { grantedByAdminId: admin.id } });
   }
 
   // Same reasoning for `messages.sender_user_id` (also `onDelete: Restrict` —

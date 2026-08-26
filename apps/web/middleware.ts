@@ -76,9 +76,12 @@ function buildContentSecurityPolicy(nonce: string): string {
     "style-src 'self' 'unsafe-inline'",
     // Decrypted images/voice notes render as inline data: URLs
     // (components/chat/bubbles.tsx), never fetched — there's no other image/media
-    // source anywhere in this app (no next/image remote patterns, no external
-    // font/avatar service).
-    "img-src 'self' data:",
+    // source anywhere in this app except the one added below.
+    // tile.openstreetmap.org: the live-location map's raster tile source
+    // (components/location/live-map-view.tsx) — the one genuinely external image
+    // origin in this app, open-source/no-API-key by design (docs/09-trust-
+    // boundaries.md's live-location exception).
+    "img-src 'self' data: https://tile.openstreetmap.org",
     "media-src 'self' data:",
     "font-src 'self'",
     `connect-src ${connectSrc.join(' ')}`,

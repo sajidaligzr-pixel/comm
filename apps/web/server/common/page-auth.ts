@@ -1,7 +1,7 @@
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { AppError } from '@comm/types';
-import { authenticateAccessToken, requireAdmin, type AuthContext } from './auth';
+import { authenticateAccessToken, requireAdmin, requireLocationAccess, type AuthContext } from './auth';
 import { ACCESS_TOKEN_COOKIE } from './cookies';
 
 /**
@@ -28,6 +28,21 @@ export async function getAdminContextOrRedirect(): Promise<AuthContext> {
   const ctx = await getAuthContextOrRedirect();
   try {
     await requireAdmin(ctx);
+  } catch (err) {
+    if (err instanceof AppError) {
+      redirect('/devices');
+    }
+    throw err;
+  }
+  return ctx;
+}
+
+/** Same shape as `getAdminContextOrRedirect`, but for the live-location map/pages
+ * that a granted `LocationViewer` must also reach — not admin-only. */
+export async function getLocationAccessContextOrRedirect(): Promise<AuthContext> {
+  const ctx = await getAuthContextOrRedirect();
+  try {
+    await requireLocationAccess(ctx);
   } catch (err) {
     if (err instanceof AppError) {
       redirect('/devices');

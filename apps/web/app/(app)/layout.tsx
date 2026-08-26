@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { getAuthContextOrRedirect } from '@/server/common/page-auth';
 import { isAdmin } from '@/server/modules/admin/service';
+import { hasLocationAccess } from '@/server/modules/locations/service';
 import { getMustChangePassword } from '@/server/modules/auth/service';
 import { SignOutButton } from '@/components/sign-out-button';
 import { Logo } from '@/components/logo';
@@ -23,7 +24,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     redirect('/change-password');
   }
 
-  const admin = await isAdmin(ctx.userId);
+  const [admin, canSeeMap] = await Promise.all([isAdmin(ctx.userId), hasLocationAccess(ctx.userId)]);
 
   return (
     // Fixed to the viewport height, not the document — the chats section manages
@@ -57,6 +58,11 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                       Admin
                     </Link>
                   )}
+                  {canSeeMap && (
+                    <Link href="/admin/map" className="hover:text-foreground">
+                      Location Map
+                    </Link>
+                  )}
                 </nav>
               </div>
               <div className="flex items-center gap-1">
@@ -69,6 +75,14 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                       className="flex h-9 items-center rounded-lg px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
                     >
                       Admin
+                    </Link>
+                  )}
+                  {canSeeMap && (
+                    <Link
+                      href="/admin/map"
+                      className="flex h-9 items-center rounded-lg px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                    >
+                      Map
                     </Link>
                   )}
                 </nav>

@@ -26,6 +26,7 @@ import '../features/devices/devices_screen.dart';
 import '../features/groups/new_group_screen.dart';
 import '../features/groups/group_info_screen.dart';
 import '../features/admin/admin_screen.dart';
+import '../features/location/live_map_screen.dart';
 import '../features/settings/blocked_users_screen.dart';
 import '../features/settings/delete_account_screen.dart';
 import 'splash_screen.dart';
@@ -133,6 +134,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) => const CallHistoryScreen(),
       ),
       GoRoute(path: '/admin', builder: (context, state) => const AdminScreen()),
+      GoRoute(path: '/map', builder: (context, state) => const LiveMapScreen()),
       GoRoute(
         path: '/new-group',
         builder: (context, state) => const NewGroupScreen(),

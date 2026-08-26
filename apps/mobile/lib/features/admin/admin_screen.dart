@@ -40,16 +40,27 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
   String? _createError;
   ProvisionUserResult? _lastCreated;
 
+  // --- Location access (docs/09-trust-boundaries.md's "Live location sharing"
+  // exception) — grant/revoke the LocationViewer privilege, mirroring the
+  // account-provisioning section's own list+form shape exactly.
+  List<LocationViewerDto>? _viewers;
+  String? _viewersError;
+  final _grantUsernameController = TextEditingController();
+  bool _granting = false;
+  String? _grantError;
+
   @override
   void initState() {
     super.initState();
     _load();
+    _loadViewers();
   }
 
   @override
   void dispose() {
     _usernameController.dispose();
     _displayNameController.dispose();
+    _grantUsernameController.dispose();
     super.dispose();
   }
 
@@ -91,6 +102,44 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
       setState(() => _createError = e.message);
     } finally {
       if (mounted) setState(() => _creating = false);
+    }
+  }
+
+  Future<void> _loadViewers() async {
+    try {
+      final viewers = await ref.read(locationsApiProvider).listViewers();
+      if (mounted) setState(() => _viewers = viewers);
+    } on ApiException catch (e) {
+      // A non-admin landing here at all is already handled by `_forbidden` above
+      // (this call only runs alongside that one) — just surface the message.
+      if (mounted) setState(() => _viewersError = e.message);
+    }
+  }
+
+  Future<void> _grantViewer() async {
+    final username = _grantUsernameController.text.trim();
+    if (username.isEmpty) return;
+    setState(() {
+      _granting = true;
+      _grantError = null;
+    });
+    try {
+      await ref.read(locationsApiProvider).grantViewer(username);
+      _grantUsernameController.clear();
+      await _loadViewers();
+    } on ApiException catch (e) {
+      setState(() => _grantError = e.message);
+    } finally {
+      if (mounted) setState(() => _granting = false);
+    }
+  }
+
+  Future<void> _revokeViewer(LocationViewerDto viewer) async {
+    try {
+      await ref.read(locationsApiProvider).revokeViewer(viewer.userId);
+      await _loadViewers();
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
     }
   }
 
@@ -154,7 +203,9 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           Text(
-            'Account provisioning only — nothing here can read a user\'s messages.',
+            'Account provisioning, plus live location sharing — nothing here can read a '
+            'user\'s message content (docs/09-trust-boundaries.md documents live location '
+            'as this app\'s one explicit exception to that).',
             style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 12),
@@ -163,6 +214,8 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
           Text('All accounts', style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(height: 8),
           ...users.map((u) => _buildUserCard(context, u)),
+          const SizedBox(height: 24),
+          _buildLocationAccessSection(context),
         ],
       ),
     );
@@ -260,6 +313,74 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
             ? const Chip(label: Text('suspended', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact)
             : TextButton(onPressed: () => _suspend(u), child: const Text('Suspend')),
       ),
+    );
+  }
+
+  /// Grant/revoke the LocationViewer privilege — every admin (this screen's own
+  /// audience) can already see everyone's live location by construction; this is
+  /// only for extending that to an ordinary user without making them an admin.
+  Widget _buildLocationAccessSection(BuildContext context) {
+    final viewers = _viewers;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Location access', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 4),
+        Text(
+          'Every admin can already see everyone\'s live location. Granting this to an '
+          'ordinary user lets them see it too, without giving them any other admin power.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 8),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _grantUsernameController,
+                    decoration: const InputDecoration(labelText: 'Username'),
+                    autocorrect: false,
+                    enabled: !_granting,
+                    onSubmitted: (_) => _grantViewer(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                FilledButton(
+                  onPressed: _granting ? null : _grantViewer,
+                  child: _granting
+                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Text('Grant'),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (_grantError != null) ...[
+          const SizedBox(height: 4),
+          Text(_grantError!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12)),
+        ],
+        const SizedBox(height: 12),
+        if (_viewersError != null)
+          Text(_viewersError!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12))
+        else if (viewers == null)
+          const Padding(padding: EdgeInsets.symmetric(vertical: 8), child: LinearProgressIndicator())
+        else if (viewers.isEmpty)
+          Text('No one has been granted location access yet.', style: Theme.of(context).textTheme.bodySmall)
+        else
+          ...viewers.map(
+            (v) => Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: ListTile(
+                title: Text('${v.displayName}  ·  @${v.username}'),
+                subtitle: Text('Granted ${DateTime.tryParse(v.grantedAt)?.toLocal().toString().split('.').first ?? v.grantedAt}'),
+                trailing: TextButton(onPressed: () => _revokeViewer(v), child: const Text('Revoke')),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

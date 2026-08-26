@@ -146,4 +146,10 @@ export const RATE_LIMIT_RULES = {
   // offer/answer/ICE exchanges instead of 1:1's single pair, multiplying normal
   // signaling volume by roughly that same factor.
   groupCallSignal: { namespace: 'group-calls:signal', windowSeconds: 60, max: 400 } satisfies RateLimitRule,
+  // A device pings roughly every 30s foregrounded / every 2-5min backgrounded
+  // (docs/09-trust-boundaries.md's live-location plan) — 20/min comfortably covers
+  // that cadence while still bounding a misbehaving/compromised client from
+  // hammering this write.
+  locationPing: { namespace: 'locations:ping', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
+  locationViewerGrant: { namespace: 'locations:viewer-grant', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
 } as const;

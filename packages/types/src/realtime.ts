@@ -1,5 +1,6 @@
 import type { MessageDto, MessageDeletionReason } from './messages';
 import type { CallSessionDescription, CallIceCandidateInit, CallRejectReason, GroupCallParticipant } from './calls';
+import type { LiveLocation } from './locations';
 
 /**
  * Shared between `apps/web` (publishes most of these from Route Handlers/WS
@@ -14,8 +15,19 @@ export const MESSAGE_EVENTS_CHANNEL = 'comm:message-events';
 export const CALL_EVENTS_CHANNEL = 'comm:call-events';
 export const GROUP_EVENTS_CHANNEL = 'comm:group-events';
 export const GROUP_CALL_EVENTS_CHANNEL = 'comm:group-call-events';
+export const LOCATION_EVENTS_CHANNEL = 'comm:location-events';
 
 export type DeviceEvent = { type: 'revoked'; deviceId: string };
+
+/**
+ * Live-location fan-out (docs/09-trust-boundaries.md's "Live location sharing"
+ * exception) — its own channel/union, not folded into `MessageEvent`, since a location
+ * update isn't a message-table event and its recipient set is computed completely
+ * differently (every `Admin` + every granted `LocationViewer`'s active devices, via
+ * `getLocationViewerDeviceIds` in conversations/service.ts, not conversation
+ * membership).
+ */
+export type LocationEvent = { type: 'location.updated'; targetDeviceId: string; location: LiveLocation };
 
 /**
  * Every variant carries `targetDeviceId` — the one device this specific event is

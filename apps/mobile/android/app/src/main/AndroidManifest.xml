@@ -28,6 +28,22 @@
          the update banner needs this explicitly; without it, Android silently
          refuses the install intent on API 26+ regardless of what the user taps. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- Live location sharing (features/location/, docs/09-trust-boundaries.md's
+         explicit exception) — FINE/COARSE requested at runtime via geolocator
+         (permissions_prompt.dart); BACKGROUND_LOCATION is Android's separate,
+         required-later permission for continuing to read location once the app
+         isn't in the foreground (API 29+ — must be requested only after
+         WHEN_IN_USE is already granted, same two-step rule as iOS). -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
+    <!-- Required for location_service.dart's flutter_background_service instance to
+         keep running (and posting fixes) while the app is backgrounded — the
+         FOREGROUND_SERVICE_LOCATION variant is Android 14+'s required, narrower
+         declaration of WHICH kind of foreground service this is, alongside the
+         general one. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
     <application
         android:label="Comm"
         android:name="${applicationName}"
@@ -85,6 +101,16 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+        <!-- flutter_background_service (features/location/location_service.dart) —
+             its own AndroidManifest.xml already declares this same <service> (name +
+             exported); Android 14+ additionally requires the app declare
+             foregroundServiceType explicitly (per the plugin's own README), which its
+             manifest does NOT set — only that one attribute is added here, so Gradle's
+             manifest merge sees no conflicting value for anything the plugin already
+             declares. -->
+        <service
+            android:name="id.flutter.flutter_background_service.BackgroundService"
+            android:foregroundServiceType="location" />
         <!-- flutter_callkit_incoming (features/calls/call_kit.dart) declares its own
              Activity/Service/ConnectionService/receiver in its own AndroidManifest.xml,
              auto-merged into this one by Gradle — nothing to add here by hand for it.

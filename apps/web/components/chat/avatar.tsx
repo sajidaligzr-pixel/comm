@@ -14,7 +14,10 @@ const PALETTE = [
   '#8B5CF6', // purple
 ];
 
-function colorFor(seed: string): string {
+// Exported so other per-person visual treatments (e.g.
+// components/location/live-map-view.tsx's map pins) can match the same
+// name-to-color/initials mapping used here, rather than growing their own copy.
+export function colorFor(seed: string): string {
   let hash = 0;
   for (let i = 0; i < seed.length; i += 1) {
     hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
@@ -22,7 +25,7 @@ function colorFor(seed: string): string {
   return PALETTE[hash % PALETTE.length]!;
 }
 
-function initialsFor(name: string): string {
+export function initialsFor(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();

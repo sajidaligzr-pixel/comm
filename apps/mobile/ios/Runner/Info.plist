@@ -60,15 +60,33 @@
 	     the actual prompt. -->
 	<key>NSFaceIDUsageDescription</key>
 	<string>Comm can use Face ID to unlock the app instead of your password.</string>
+	<!-- Live location sharing (features/location/, docs/09-trust-boundaries.md's
+	     explicit exception) — geolocator/permission_handler's
+	     Permission.locationWhenInUse.request() surfaces this description; iOS
+	     crashes the app outright (not just denies) if it's missing when location is
+	     first accessed, same class of requirement as the photo-library key above. -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Comm shares your live location with this app's admins while you're using the app.</string>
+	<!-- Shown for the separate, later "Always" follow-up prompt
+	     (Permission.locationAlways.request()) that lets location keep being shared
+	     while the app is backgrounded/closed — the two-step disclosure iOS requires
+	     for background location access, matching Android's separate
+	     ACCESS_BACKGROUND_LOCATION permission. -->
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Comm shares your live location with this app's admins continuously, including while the app is closed.</string>
 	<!-- Lets a push actually wake the app to run firebaseMessagingBackgroundHandler
 	     (features/notifications/push_notifications.dart) while backgrounded, not just
 	     while foregrounded — the iOS half of what AndroidManifest.xml's equivalent
 	     already covers. Requires the Push Notifications capability + a real APNs
 	     entitlement to do anything (see Runner.entitlements) — inert without those,
-	     not harmful to have present ahead of them. -->
+	     not harmful to have present ahead of them.
+	     `location` is location_service.dart's own background mode (features/location/)
+	     — lets the app keep receiving location updates while backgrounded, subject to
+	     iOS's own throttling of exactly how often (see that file's docstring). -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
+		<string>location</string>
 	</array>
 </dict>
 </plist>

@@ -5,6 +5,7 @@ import {
   CALL_EVENTS_CHANNEL,
   GROUP_EVENTS_CHANNEL,
   GROUP_CALL_EVENTS_CHANNEL,
+  LOCATION_EVENTS_CHANNEL,
   type DeviceEvent,
   type MessageEvent,
   type MessageDto,
@@ -16,6 +17,8 @@ import {
   type GroupEvent,
   type GroupCallEvent,
   type GroupCallParticipant,
+  type LocationEvent,
+  type LiveLocation,
 } from '@comm/types';
 
 /**
@@ -34,16 +37,25 @@ export {
   CALL_EVENTS_CHANNEL,
   GROUP_EVENTS_CHANNEL,
   GROUP_CALL_EVENTS_CHANNEL,
+  LOCATION_EVENTS_CHANNEL,
   type DeviceEvent,
   type MessageEvent,
   type CallEvent,
   type GroupEvent,
   type GroupCallEvent,
+  type LocationEvent,
 };
 
 export async function publishDeviceRevoked(deviceId: string): Promise<void> {
   const event: DeviceEvent = { type: 'revoked', deviceId };
   await getRedisClient().publish(DEVICE_EVENTS_CHANNEL, JSON.stringify(event));
+}
+
+/** Fanned out to every current viewer's active devices — see
+ * `locations/service.ts#getLocationViewerDeviceIds` for how that set is resolved. */
+export async function publishLocationUpdate(targetDeviceId: string, location: LiveLocation): Promise<void> {
+  const event: LocationEvent = { type: 'location.updated', targetDeviceId, location };
+  await getRedisClient().publish(LOCATION_EVENTS_CHANNEL, JSON.stringify(event));
 }
 
 async function publishMessageEvent(event: MessageEvent): Promise<void> {
