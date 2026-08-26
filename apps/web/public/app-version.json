@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 9,
+  "buildNumber": 10,
   "versionName": "1.0.0",
   "apkUrl": "/downloads/comm-latest.apk",
-  "releaseNotes": "Fixed chats not scrolling all the way to the newest message when opened. This update is required."
+  "releaseNotes": "Added live location sharing: app admins can now see everyone's live location on a map, and can grant that same access to other people. You'll be asked for location access alongside the app's other permissions. This update is required."
 }

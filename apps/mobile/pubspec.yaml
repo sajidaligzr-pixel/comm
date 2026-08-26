@@ -1,7 +1,7 @@
 name: comm_mobile
 description: "Comm — native Flutter client for the existing Comm backend (apps/web, apps/worker). See apps/mobile/README.md for architecture and how this maps to the TypeScript client it replaces."
 publish_to: 'none'
-version: 1.0.0+9
+version: 1.0.0+10
 
 environment:
   sdk: ^3.10.7
@@ -110,6 +110,22 @@ dependencies:
   # treatment `image`-type messages already got. Decrypted bytes are written to a
   # temp file first (this plugin plays from a file/URL, not raw bytes in memory).
   video_player: ^2.11.1
+
+  # --- Live location sharing (features/location/) ------------------------------
+  # A deliberate, narrow exception to this app's E2E model — see
+  # docs/09-trust-boundaries.md's "Live location sharing" section. geolocator reads
+  # the device's actual GPS/network position; flutter_map + latlong2 render it on an
+  # OpenStreetMap tile layer (open-source, no API key/billing — deliberately not
+  # google_maps_flutter, a proprietary/metered SDK). flutter_background_service is
+  # what lets a fix keep being captured+posted while the app is backgrounded/closed —
+  # nothing like it exists elsewhere in this app; the closest prior art is
+  # flutter_callkit_incoming's own native foreground-service registration
+  # (features/calls/call_kit.dart), mirrored here for the same "Android needs a real,
+  # user-visible foreground service to keep running in the background" reason.
+  geolocator: ^13.0.2
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
+  flutter_background_service: ^5.1.0
 
 dev_dependencies:
   flutter_test:
