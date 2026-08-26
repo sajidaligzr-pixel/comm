@@ -37,6 +37,9 @@ class AuthController extends StateNotifier<AuthState> {
     // (an access-token refresh was attempted and still failed, meaning the
     // session is genuinely gone, not just a routine login-flow rejection).
     _apiClient.onSessionExpired = forceSignOut;
+    // See ApiClient.onTokensRefreshed's own docstring — keeps the native
+    // background location service's session copy from going stale.
+    _apiClient.onTokensRefreshed = LocationServiceHooks.refreshSession;
     bootstrap();
   }
 

@@ -20,14 +20,20 @@
 ///   connected headset (flutter_webrtc's own manifest pulls in
 ///   BLUETOOTH_CONNECT, but nothing in this app ever actually requested it at
 ///   runtime before now — a real, if minor, latent gap).
-/// - Location (While Using, then Always): live location sharing
+/// - Location (While Using only — see below): live location sharing
 ///   (docs/09-trust-boundaries.md's explicit exception, features/location/) —
 ///   this account's location is continuously shared with this app's admins (and
 ///   anyone they grant access to) once granted, including while the app is
-///   backgrounded/closed. The card's own copy says so plainly, and the OS's own
-///   "Always" follow-up prompt (a second, separate system dialog — required by
-///   both platforms for background location, can't be bundled into one dialog)
-///   repeats that same disclosure in the OS's own words, not just this app's.
+///   backgrounded/closed. The card's own copy says so plainly.
+///   Deliberately NOT also requesting "Always" (build 1.0.0+14 onward): the
+///   background capture is a genuine Android foreground service
+///   (LocationForegroundService.kt, foregroundServiceType="location") rather
+///   than a background-without-a-foreground-service mechanism, and Android
+///   grants a location-type foreground service access on "While Using" alone
+///   for as long as it's running — "Always" would be a real permission this
+///   design has no actual use for, which is exactly the kind of over-asking the
+///   "permission strings must match what the app actually does" rule this
+///   feature was built under rules out.
 ///
 /// Notifications are deliberately NOT asked here — main.dart already requests
 /// that unconditionally at process start (initLocalNotifications/
@@ -93,10 +99,8 @@ class _PermissionsOnboardingPromptState extends State<PermissionsOnboardingPromp
       await Permission.bluetoothConnect.request();
       final whileInUse = await Permission.locationWhenInUse.request();
       if (whileInUse.isGranted) {
-        // The OS requires "While Using" to be granted first, as a genuinely
-        // separate follow-up dialog, before "Always" can even be asked for —
-        // these can't be collapsed into one prompt.
-        await Permission.locationAlways.request();
+        // No follow-up "Always" request — see this file's own docstring for
+        // why "While Using" is genuinely sufficient for this feature's design.
         await LocationServiceHooks.ensureStarted();
       }
     } finally {

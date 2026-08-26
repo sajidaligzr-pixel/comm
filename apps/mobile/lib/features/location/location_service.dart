@@ -1,58 +1,53 @@
 /// Background capture + reporting for live location sharing
-/// (docs/09-trust-boundaries.md's "Live location sharing" exception) — the one
-/// place this app deliberately keeps running (as a real Android foreground
-/// service, mirroring features/calls/call_kit.dart's own native foreground-service
-/// registration) to post a fix even while backgrounded/closed, matching the
-/// "background/always-on" tracking mode this feature was built for.
+/// (docs/09-trust-boundaries.md's "Live location sharing" exception).
 ///
-/// `flutter_background_service`'s callback runs in its own headless isolate, not
-/// the app's main one — `WidgetsFlutterBinding.ensureInitialized()` at the top of
-/// each entrypoint is what that isolate needs before touching any plugin's
-/// platform channel (path_provider/dio's bits, transitively via
-/// `ApiClient.initialize()`), the same real, working pattern
-/// `push_notifications.dart`'s `firebaseMessagingBackgroundHandler` already uses
-/// for its own headless isolate. (The package's own README instead shows
-/// `DartPluginRegistrant.ensureInitialized()` — tried first, but it made even a
-/// real `flutter build apk` fail outright with "Undefined name" on this Flutter
-/// version, not just a test/analyze-only quirk, so it's a real incompatibility
-/// here, not a style choice — removed.) A fresh `ApiClient`/cookie jar is
-/// (re)initialized inside that isolate rather than reused from the main one — Dart
-/// isolates don't share static state — but it reads the same on-disk persisted
-/// cookie file (api/api_client.dart's `PersistCookieJar`), so it picks up whatever
-/// session is already signed in without a separate bootstrap.
+/// Rewritten for build 1.0.0+14 — through +13 this used `flutter_background_service`,
+/// which crashed the app the instant it opened (not just at login, as the narrower
+/// build +12 ProGuard fix addressed). Read directly from
+/// `flutter_background_service_android`'s own `BackgroundService.java`
+/// (`runService()`): starting its background isolate constructs a brand-new
+/// `FlutterEngine`, which automatically re-registers *every* plugin this app
+/// uses (`flutter_webrtc`, `local_auth`, `flutter_callkit_incoming`, etc.) with no
+/// Activity ever attached to that engine — and `runService()`'s own try/catch only
+/// ever catches `UnsatisfiedLinkError`, nothing else. Any other exception thrown by
+/// any plugin's registration propagates straight up through `Service.onCreate()`
+/// and kills the process, entirely outside anything a Dart `try/catch` (this file's
+/// old defense-in-depth included) can reach. This isn't a guess this time — it's
+/// read straight out of that plugin's own source.
 ///
-/// Real platform constraint, not a gap: iOS throttles arbitrary-interval background
-/// GPS hard regardless of what this requests — `IosConfiguration.onBackground`
-/// below is best-effort there (the OS decides how often it actually runs), while
-/// Android's real foreground service can sustain the fixed interval reliably.
+/// The fix is to never create a second `FlutterEngine` at all. Actual location
+/// capture + the HTTP POST now happen entirely natively, in a small hand-written
+/// Android foreground service
+/// (`android/app/src/main/kotlin/com/comm/comm_mobile/LocationForegroundService.kt`)
+/// that only ever touches `com.google.android.gms.location` + a plain
+/// `HttpURLConnection` — no Flutter, no plugin registry, nothing this bug could
+/// recur from. This file's job shrinks to three things: (1) tell that native
+/// service to start/stop, (2) hand it a snapshot of the current session (cookie +
+/// CSRF value) since it has no Dart cookie jar of its own to read, and (3) refresh
+/// that snapshot whenever the session actually rotates (`ApiClient.onTokensRefreshed`,
+/// wired in auth_controller.dart) — the native service does *not* attempt its own
+/// token refresh (a real, deliberate limitation: refresh tokens rotate
+/// single-use-per-refresh, per docs/07-auth-architecture.md, so a second,
+/// independent refresh attempt from native racing this app's own would risk the
+/// server's reuse-detection treating it as theft and revoking the whole session —
+/// a much worse failure than a location update briefly going stale). In practice
+/// this means background reporting stays live for as long as the access token
+/// remains valid since the app was last actually used (~15 minutes — the same
+/// window every other part of this app's session already runs on), and resumes
+/// automatically the next time the app is opened, rather than ever risking a
+/// surprise forced sign-out.
 library;
 
-import 'dart:async';
+import 'dart:io' show Cookie;
 
-import 'package:flutter/widgets.dart' show WidgetsFlutterBinding;
-import 'package:flutter_background_service/flutter_background_service.dart';
-import 'package:geolocator/geolocator.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../api/api_client.dart';
-import '../../api/locations_api.dart';
+import '../../api/app_config.dart';
 
-const _reportInterval = Duration(seconds: 60);
-const _notificationChannelId = 'comm_location';
-const _foregroundNotificationId = 4200;
-
-/// Emergency kill switch — flipped off after a live report that the app was
-/// crashing immediately on open (not just at login as the previous,
-/// narrower ProGuard-only fix addressed). The most likely remaining cause is
-/// Android itself throwing inside the native Service's onStartCommand/
-/// startForeground callback when it actually spins up — a failure that
-/// happens *after* the awaited `startService()` call below returns, in a
-/// native callback outside anything a Dart `try/catch` in this file can
-/// reach, so the existing try/catch was never going to catch it. Disabling
-/// the start entirely (rather than guessing further at the native cause
-/// blind) is the fast, safe way to get the app usable again; re-enable only
-/// after reproducing and confirming a fix with real device logs.
-const _kBackgroundLocationEnabled = false;
+const _channel = MethodChannel('comm/location_service');
+const _csrfCookieName = 'comm_csrf'; // mirrors api_client.dart's private constant
 
 class LocationService {
   LocationService._();
@@ -61,98 +56,73 @@ class LocationService {
 
   /// Idempotent and safe to call speculatively (right after the permissions card
   /// resolves, and again on every app resume) — does nothing if location was never
-  /// granted, and never starts a second background service instance.
+  /// granted, and never starts a second instance of the native service. Always
+  /// re-pushes the session snapshot even if already started, so a call here after
+  /// sign-in-as-a-different-account (or any other cookie change) still reaches the
+  /// native side.
   static Future<void> ensureStarted() async {
-    if (!_kBackgroundLocationEnabled) return;
-    if (_started) return;
     final status = await Permission.locationWhenInUse.status;
     if (!status.isGranted) return;
 
-    // Wrapped defensively, unlike the rest of this class's calls — this is the
-    // one call in the whole login path that spins up a brand-new native
-    // FlutterEngine (BackgroundService.java's runService()) and re-registers
-    // every plugin into it; found live as the actual cause of a real app crash
-    // right after login (com.baseflow.geolocator had no ProGuard keep rule —
-    // see android/app/proguard-rules.pro's own note — so its release-build
-    // registration into that second engine threw). The real fix is the keep
-    // rule; this is defense in depth so a future plugin-registration problem
-    // degrades to "location sharing doesn't start" instead of taking the whole
-    // app down again.
     try {
-      final service = FlutterBackgroundService();
-      await service.configure(
-        androidConfiguration: AndroidConfiguration(
-          onStart: _onStart,
-          autoStart: true,
-          isForegroundMode: true,
-          autoStartOnBoot: false,
-          notificationChannelId: _notificationChannelId,
-          initialNotificationTitle: 'Comm',
-          initialNotificationContent: 'Sharing your location',
-          foregroundServiceNotificationId: _foregroundNotificationId,
-          foregroundServiceTypes: [AndroidForegroundType.location],
-        ),
-        iosConfiguration: IosConfiguration(
-          autoStart: true,
-          onForeground: _onStart,
-          onBackground: _onIosBackground,
-        ),
-      );
-      await service.startService();
-      _started = true;
+      await _pushSessionSnapshot();
+      if (!_started) {
+        await _channel.invokeMethod<void>('start');
+        _started = true;
+      }
     } catch (_) {
-      // Fail closed — location sharing just doesn't start this launch; every
+      // Fail closed — location sharing just doesn't (re)start this call; every
       // other feature in the app keeps working normally.
     }
   }
 
-  /// Called on sign-out (features/auth/auth_controller.dart) — sharing a
-  /// signed-out device's location makes no sense, and the persisted cookie jar the
-  /// background isolate reads is about to be cleared anyway.
-  static Future<void> stop() async {
+  /// Called via `ApiClient.onTokensRefreshed` every time a refresh actually
+  /// rotates the session — keeps the native service's copy of the cookie/CSRF
+  /// value from going stale while the app is in active use. A no-op if the
+  /// service was never started (nothing native is listening for it yet).
+  static Future<void> refreshSession() async {
     if (!_started) return;
-    FlutterBackgroundService().invoke('stop');
-    _started = false;
-  }
-}
-
-@pragma('vm:entry-point')
-Future<bool> _onIosBackground(ServiceInstance service) async {
-  WidgetsFlutterBinding.ensureInitialized();
-  return true;
-}
-
-@pragma('vm:entry-point')
-void _onStart(ServiceInstance service) {
-  WidgetsFlutterBinding.ensureInitialized();
-
-  service.on('stop').listen((event) => service.stopSelf());
-
-  Timer.periodic(_reportInterval, (timer) async {
     try {
-      final permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied || permission == LocationPermission.deniedForever) {
-        return;
-      }
-      final position = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-      );
-      final client = await ApiClient.initialize();
-      await LocationsApi(client).reportMyLocation(
-        latitude: position.latitude,
-        longitude: position.longitude,
-        accuracyM: position.accuracy,
-        // -1 is geolocator's "unavailable" sentinel on some platforms for both of
-        // these — normalized to null (the DTO/server schema's own "unknown" value)
-        // rather than forwarding a meaningless negative number.
-        headingDeg: position.heading >= 0 ? position.heading : null,
-        speedMps: position.speed >= 0 ? position.speed : null,
-        recordedAt: position.timestamp,
-      );
+      await _pushSessionSnapshot();
     } catch (_) {
-      // Best-effort — a single failed tick (no signal, offline, not signed in,
-      // location toggled off since the last tick) just waits for the next one,
-      // same posture as every other periodic background task in this app.
+      // Best-effort, same posture as everywhere else in this file — the native
+      // side just keeps using its last-known-good snapshot until the next
+      // successful push.
     }
-  });
+  }
+
+  /// Called on sign-out (features/auth/auth_controller.dart) — sharing a
+  /// signed-out device's location makes no sense, and the cookies the snapshot
+  /// was built from are about to be cleared anyway.
+  static Future<void> stop() async {
+    _started = false;
+    try {
+      await _channel.invokeMethod<void>('clearSession');
+      await _channel.invokeMethod<void>('stop');
+    } catch (_) {
+      // Best-effort — worst case the native service notices the cleared
+      // session on its next tick and simply stops posting.
+    }
+  }
+
+  static Future<void> _pushSessionSnapshot() async {
+    final client = await ApiClient.initialize();
+    final uri = Uri.parse(AppConfig.apiBaseUrl);
+    final cookies = await client.cookieJar.loadForRequest(uri);
+    if (cookies.isEmpty) return;
+
+    final cookieHeader = cookies.map((c) => '${c.name}=${c.value}').join('; ');
+    final csrf = cookies
+        .firstWhere(
+          (c) => c.name == _csrfCookieName,
+          orElse: () => Cookie(_csrfCookieName, ''),
+        )
+        .value;
+
+    await _channel.invokeMethod<void>('setSession', {
+      'cookieHeader': cookieHeader,
+      'csrfToken': csrf,
+      'baseUrl': AppConfig.apiBaseUrl,
+    });
+  }
 }

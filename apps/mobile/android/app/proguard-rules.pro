@@ -51,22 +51,23 @@
 #   losing fields to obfuscation.
 -keep class com.hiennv.flutter_callkit_incoming.** { *; }
 
-# - geolocator_android (features/location/location_service.dart) — ships NO
-#   consumer-rules.pro of its own (confirmed: nothing under its android/ dir),
-#   unlike every other plugin in this file, so this app has to supply whatever
-#   R8 needs itself or get nothing at all. Found live: the very release build
-#   this shipped in started crashing on login (the first place
-#   LocationService.ensureStarted() runs) the moment isMinifyEnabled's R8 pass
-#   applied to it — exactly the same class of bug local_auth's rule above
-#   documents (worked fine in every debug build, including this feature's own
-#   `flutter build apk --debug` verification, broke specifically in --release).
-#   Broad keep on both the plugin's own package and the Play Services Location
-#   classes it calls into (FusedLocationProviderClient callbacks are exactly
-#   the kind of anonymous-class/listener-interface shape R8 is known to strip).
+# - geolocator_android (used by the app's own foreground location capture — see
+#   location_service.dart's docstring) — ships NO consumer-rules.pro of its own
+#   (confirmed: nothing under its android/ dir), unlike every other plugin in
+#   this file, so this app has to supply whatever R8 needs itself or get
+#   nothing at all. Found live: a release build crashed on login the moment
+#   isMinifyEnabled's R8 pass applied to it — exactly the same class of bug
+#   local_auth's rule above documents. Broad keep on both the plugin's own
+#   package and the Play Services Location classes it calls into
+#   (FusedLocationProviderClient callbacks are exactly the kind of
+#   anonymous-class/listener-interface shape R8 is known to strip) — the same
+#   Play Services classes LocationForegroundService.kt now also calls directly,
+#   so this rule covers both call sites.
 -keep class com.baseflow.geolocator.** { *; }
 -keep class com.google.android.gms.location.** { *; }
 
-# - flutter_background_service_android already ships its own
-#   consumerProguardFiles (auto-applied by Gradle) — kept here explicitly too,
-#   same "zero-cost safety net" reasoning as flutter_webrtc's rule above.
--keep class id.flutter.flutter_background_service.** { *; }
+# flutter_background_service is gone as of build 1.0.0+14 (see
+# location_service.dart's docstring for why) — its keep rule is removed along
+# with it; LocationForegroundService.kt is this app's own class, already kept
+# by the Android Gradle Plugin's default rules for anything declared in
+# AndroidManifest.xml.

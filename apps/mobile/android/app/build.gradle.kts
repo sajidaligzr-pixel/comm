@@ -64,4 +64,9 @@ flutter {
 dependencies {
     // Pairs with isCoreLibraryDesugaringEnabled above.
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // LocationForegroundService.kt (features/location/) calls FusedLocationProviderClient
+    // directly — geolocator_android already pulls this in transitively at the same
+    // version, but declaring it explicitly here means this app's own code doesn't rely
+    // on a transitive dependency it doesn't own staying compatible.
+    implementation("com.google.android.gms:play-services-location:21.2.0")
 }

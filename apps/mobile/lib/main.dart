@@ -24,6 +24,7 @@ Future<void> main() async {
   // from here, never from anything a unit test might reach).
   LocationServiceHooks.ensureStarted = LocationService.ensureStarted;
   LocationServiceHooks.stop = LocationService.stop;
+  LocationServiceHooks.refreshSession = LocationService.refreshSession;
 
   // An explicit ProviderContainer (rather than a plain `ProviderScope`) so
   // initLocalNotifications' tap handler below — a plugin callback with no

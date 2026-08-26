@@ -91,6 +91,16 @@ class ApiClient {
   /// happened to be the one that discovered it.
   void Function()? onSessionExpired;
 
+  /// Set by `AuthController`'s constructor alongside `onSessionExpired` above —
+  /// fires every time `_doRefresh` below actually rotates the session (an access
+  /// token was refreshed). `LocationService.refreshSession` (features/location/)
+  /// is the one real listener: its native background service holds its own copy
+  /// of the current session cookie/CSRF value (it can't share this class's
+  /// cookie jar — it runs with no Dart involved at all, see that class's own
+  /// docstring), so it needs telling every time this rotates or its copy goes
+  /// stale after ~15 minutes (the access token's own TTL).
+  void Function()? onTokensRefreshed;
+
   Future<String?> _readCsrfToken() async {
     final uri = Uri.parse(AppConfig.apiBaseUrl);
     final cookies = await _cookieJar.loadForRequest(uri);
@@ -129,7 +139,9 @@ class ApiClient {
         options: Options(method: 'POST'),
       );
       final json = res.data;
-      return json is Map<String, dynamic> && json['ok'] == true;
+      final rotated = json is Map<String, dynamic> && json['ok'] == true;
+      if (rotated) onTokensRefreshed?.call();
+      return rotated;
     } catch (_) {
       return false;
     }

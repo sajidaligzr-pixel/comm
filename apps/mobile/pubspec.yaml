@@ -1,7 +1,7 @@
 name: comm_mobile
 description: "Comm — native Flutter client for the existing Comm backend (apps/web, apps/worker). See apps/mobile/README.md for architecture and how this maps to the TypeScript client it replaces."
 publish_to: 'none'
-version: 1.0.0+13
+version: 1.0.0+14
 
 environment:
   sdk: ^3.10.7
@@ -114,18 +114,24 @@ dependencies:
   # --- Live location sharing (features/location/) ------------------------------
   # A deliberate, narrow exception to this app's E2E model — see
   # docs/09-trust-boundaries.md's "Live location sharing" section. geolocator reads
-  # the device's actual GPS/network position; flutter_map + latlong2 render it on an
-  # OpenStreetMap tile layer (open-source, no API key/billing — deliberately not
-  # google_maps_flutter, a proprietary/metered SDK). flutter_background_service is
-  # what lets a fix keep being captured+posted while the app is backgrounded/closed —
-  # nothing like it exists elsewhere in this app; the closest prior art is
-  # flutter_callkit_incoming's own native foreground-service registration
-  # (features/calls/call_kit.dart), mirrored here for the same "Android needs a real,
-  # user-visible foreground service to keep running in the background" reason.
+  # the device's actual GPS/network position (used by the app's own foreground
+  # reporting only now — see location_service.dart's docstring); flutter_map +
+  # latlong2 render it on an OpenStreetMap tile layer (open-source, no API
+  # key/billing — deliberately not google_maps_flutter, a proprietary/metered SDK).
+  #
+  # flutter_background_service was here through build 1.0.0+13, and is gone as of
+  # +14: it crashed the app on open (not just at login) because starting its
+  # background isolate constructs a brand-new FlutterEngine that automatically
+  # re-registers every plugin this app uses — confirmed by reading
+  # BackgroundService.java's own runService() directly (its try/catch there only
+  # ever catches UnsatisfiedLinkError, nothing else), not guessed at. The
+  # replacement is a small hand-written Android Service
+  # (android/app/src/main/kotlin/.../LocationForegroundService.kt) that never
+  # touches a FlutterEngine at all for its background tick — see that file's own
+  # docstring.
   geolocator: ^13.0.2
   flutter_map: ^7.0.2
   latlong2: ^0.9.1
-  flutter_background_service: ^5.1.0
 
 dev_dependencies:
   flutter_test:
