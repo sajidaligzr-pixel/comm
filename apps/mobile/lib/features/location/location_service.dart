@@ -54,27 +54,42 @@ class LocationService {
     final status = await Permission.locationWhenInUse.status;
     if (!status.isGranted) return;
 
-    final service = FlutterBackgroundService();
-    await service.configure(
-      androidConfiguration: AndroidConfiguration(
-        onStart: _onStart,
-        autoStart: true,
-        isForegroundMode: true,
-        autoStartOnBoot: false,
-        notificationChannelId: _notificationChannelId,
-        initialNotificationTitle: 'Comm',
-        initialNotificationContent: 'Sharing your location',
-        foregroundServiceNotificationId: _foregroundNotificationId,
-        foregroundServiceTypes: [AndroidForegroundType.location],
-      ),
-      iosConfiguration: IosConfiguration(
-        autoStart: true,
-        onForeground: _onStart,
-        onBackground: _onIosBackground,
-      ),
-    );
-    await service.startService();
-    _started = true;
+    // Wrapped defensively, unlike the rest of this class's calls — this is the
+    // one call in the whole login path that spins up a brand-new native
+    // FlutterEngine (BackgroundService.java's runService()) and re-registers
+    // every plugin into it; found live as the actual cause of a real app crash
+    // right after login (com.baseflow.geolocator had no ProGuard keep rule —
+    // see android/app/proguard-rules.pro's own note — so its release-build
+    // registration into that second engine threw). The real fix is the keep
+    // rule; this is defense in depth so a future plugin-registration problem
+    // degrades to "location sharing doesn't start" instead of taking the whole
+    // app down again.
+    try {
+      final service = FlutterBackgroundService();
+      await service.configure(
+        androidConfiguration: AndroidConfiguration(
+          onStart: _onStart,
+          autoStart: true,
+          isForegroundMode: true,
+          autoStartOnBoot: false,
+          notificationChannelId: _notificationChannelId,
+          initialNotificationTitle: 'Comm',
+          initialNotificationContent: 'Sharing your location',
+          foregroundServiceNotificationId: _foregroundNotificationId,
+          foregroundServiceTypes: [AndroidForegroundType.location],
+        ),
+        iosConfiguration: IosConfiguration(
+          autoStart: true,
+          onForeground: _onStart,
+          onBackground: _onIosBackground,
+        ),
+      );
+      await service.startService();
+      _started = true;
+    } catch (_) {
+      // Fail closed — location sharing just doesn't start this launch; every
+      // other feature in the app keeps working normally.
+    }
   }
 
   /// Called on sign-out (features/auth/auth_controller.dart) — sharing a

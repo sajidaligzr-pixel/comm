@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 11,
+  "buildNumber": 12,
   "versionName": "1.0.0",
   "apkUrl": "/downloads/comm-latest.apk",
-  "releaseNotes": "Fixed: existing installs weren't being asked for location access after the last update. This update is required."
+  "releaseNotes": "Fixed a crash on login introduced by the last update. This update is required."
 }
