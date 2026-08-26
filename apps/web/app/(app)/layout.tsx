@@ -11,6 +11,7 @@ import { CallProvider } from '@/components/call/call-provider';
 import { GroupCallProvider } from '@/components/call/group-call-provider';
 import { GroupSessionProvider } from '@/components/group/group-session-provider';
 import { NotificationPrompt } from '@/components/notification-prompt';
+import { LocationPrompt } from '@/components/location-prompt';
 import { UnlockGate } from '@/components/unlock-gate';
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
@@ -34,6 +35,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     <div className="flex h-dvh flex-col overflow-hidden bg-background">
       <RealtimeConnector />
       <NotificationPrompt />
+      <LocationPrompt />
       {/* Mounted at the app shell level, not inside the chats route — an incoming
           call must ring no matter which page is open (docs/13-roadmap.md's Phase 6
           slice), same reasoning as RealtimeConnector above. GroupCallProvider is a

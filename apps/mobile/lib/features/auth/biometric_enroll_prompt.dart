@@ -45,7 +45,12 @@ class _BiometricEnrollPromptState extends State<BiometricEnrollPrompt> {
 
   Future<void> _check() async {
     try {
-      if (!await getPermissionsOnboardingShown()) return;
+      // Gate is "has the permissions card been dealt with at ALL" (any version),
+      // not "seen the current version" — this prompt just needs to not stack on
+      // top of that card while it's visible, regardless of which permissions it
+      // was asking for (permissions_prompt.dart's own versioning is about
+      // re-asking for new permissions, unrelated to this ordering concern).
+      if (await getPermissionsOnboardingVersionSeen() == 0) return;
       final dismissedAt = await getBiometricPromptDismissedAt(widget.username);
       if (dismissedAt != null && DateTime.now().toUtc().difference(dismissedAt) < _snooze) return;
       final available = await biometric.isBiometricAvailable();

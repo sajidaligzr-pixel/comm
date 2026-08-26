@@ -33,6 +33,19 @@
 /// that unconditionally at process start (initLocalNotifications/
 /// initPushNotifications), the earliest possible moment, so it's already
 /// "up front" and asking again here would just be a redundant second dialog.
+///
+/// Versioned "already shown" check ([_currentOnboardingVersion] /
+/// `getPermissionsOnboardingVersionSeen` in prefs.dart), not a plain one-shot
+/// boolean — found live: build 10 added the location request above to this
+/// card, but every existing install had already permanently dismissed/completed
+/// it back when it only asked for microphone/Bluetooth, so the card silently
+/// never showed again and location was never actually requested (confirmed on
+/// a real device: the update installed, no location dialog ever appeared, and
+/// Settings showed no location permission granted). Bump this constant whenever
+/// the card starts asking for something new; anyone who last saw an older
+/// version sees it again — re-requesting an already-granted or
+/// already-permanently-denied permission is a harmless no-op dialog on both
+/// platforms, so this never re-nags for the parts that didn't change.
 library;
 
 import 'package:flutter/material.dart';
@@ -40,6 +53,8 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../../storage/prefs.dart';
 import '../location/location_service_hooks.dart';
+
+const _currentOnboardingVersion = 2;
 
 class PermissionsOnboardingPrompt extends StatefulWidget {
   const PermissionsOnboardingPrompt({super.key});
@@ -60,8 +75,8 @@ class _PermissionsOnboardingPromptState extends State<PermissionsOnboardingPromp
 
   Future<void> _check() async {
     try {
-      final alreadyShown = await getPermissionsOnboardingShown();
-      if (!alreadyShown && mounted) setState(() => _visible = true);
+      final seenVersion = await getPermissionsOnboardingVersionSeen();
+      if (seenVersion < _currentOnboardingVersion && mounted) setState(() => _visible = true);
     } catch (_) {
       // Fail closed, same as biometric_enroll_prompt.dart's identical check —
       // worst case this card just never offers itself, never a crash.
@@ -85,13 +100,13 @@ class _PermissionsOnboardingPromptState extends State<PermissionsOnboardingPromp
         await LocationServiceHooks.ensureStarted();
       }
     } finally {
-      await setPermissionsOnboardingShown();
+      await setPermissionsOnboardingVersionSeen(_currentOnboardingVersion);
       if (mounted) setState(() => _visible = false);
     }
   }
 
   Future<void> _skip() async {
-    await setPermissionsOnboardingShown();
+    await setPermissionsOnboardingVersionSeen(_currentOnboardingVersion);
     if (mounted) setState(() => _visible = false);
   }
 

@@ -51,19 +51,37 @@ Future<DateTime?> getBiometricPromptDismissedAt(String username) async {
   return DateTime.tryParse(raw);
 }
 
-/// Has this device already been shown the one-time "allow permissions" card
-/// (features/permissions/permissions_prompt.dart)? NOT scoped by username, same
-/// reasoning as the update-dismissed key above — microphone/Bluetooth access is
-/// granted to the app itself (this device's install), not to whichever account
-/// happens to be signed in, so a second account on the same phone shouldn't see
-/// it again. Deliberately a one-shot flag rather than a snooze/dismiss-with-expiry
-/// like the two prompts above: OS-level permission dialogs already have their own
-/// "don't ask again" behavior, so re-showing this app-level card on every launch
-/// would just be nagging on top of nagging.
-const _permissionsOnboardingShownKey = 'comm_permissions_onboarding_shown';
+/// Has this device already been shown the "allow permissions" card
+/// (features/permissions/permissions_prompt.dart), for the CURRENT set of
+/// permissions it asks for? NOT scoped by username, same reasoning as the
+/// update-dismissed key above — microphone/Bluetooth/location access is granted
+/// to the app itself (this device's install), not to whichever account happens to
+/// be signed in, so a second account on the same phone shouldn't see it again.
+///
+/// Versioned, not a plain boolean — found live: the card originally only asked
+/// for microphone/Bluetooth, and everyone who'd already dismissed/completed it
+/// under that version permanently had the flag set, so when location sharing
+/// was added later, the card silently never showed again for any existing
+/// install and location was simply never requested (build 10 shipped this way,
+/// discovered from a real device — the update installed but no location
+/// permission dialog ever appeared). `_currentPermissionsOnboardingVersion`
+/// (permissions_prompt.dart) bumps whenever the card starts asking for something
+/// new; anyone who last saw an older version sees it again — asking again for a
+/// permission already granted/permanently-denied is a harmless no-op dialog on
+/// both platforms, so this never double-nags for the parts that didn't change.
+const _permissionsOnboardingVersionKey = 'comm_permissions_onboarding_version';
 
-Future<void> setPermissionsOnboardingShown() =>
-    _storage.write(key: _permissionsOnboardingShownKey, value: 'true');
+Future<void> setPermissionsOnboardingVersionSeen(int version) =>
+    _storage.write(key: _permissionsOnboardingVersionKey, value: version.toString());
 
-Future<bool> getPermissionsOnboardingShown() async =>
-    (await _storage.read(key: _permissionsOnboardingShownKey)) == 'true';
+/// Returns 0 (never shown) if the key has never been written. A legacy `'true'`
+/// value (written by the pre-versioning boolean flag) is read back as `1` — the
+/// version that card corresponds to — so an existing install that already saw
+/// the mic/Bluetooth-only card is asked again exactly once for what's new since,
+/// not from scratch.
+Future<int> getPermissionsOnboardingVersionSeen() async {
+  final raw = await _storage.read(key: _permissionsOnboardingVersionKey);
+  if (raw == null) return 0;
+  if (raw == 'true') return 1;
+  return int.tryParse(raw) ?? 0;
+}
