@@ -3,7 +3,7 @@ import { prisma } from '@comm/database';
 import { createGroup, getGroupMemberDeviceTargets } from '../../modules/groups/service';
 import { getAllOtherMembersActiveDeviceIds } from '../../modules/conversations/service';
 import { registerDevice } from '../../modules/devices/service';
-import { sendMessage, acknowledgeDelivered, markConversationRead, getMessageReceipts } from '../../modules/messages/service';
+import { sendMessage, acknowledgeDelivered, markConversationRead, getMessageReceipts, listMessages } from '../../modules/messages/service';
 import { createActiveUser, deleteTestUser, fakeDeviceRegistration } from '../helpers';
 
 /**
@@ -152,6 +152,51 @@ describe('group authorization', () => {
 
     const outsider = await makeMember('Outsider device');
     await expect(getMessageReceipts(outsider.userId, messageId)).rejects.toMatchObject({ code: 'FORBIDDEN' });
+  });
+
+  /**
+   * The group counterpart of messaging.test.ts's direct-conversation multi-device
+   * fan-out test — a group message now reaches every active device of every
+   * member, including the SENDER's own other devices, not just one primary device
+   * per other member and never the sender's own (see docs/06-device-architecture.md).
+   * Unlike direct messages, group messages share one Message-level envelope
+   * regardless of device count, so this only has to check who gets a
+   * `MessageRecipient` row, not that each got its own distinct ciphertext.
+   */
+  it('a group message reaches every OTHER-member device AND every OTHER device the sender owns', async () => {
+    const { admin, others, group } = await setupGroup(3); // admin + 2 others
+
+    const adminDevice2 = await registerDevice(prisma, admin.userId, fakeDeviceRegistration('Admin second device'));
+    const memberDevice2 = await registerDevice(prisma, others[0]!.userId, fakeDeviceRegistration('Member second device'));
+
+    const messageId = crypto.randomUUID();
+    const sent = await sendMessage(
+      { userId: admin.userId, deviceId: admin.deviceId },
+      group.conversationId,
+      {
+        messageId,
+        envelopeType: 'megolm_group',
+        envelope: { header: 'aGVhZGVy', ciphertext: 'Y2lwaGVydGV4dA==' },
+        x3dhInit: null,
+        contentTypeHint: 'text',
+        replyToMessageId: null,
+        sentAt: new Date().toISOString(),
+      },
+    );
+
+    const targetDeviceIds = new Set(sent.map((m) => m.recipientDeviceId));
+    // The other 2 members' primary devices + the admin's OWN second device +
+    // the one other member's second device — every active device, every member.
+    expect(targetDeviceIds.has(others[0]!.deviceId)).toBe(true);
+    expect(targetDeviceIds.has(others[1]!.deviceId)).toBe(true);
+    expect(targetDeviceIds.has(adminDevice2.deviceId)).toBe(true);
+    expect(targetDeviceIds.has(memberDevice2.deviceId)).toBe(true);
+    // Never addressed back to the sender's OWN sending device — same as direct.
+    expect(targetDeviceIds.has(admin.deviceId)).toBe(false);
+
+    // The admin's second device sees it via its own catch-up fetch too.
+    const admin2Page = await listMessages(admin.userId, adminDevice2.deviceId, group.conversationId, undefined, 10);
+    expect(admin2Page.items.map((m) => m.id)).toContain(messageId);
   });
 
   it('"seen by" refuses a 1:1 message — WhatsApp only ever shows this for groups', async () => {

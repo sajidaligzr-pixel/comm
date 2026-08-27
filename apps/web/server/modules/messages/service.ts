@@ -1,22 +1,22 @@
 import { prisma, Prisma } from '@comm/database';
 import { AppError, type SendMessageRequest, type MessageDto, type StarredMessageDto, type MessageReceiptDto } from '@comm/types';
-import {
-  requireConversationMembership,
-  getGroupMemberPrimaryDevices,
-  getAllOtherMembersActiveDeviceIds,
-} from '../conversations/service';
+import { requireConversationMembership, getAllOtherMembersActiveDeviceIds } from '../conversations/service';
 import { claimPendingUpload } from '../media/service';
 import { isEitherBlocked } from '../blocking/service';
 
 /**
  * Multi-device fan-out (docs/06-device-architecture.md's original target design,
- * shipped here after being tracked as a gap through Phase 3/4/5): a `direct`
- * message now reaches every active device of every conversation member — the other
- * participant's, AND the sender's own — not just whichever single device happened
- * to be "most recently active." `group` messages are unaffected (every member
- * already shared one Megolm-style session, which sidesteps this whole problem —
- * see `getGroupMemberPrimaryDevices`'s own doc comment, still tracking one device
- * per *member* rather than every device, a separate, smaller, still-open gap).
+ * shipped here after being tracked as a gap through Phase 3/4/5): a message now
+ * reaches every active device of every conversation member — the other
+ * participant's/members', AND the sender's own — not just whichever single device
+ * happened to be "most recently active." `direct` and `group` conversations both
+ * go through `getAllOtherMembersActiveDeviceIds` now (this module's own group
+ * branch used to call a now-removed `getGroupMemberPrimaryDevices`, one device per
+ * *member* — every member's OTHER devices simply never got a copy at all). `group`
+ * messages still share one Megolm-style envelope at the `Message` level regardless
+ * of how many devices it fans out to — sidesteps the per-device-ciphertext problem
+ * `direct` needed a schema change for, since the exact same ciphertext is valid for
+ * every device of every member already.
  *
  * The reason this needed a schema change rather than "just fan out more": a
  * pairwise Double Ratchet session's ciphertext is only valid for the one specific
@@ -135,8 +135,17 @@ export async function sendMessage(
     if (!input.envelope) {
       throw new AppError('VALIDATION_FAILED', 'A group message needs a shared envelope.');
     }
-    const targets = await getGroupMemberPrimaryDevices(conversationId, ctx.userId);
-    targetDeviceIds = targets.map((t) => t.deviceId);
+    // Every other member's every active device, PLUS the sender's own other active
+    // devices (a second phone, a desktop client, a web tab left open elsewhere) —
+    // the same two-part resolution `direct` uses below, now shared rather than
+    // group messages only ever reaching one device per member and never the
+    // sender's own other devices at all.
+    const otherMemberDevices = await getAllOtherMembersActiveDeviceIds(conversationId, ctx.userId);
+    const ownOtherDevices = await prisma.device.findMany({
+      where: { userId: ctx.userId, status: 'active', id: { not: ctx.deviceId } },
+      select: { id: true },
+    });
+    targetDeviceIds = [...otherMemberDevices.map((d) => d.deviceId), ...ownOtherDevices.map((d) => d.id)];
   } else {
     if (!input.recipients || input.recipients.length === 0) {
       throw new AppError('VALIDATION_FAILED', 'At least one recipient device is required.');
@@ -455,8 +464,10 @@ export async function unstarMessage(callerUserId: string, messageId: string): Pr
  * own docstring for why: a 1:1 conversation already shows this as a single tick
  * (sent), double tick (delivered), or blue double tick (read), never a
  * per-person breakdown. Data was already being recorded for every group member
- * (`sendMessage`'s `MessageRecipient` rows, one per member's primary device) —
- * this is purely a new read path over it, no send-path changes at all.
+ * (`sendMessage`'s `MessageRecipient` rows, now one per member's every active
+ * device rather than a single primary one) — `byUser` below already collapsed
+ * multiple device rows per member down to their best state before this fanned
+ * out to every device, so this read path needed no changes at all.
  */
 export async function getMessageReceipts(callerUserId: string, messageId: string): Promise<MessageReceiptDto[]> {
   const message = await prisma.message.findUnique({
@@ -474,11 +485,11 @@ export async function getMessageReceipts(callerUserId: string, messageId: string
     include: { recipientDevice: { include: { user: true } } },
   });
 
-  // Collapse to one entry per USER, not per device — a member with more than one
-  // device (uncommon for groups today, since sendMessage's group branch still
-  // targets one primary device per member) takes the best state across whichever
-  // rows exist: read beats delivered beats neither, and the later timestamp wins
-  // when more than one row has the same state.
+  // Collapse to one entry per USER, not per device — a member with several active
+  // devices (sendMessage's group branch now fans out to every one of them, not just
+  // one primary device) takes the best state across whichever rows exist: read
+  // beats delivered beats neither, and the later timestamp wins when more than one
+  // row has the same state.
   const byUser = new Map<string, { userId: string; username: string; displayName: string; deliveredAt: Date | null; readAt: Date | null }>();
   for (const r of recipients) {
     const u = r.recipientDevice.user;

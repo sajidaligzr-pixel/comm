@@ -235,30 +235,3 @@ export async function getOwnOtherActiveDeviceIds(userId: string, excludeDeviceId
   return devices.map((d) => d.id);
 }
 
-/**
- * The group-conversation analog of `getPrimaryRecipientDevice` above — same
- * single-device-per-member simplification (Phase 3's tracked gap, not solved anew
- * here), generalized from "the one other member" to "every other member." Used by
- * `sendMessage`'s fan-out loop (server/modules/messages/service.ts) — one
- * `MessageRecipient` row and one WS `new` event per device returned here.
- */
-export async function getGroupMemberPrimaryDevices(
-  conversationId: string,
-  callerUserId: string,
-): Promise<Array<{ userId: string; deviceId: string }>> {
-  const others = await prisma.conversationMember.findMany({
-    where: { conversationId, userId: { not: callerUserId } },
-    select: { userId: true },
-  });
-
-  const targets = await Promise.all(
-    others.map(async (m) => {
-      const device = await prisma.device.findFirst({
-        where: { userId: m.userId, status: 'active' },
-        orderBy: { lastActiveAt: 'desc' },
-      });
-      return device ? { userId: m.userId, deviceId: device.id } : null;
-    }),
-  );
-  return targets.filter((t): t is { userId: string; deviceId: string } => t !== null);
-}

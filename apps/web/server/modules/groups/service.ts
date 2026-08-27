@@ -11,7 +11,7 @@ import {
 } from '@comm/types';
 import { generateSecureToken } from '@comm/security';
 import { getObjectStorage } from '@comm/storage';
-import { requireConversationMembership, getGroupMemberPrimaryDevices } from '../conversations/service';
+import { requireConversationMembership, getAllOtherMembersActiveDeviceIds } from '../conversations/service';
 
 const AVATAR_MAX_BYTES = 5 * 1024 * 1024; // 5 MiB — a group icon, not a general file attachment
 
@@ -117,13 +117,14 @@ export async function getGroup(groupId: string, callerUserId: string): Promise<G
 }
 
 /**
- * Which single device to target per OTHER current member, for the CALLER to
- * key-share a group session to (docs/13-roadmap.md's design note) — the client-side
- * analog of "who do I need to send my outbound session to." Delegates to the
- * conversations module's `getGroupMemberPrimaryDevices` (still one device per
- * *member*, a separate, smaller, still-open gap from the one 1:1 messages already
- * closed — see that function's own docstring) after resolving `groupId` to its
- * `conversationId`.
+ * Every device to target per OTHER current member, for the CALLER to key-share a
+ * group session to (docs/13-roadmap.md's design note) — the client-side analog of
+ * "who do I need to send my outbound session to." Delegates to
+ * `getAllOtherMembersActiveDeviceIds`, the same resolver `sendMessage`'s group
+ * branch fans messages out to (docs/06-device-architecture.md) — every one of a
+ * member's active devices, not just one primary device. This has to stay in lock
+ * step with the message fan-out: a device that receives a group message but was
+ * never key-shared to has nothing to decrypt it with, and vice versa.
  */
 export async function getGroupMemberDeviceTargets(
   groupId: string,
@@ -136,7 +137,7 @@ export async function getGroupMemberDeviceTargets(
   // (or a just-removed former member) could enumerate every current member's userId
   // + deviceId for a group they don't belong to (found in security review).
   await requireConversationMembership(callerUserId, group.conversation!.id);
-  return getGroupMemberPrimaryDevices(group.conversation!.id, callerUserId);
+  return getAllOtherMembersActiveDeviceIds(group.conversation!.id, callerUserId);
 }
 
 /** Every CURRENT member's active devices — used to notify clients of a membership
