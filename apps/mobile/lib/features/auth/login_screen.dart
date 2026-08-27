@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../api/api_client.dart';
 import '../../storage/prefs.dart';
@@ -16,12 +17,22 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _passwordController = TextEditingController();
   String? _error;
   bool _submitting = false;
+  // Surfaced here (a screen reachable pre-login, no digging through phone
+  // Settings needed — Android's own App Info page only ever shows
+  // versionName, which has stayed "1.0.0" across every build so far, not the
+  // buildNumber that actually distinguishes releases) after a live update-loop
+  // report was hard to diagnose with no way for the user to just read off
+  // which build had actually landed.
+  String? _buildLabel;
 
   @override
   void initState() {
     super.initState();
     getRememberedUsername().then((remembered) {
       if (remembered != null && mounted) _usernameController.text = remembered;
+    });
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _buildLabel = 'v${info.version} (${info.buildNumber})');
     });
   }
 
@@ -101,6 +112,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                         ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                         : const Text('Sign in'),
                   ),
+                  if (_buildLabel != null) ...[
+                    const SizedBox(height: 24),
+                    Text(
+                      _buildLabel!,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                    ),
+                  ],
                 ],
               ),
             ),
