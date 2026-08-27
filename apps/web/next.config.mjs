@@ -45,6 +45,23 @@ const nextConfig = {
             : [{ key: 'Strict-Transport-Security', value: 'max-age=63072000; includeSubDomains' }]),
         ],
       },
+      {
+        // Found live: the release APK was served with Next's own default
+        // long-ish max-age for public/ static files, which meant Cloudflare's
+        // edge could keep serving an OLD binary under the same URL for hours
+        // after a new one was uploaded to origin — a user who updated right
+        // after a fresh release still got a stale build reinstalled, and the
+        // in-app updater (rightly) kept nagging since it was still the old
+        // buildNumber. no-store means no intermediate cache (Cloudflare
+        // included, on its default behavior of respecting origin
+        // Cache-Control) keeps a copy at all. Paired with switching the APK's
+        // own filename to be release-specific (docs/13-roadmap.md's release
+        // process) rather than a fixed, always-overwritten name — belt and
+        // suspenders, since a fixed name is still one Cloudflare could choose
+        // to cache by path alone regardless of query string.
+        source: '/downloads/:path*',
+        headers: [{ key: 'Cache-Control', value: 'no-store' }],
+      },
     ];
   },
 };
