@@ -35,6 +35,7 @@ import '../notifications/local_notifications.dart' show clearNotificationFor;
 import '../../crypto/attachment_crypto.dart' as attach_crypto;
 import '../../crypto/conversation_crypto.dart' as convo;
 import '../../crypto/encoding.dart';
+import '../../crypto/history_sync.dart';
 import '../../crypto/kek_holder.dart';
 import '../../crypto/message_cache.dart';
 import '../../crypto/session/session.dart' show MessageEnvelope;
@@ -768,11 +769,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           }
         }
         if (cachedIds.contains(dto.id)) continue;
-        final result = await _ingestIncoming(
-          dto,
-          alreadyMine: dto.senderUserId == _myUserId,
-          persist: false,
-        );
+        final result = await _ingestIncoming(dto, persist: false);
         if (result != null) newlyIngested.add(result);
       }
       if (statusChanged && mounted) setState(() {});
@@ -958,11 +955,14 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
   }
 
-  /// `alreadyMine` covers REST history backfill for this device's OWN earlier sent
-  /// messages that never made it into the local cache (e.g. sent from a different
-  /// device) — those ciphertexts can never be decrypted (a sending chain is
-  /// one-directional), so they're shown as a placeholder rather than silently
-  /// dropped or crashing the load.
+  /// Attempts the normal live decrypt (per-device Double Ratchet or the shared
+  /// group session, depending on `dto.envelopeType`) regardless of sender —
+  /// including this account's OWN messages sent from a DIFFERENT device, which
+  /// this device can genuinely decrypt live via self-fan-out/group key-sharing,
+  /// same as anyone else's. Falls back to this account's own message-history-sync
+  /// entry (docs/07-auth-architecture.md, history_sync.dart) when live decrypt
+  /// fails or was never possible at all, and only shows the "[Could not decrypt]"
+  /// placeholder if BOTH come up empty.
   ///
   /// `persist: false` skips the individual disk write and just returns the
   /// decrypted [CachedMessage] instead — `_load()`'s history catch-up uses this
@@ -972,7 +972,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// leaves `persist` at its default; there's nothing to batch for one message.
   Future<CachedMessage?> _ingestIncoming(
     MessageDto dto, {
-    bool alreadyMine = false,
     bool retriedAfterKeySync = false,
     bool isLive = false,
     bool persist = true,
@@ -991,14 +990,18 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     String text = '';
     AttachmentDescriptor? attachment;
     String? mediaBase64;
-    if (isOwn && alreadyMine) {
-      text = '[Sent from another device — not available on this one]';
-    } else if (dto.envelopeType == 'megolm_group') {
+    var decryptedLive = false;
+    // Attempted regardless of sender, including this account's OWN messages sent
+    // from a DIFFERENT device — self-fan-out (direct) / every member's device
+    // being key-shared (group) means this device has a genuine live decrypt path
+    // for those too, exactly like anyone else's message. Multi-device message
+    // history sync (docs/07-auth-architecture.md, history_sync.dart) is the
+    // fallback for whatever's left: a message this device was never a live
+    // target for at all.
+    if (dto.envelopeType == 'megolm_group') {
       final conversation = _conversation;
       final groupId = conversation?.groupId;
-      if (groupId == null) {
-        text = '[Could not decrypt this message]';
-      } else {
+      if (groupId != null) {
         try {
           final envelope = EncryptedGroupEnvelope(
             header: dto.envelope.header,
@@ -1016,6 +1019,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           text = decoded.text;
           attachment = decoded.attachment;
           mediaBase64 = decoded.mediaBase64;
+          decryptedLive = true;
         } catch (e) {
           if (!retriedAfterKeySync) {
             // This device may simply not have the sender's group session yet (a
@@ -1027,13 +1031,11 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                 .ensureGroupKeysUpToDate(groupId);
             return _ingestIncoming(
               dto,
-              alreadyMine: alreadyMine,
               retriedAfterKeySync: true,
               isLive: isLive,
               persist: persist,
             );
           }
-          text = '[Could not decrypt this message]';
         }
       }
     } else {
@@ -1051,24 +1053,51 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         final decoded = _decodeContent(dto.contentTypeHint, plaintext);
         text = decoded.text;
         attachment = decoded.attachment;
+        decryptedLive = true;
       } catch (e) {
-        text = '[Could not decrypt this message]';
+        // Falls through to the history-key fallback below.
       }
     }
 
-    final cached = CachedMessage(
-      id: dto.id,
-      conversationId: dto.conversationId,
-      senderUserId: dto.senderUserId,
-      isOwn: isOwn,
-      contentTypeHint: dto.contentTypeHint,
-      text: text,
-      sentAt: dto.sentAt,
-      replyToMessageId: dto.replyToMessageId,
-      attachment: attachment,
-      mediaBase64: mediaBase64,
-    );
+    CachedMessage cached;
+    var resolved = decryptedLive;
+    if (decryptedLive) {
+      cached = CachedMessage(
+        id: dto.id,
+        conversationId: dto.conversationId,
+        senderUserId: dto.senderUserId,
+        isOwn: isOwn,
+        contentTypeHint: dto.contentTypeHint,
+        text: text,
+        sentAt: dto.sentAt,
+        replyToMessageId: dto.replyToMessageId,
+        attachment: attachment,
+        mediaBase64: mediaBase64,
+      );
+    } else {
+      final viaHistory = await tryDecryptViaHistory(dto.historyCiphertext);
+      if (viaHistory != null) {
+        cached = viaHistory;
+        resolved = true;
+      } else {
+        cached = CachedMessage(
+          id: dto.id,
+          conversationId: dto.conversationId,
+          senderUserId: dto.senderUserId,
+          isOwn: isOwn,
+          contentTypeHint: dto.contentTypeHint,
+          text: '[Could not decrypt this message]',
+          sentAt: dto.sentAt,
+          replyToMessageId: dto.replyToMessageId,
+        );
+      }
+    }
     if (persist) await appendCachedMessage(kek, cached);
+    if (resolved) {
+      // Idempotent no-op if some other of this account's own devices already
+      // wrote this — see syncHistoryEntry's own docstring.
+      unawaited(syncHistoryEntry(ref.read(historyApiProvider), cached));
+    }
     if (mounted) {
       setState(() {
         if (!_messages.any((m) => m.id == cached.id)) _messages.add(cached);
@@ -1691,6 +1720,9 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         });
         _scrollToBottom();
       }
+      // Multi-device message history sync (docs/07-auth-architecture.md) — the
+      // sender already has the plaintext right here, no decrypt needed.
+      unawaited(syncHistoryEntry(ref.read(historyApiProvider), cached));
 
       await ref.read(messagesApiProvider).send(widget.conversationId, req);
       if (mounted) setState(() => _pendingIds.remove(messageId));

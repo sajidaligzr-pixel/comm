@@ -593,6 +593,11 @@ class MessageDto {
   final String serverReceivedAt;
   final String? deliveredAt;
   final String? readAt;
+  /// Multi-device message history sync (docs/07-auth-architecture.md) — the
+  /// CALLER's own history-key entry for this message, if one exists yet. See
+  /// packages/types/src/messages.ts's `MessageDto.history` for the full
+  /// reasoning; `null` means no device of this account has written one yet.
+  final String? historyCiphertext;
 
   const MessageDto({
     required this.id,
@@ -609,6 +614,7 @@ class MessageDto {
     required this.serverReceivedAt,
     required this.deliveredAt,
     required this.readAt,
+    this.historyCiphertext,
   });
 
   static MessageDto fromJson(Map<String, dynamic> json) => MessageDto(
@@ -630,6 +636,8 @@ class MessageDto {
     serverReceivedAt: json['serverReceivedAt'] as String,
     deliveredAt: json['deliveredAt'] as String?,
     readAt: json['readAt'] as String?,
+    historyCiphertext:
+        (json['history'] as Map<String, dynamic>?)?['ciphertext'] as String?,
   );
 }
 

@@ -21,6 +21,7 @@ import '../api/blocking_api.dart';
 import '../api/admin_api.dart';
 import '../api/locations_api.dart';
 import '../api/push_api.dart';
+import '../api/history_api.dart';
 import '../features/groups/group_session_controller.dart';
 import '../features/notifications/message_notifier.dart';
 import '../realtime/ws_client.dart';
@@ -51,6 +52,9 @@ final devicesApiProvider = Provider<DevicesApi>(
 );
 final mediaApiProvider = Provider<MediaApi>(
   (ref) => MediaApi(ref.watch(apiClientProvider)),
+);
+final historyApiProvider = Provider<HistoryApi>(
+  (ref) => HistoryApi(ref.watch(apiClientProvider)),
 );
 final callsApiProvider = Provider<CallsApi>(
   (ref) => CallsApi(ref.watch(apiClientProvider)),

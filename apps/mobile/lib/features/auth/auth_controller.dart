@@ -6,14 +6,18 @@
 /// touch (see `storage/active_account.dart`).
 library;
 
+import 'dart:async' show unawaited;
 import 'dart:io' show Platform;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
 import '../../api/auth_api.dart';
 import '../../api/dtos.dart';
+import '../../api/history_api.dart';
 import '../../api/users_api.dart';
 import '../../app/providers.dart';
+import '../../crypto/history_key.dart';
+import '../../crypto/history_key_holder.dart';
 import '../../crypto/kek_holder.dart';
 import '../../crypto/local_identity.dart';
 import '../location/location_service_hooks.dart';
@@ -30,7 +34,7 @@ String _guessDeviceName() {
 }
 
 class AuthController extends StateNotifier<AuthState> {
-  AuthController(this._authApi, this._usersApi, this._apiClient)
+  AuthController(this._authApi, this._usersApi, this._apiClient, this._historyApi)
     : super(const AuthChecking()) {
     // The one place ApiClient can reach back into auth state — see
     // ApiClient.onSessionExpired's own docstring for exactly when this fires
@@ -46,6 +50,7 @@ class AuthController extends StateNotifier<AuthState> {
   final AuthApi _authApi;
   final UsersApi _usersApi;
   final ApiClient _apiClient;
+  final HistoryApi _historyApi;
 
   /// Runs once at app start: is there already a valid session cookie (a previous
   /// launch that was never explicitly signed out of)? If so, this account's KEK
@@ -77,6 +82,7 @@ class AuthController extends StateNotifier<AuthState> {
       );
     }
     setUnlockedIdentity(unlocked.kek, unlocked.identity);
+    await ensureHistoryKey(_historyApi, unlocked.kek, password);
     state = AuthSignedIn(current.profile, mustChangePassword: false);
   }
 
@@ -92,6 +98,10 @@ class AuthController extends StateNotifier<AuthState> {
     if (unlocked == null) return false;
 
     setUnlockedIdentity(unlocked.kek, unlocked.identity);
+    // No password available on this path — falls back to whatever's already
+    // cached locally from an earlier password unlock (see history_key.dart's
+    // own docstring); never blocks getting into the app.
+    unawaited(ensureHistoryKey(_historyApi, unlocked.kek, null));
     state = AuthSignedIn(current.profile, mustChangePassword: false);
     return true;
   }
@@ -187,8 +197,10 @@ class AuthController extends StateNotifier<AuthState> {
         );
       }
       setUnlockedIdentity(unlocked.kek, unlocked.identity);
+      await ensureHistoryKey(_historyApi, unlocked.kek, password);
     } else {
       setUnlockedIdentity(newIdentity!.kek, newIdentity.identity);
+      await ensureHistoryKey(_historyApi, newIdentity.kek, password);
     }
 
     final profile = await _usersApi.me();
@@ -216,6 +228,9 @@ class AuthController extends StateNotifier<AuthState> {
     await setRememberedDeviceId(info.username, result.deviceId);
     await setRememberedUsername(info.username);
     setUnlockedIdentity(newIdentity.kek, newIdentity.identity);
+    // This account's very first device — bootstraps its History Key too, same
+    // as any other password-based login (see history_key.dart's own docstring).
+    await ensureHistoryKey(_historyApi, newIdentity.kek, password);
 
     final profile = await _usersApi.me();
     state = AuthSignedIn(
@@ -250,6 +265,7 @@ class AuthController extends StateNotifier<AuthState> {
     await LocationServiceHooks.stop();
     await _apiClient.clearCookies();
     clearUnlockedIdentity();
+    clearCurrentHistoryKey();
     clearActiveAccount();
     state = const AuthSignedOut();
   }
@@ -267,6 +283,7 @@ class AuthController extends StateNotifier<AuthState> {
     await LocationServiceHooks.stop();
     await _apiClient.clearCookies();
     clearUnlockedIdentity();
+    clearCurrentHistoryKey();
     clearActiveAccount();
     state = const AuthSignedOut();
   }
@@ -290,6 +307,7 @@ class AuthController extends StateNotifier<AuthState> {
     if (username != null) await clearRememberedDeviceId(username);
     await _apiClient.clearCookies();
     clearUnlockedIdentity();
+    clearCurrentHistoryKey();
     clearActiveAccount();
     state = const AuthSignedOut();
   }
@@ -310,6 +328,7 @@ final authControllerProvider = StateNotifierProvider<AuthController, AuthState>(
       ref.watch(authApiProvider),
       ref.watch(usersApiProvider),
       ref.watch(apiClientProvider),
+      ref.watch(historyApiProvider),
     );
   },
 );
