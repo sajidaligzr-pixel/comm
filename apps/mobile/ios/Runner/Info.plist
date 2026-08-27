@@ -97,5 +97,19 @@
 		<string>remote-notification</string>
 		<string>location</string>
 	</array>
+	<!-- Export compliance — every encrypted app hits App Store Connect's "Missing
+	     Compliance" step on its first upload without this key (found live,
+	     build 1.0.0 (15)'s first TestFlight upload). `false` here means "does not
+	     use non-exempt encryption" — accurate for this app: every crypto primitive
+	     it uses (X25519/Ed25519/ChaCha20-Poly1305/HKDF/Argon2id — packages/crypto,
+	     mirrored in lib/crypto/) is a standard, publicly documented algorithm used
+	     for user authentication and data confidentiality, which is exactly the
+	     U.S. EAR §740.17 "mass market"/exempt category every mainstream encrypted
+	     messaging app (Signal, WhatsApp, etc.) self-classifies under — not
+	     custom/proprietary cryptography, which would need a real export
+	     classification filing instead. Setting this makes every future build skip
+	     the manual questionnaire in App Store Connect. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
