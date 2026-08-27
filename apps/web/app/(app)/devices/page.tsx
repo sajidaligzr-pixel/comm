@@ -6,6 +6,7 @@ import { DevicesList } from '@/components/devices-list';
 import { LinkDevicePanel } from '@/components/link-device-panel';
 import { BiometricUnlockToggle } from '@/components/biometric-unlock-toggle';
 import { DeleteAccountSection } from '@/components/delete-account-section';
+import { PendingLoginsPanel } from '@/components/pending-logins-panel';
 
 export default async function DevicesPage() {
   const ctx = await getAuthContextOrRedirect();
@@ -20,6 +21,7 @@ export default async function DevicesPage() {
             Every device below can read new messages sent to you. Revoke anything you don&apos;t recognize.
           </p>
         </div>
+        <PendingLoginsPanel />
         <BiometricUnlockToggle userId={ctx.userId} username={profile.username} />
         <DevicesList initialDevices={devices} />
         <LinkDevicePanel />

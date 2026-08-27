@@ -1,13 +1,27 @@
 'use client';
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
+import type { LoginResponse, PendingLoginPollResponse } from '@comm/types';
 import { Button } from './ui/button';
 import { Input, Label, FieldError } from './ui/input';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity, unlockLocalIdentity, hasLocalIdentity } from '@/lib/crypto/identity';
 import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
 import { setActiveAccount } from '@/lib/crypto/active-account';
+
+// New-device login approval (docs/07-auth-architecture.md's device-approval
+// section) — a second (or later) device no longer completes on submit alone; the
+// server holds it as `pending_approval` until an already-signed-in device approves
+// it. Polled on a short, fixed interval (no exponential backoff — this only ever
+// runs for the few minutes a request stays pending, and a person watching a
+// waiting screen wants it to resolve promptly, not slowly) until it stops
+// returning `pending`.
+const POLL_INTERVAL_MS = 2000;
+
+async function pollPendingLogin(pendingLoginId: string): Promise<PendingLoginPollResponse> {
+  return apiFetch<PendingLoginPollResponse>(`/api/auth/login/pending/${pendingLoginId}`, { method: 'GET' });
+}
 
 // Scoped by username, not a single fixed key — a browser signed into more than one
 // account (two tabs, two people testing on one machine) must not have the SECOND
@@ -35,6 +49,14 @@ export function LoginForm(): React.JSX.Element {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | undefined>();
   const [submitting, setSubmitting] = useState(false);
+  const [pendingLoginId, setPendingLoginId] = useState<string | undefined>();
+  const cancelledRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, []);
 
   // Reads localStorage in an effect, not a lazy useState initializer — this
   // component is server-rendered for its initial HTML like any Client Component, and
@@ -47,10 +69,82 @@ export function LoginForm(): React.JSX.Element {
     if (remembered) setUsername(remembered);
   }, []);
 
+  /** Shared by both the immediate-success path and the "waited for approval, it
+   * came through" path below — unlocks (or adopts a just-created) local identity
+   * and redirects, exactly what this used to do inline before pending_approval
+   * existed. */
+  async function finishLogin(
+    result: { deviceId: string; mustChangePassword: boolean },
+    returning: boolean,
+    newIdentity: Awaited<ReturnType<typeof createLocalIdentity>> | undefined,
+  ) {
+    localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
+    localStorage.setItem(REMEMBERED_USERNAME_KEY, username);
+
+    // Unlock (or, for a device just created above, reuse what createLocalIdentity
+    // already derived) the local KEK and hold it in memory for this tab's
+    // lifetime — see lib/crypto/kek-holder.ts. One Argon2id derivation per login,
+    // never repeated within the same page load.
+    if (returning) {
+      const unlocked = await unlockLocalIdentity(password);
+      if (!unlocked) {
+        // Password mismatch between the account and the locally-stored identity
+        // wrapper is only possible if the account password was changed elsewhere
+        // (docs/07-auth-architecture.md's change-password flow) without this
+        // device's local identity being re-wrapped to match. Surfaced as an
+        // error rather than silently regenerating a new identity, which would
+        // orphan every session built on the old one — a proper "re-wrap local
+        // identity after password change" flow is a tracked follow-up, not
+        // implemented in this pass.
+        throw new ApiError('AUTH_INVALID', 'Could not unlock this device’s local keys with that password.');
+      }
+      setUnlockedIdentity(unlocked.kek, unlocked.identity);
+    } else {
+      setUnlockedIdentity(newIdentity!.kek, newIdentity!.identity);
+    }
+
+    // The real enforcement is (app)/layout.tsx's server-side redirect
+    // (docs/07-auth-architecture.md) — this is just avoiding an extra round trip
+    // through /devices first when we already know the answer.
+    router.push(result.mustChangePassword ? '/change-password' : '/chats');
+    router.refresh();
+  }
+
+  /** New-device login approval (docs/07-auth-architecture.md) — polls until an
+   * already-signed-in device approves/denies this request, or it expires. Runs
+   * entirely client-side (no server push possible — this browser has no session
+   * yet to receive one on), same reasoning PendingDeviceLogin's own doc comment
+   * gives for why the waiting side has to be a poll. */
+  async function waitForApproval(
+    pendingLoginId: string,
+    returning: boolean,
+    newIdentity: Awaited<ReturnType<typeof createLocalIdentity>> | undefined,
+  ) {
+    setPendingLoginId(pendingLoginId);
+    try {
+      for (;;) {
+        if (cancelledRef.current) return;
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+        if (cancelledRef.current) return;
+        const poll = await pollPendingLogin(pendingLoginId);
+        if (poll.status === 'pending') continue;
+        if (poll.status === 'denied') {
+          setError('That sign-in request was denied or expired. Please try again.');
+          return;
+        }
+        await finishLogin(poll, returning, newIdentity);
+        return;
+      }
+    } finally {
+      if (!cancelledRef.current) setPendingLoginId(undefined);
+    }
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(undefined);
     setSubmitting(true);
+    cancelledRef.current = false; // reset in case a previous attempt was cancelled
     try {
       // Must run before ANY local identity/device-id storage is touched below — see
       // active-account.ts.
@@ -77,40 +171,19 @@ export function LoginForm(): React.JSX.Element {
             newDevice: { name: guessDeviceName(), deviceType: 'web' as const, keyBundle: newIdentity!.keyBundle },
           };
 
-      const result = await apiFetch<{ userId: string; deviceId: string; mustChangePassword: boolean }>(
-        '/api/auth/login',
-        { body },
-      );
-      localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
-      localStorage.setItem(REMEMBERED_USERNAME_KEY, username);
+      const response = await apiFetch<LoginResponse>('/api/auth/login', { body });
 
-      // Unlock (or, for a device just created above, reuse what createLocalIdentity
-      // already derived) the local KEK and hold it in memory for this tab's
-      // lifetime — see lib/crypto/kek-holder.ts. One Argon2id derivation per login,
-      // never repeated within the same page load.
-      if (returning) {
-        const unlocked = await unlockLocalIdentity(password);
-        if (!unlocked) {
-          // Password mismatch between the account and the locally-stored identity
-          // wrapper is only possible if the account password was changed elsewhere
-          // (docs/07-auth-architecture.md's change-password flow) without this
-          // device's local identity being re-wrapped to match. Surfaced as an
-          // error rather than silently regenerating a new identity, which would
-          // orphan every session built on the old one — a proper "re-wrap local
-          // identity after password change" flow is a tracked follow-up, not
-          // implemented in this pass.
-          throw new ApiError('AUTH_INVALID', 'Could not unlock this device’s local keys with that password.');
-        }
-        setUnlockedIdentity(unlocked.kek, unlocked.identity);
-      } else {
-        setUnlockedIdentity(newIdentity!.kek, newIdentity!.identity);
+      if (response.status === 'pending_approval') {
+        // New-device login approval (docs/07-auth-architecture.md) — this device
+        // isn't signed in yet; wait for another of the account's devices to
+        // approve it. `submitting` stays true for the whole wait (see the
+        // pendingLoginId-gated render below) rather than flipping back to an
+        // idle-looking form.
+        await waitForApproval(response.pendingLoginId, returning, newIdentity);
+        return;
       }
 
-      // The real enforcement is (app)/layout.tsx's server-side redirect
-      // (docs/07-auth-architecture.md) — this is just avoiding an extra round trip
-      // through /devices first when we already know the answer.
-      router.push(result.mustChangePassword ? '/change-password' : '/chats');
-      router.refresh();
+      await finishLogin(response, returning, newIdentity);
     } catch (err) {
       if (err instanceof ApiError) {
         if (err.code === 'DEVICE_REVOKED') {
@@ -131,6 +204,32 @@ export function LoginForm(): React.JSX.Element {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (pendingLoginId) {
+    // New-device login approval (docs/07-auth-architecture.md) — this device sent
+    // its credentials but can't finish signing in until an already-signed-in
+    // device approves it. "Cancel" just stops polling; the request itself simply
+    // expires server-side after PENDING_LOGIN_TTL_SECONDS if nobody responds.
+    return (
+      <div className="space-y-4 text-center">
+        <p className="text-sm text-foreground">
+          Check your other device — approve this sign-in from your <strong>Devices</strong> screen to continue.
+        </p>
+        <p className="text-xs text-muted-foreground">This request expires in a few minutes if nobody responds.</p>
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => {
+            cancelledRef.current = true;
+            setPendingLoginId(undefined);
+            setSubmitting(false);
+          }}
+        >
+          Cancel
+        </Button>
+      </div>
+    );
   }
 
   return (

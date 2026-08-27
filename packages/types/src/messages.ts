@@ -250,6 +250,18 @@ export const MessageDto = z.object({
   serverReceivedAt: z.string().datetime(),
   deliveredAt: z.string().datetime().nullable(),
   readAt: z.string().datetime().nullable(),
+  /**
+   * The CALLER's OWN history-sync copy of this message, if one exists yet
+   * (packages/database/prisma/schema.prisma's `MessageHistoryEntry`,
+   * docs/07-auth-architecture.md's history-key section) — a fallback decrypt path
+   * for whenever `envelope` above isn't decryptable on THIS device (a brand-new
+   * device, or one that was never a target for this specific message's live
+   * pairwise/group session). `null` if this account's own devices haven't written
+   * one yet (nobody has successfully decrypted this message live yet on any of
+   * this account's devices) — same "no catch-up path until someone's actually
+   * online to see it" limitation the live delivery path already discloses.
+   */
+  history: z.object({ ciphertext: Base64 }).nullable(),
 });
 export type MessageDto = z.infer<typeof MessageDto>;
 

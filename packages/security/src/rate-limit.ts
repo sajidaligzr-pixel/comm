@@ -152,4 +152,19 @@ export const RATE_LIMIT_RULES = {
   // hammering this write.
   locationPing: { namespace: 'locations:ping', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
   locationViewerGrant: { namespace: 'locations:viewer-grant', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
+  // New-device login approval (docs/07-auth-architecture.md) — the waiting new
+  // device polls every couple of seconds until resolved; 60/min comfortably covers
+  // that cadence for the several minutes a request stays pending, same "generous
+  // poll allowance" reasoning as callPendingCheck above. Public/unauthenticated
+  // (this device isn't signed in yet), so this is the only real abuse guard on it.
+  pendingLoginPoll: { namespace: 'auth:pending-login:poll', windowSeconds: 60, max: 60 } satisfies RateLimitRule,
+  pendingLoginRespond: { namespace: 'auth:pending-login:respond', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
+  // Multi-device message history sync (docs/07-auth-architecture.md) — fetched
+  // once per login/bootstrap, so this stays modest like keyUpload.
+  historyKeyFetch: { namespace: 'history:key:fetch', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
+  historyKeyCreate: { namespace: 'history:key:create', windowSeconds: 60, max: 10 } satisfies RateLimitRule,
+  // One call per message this device newly decrypts/sends — as generous as
+  // messageSend, since a burst of catch-up (opening a long-unread conversation)
+  // can write one of these per message in the page.
+  historyEntryWrite: { namespace: 'history:entry-write', windowSeconds: 60, max: 120 } satisfies RateLimitRule,
 } as const;

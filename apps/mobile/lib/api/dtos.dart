@@ -144,6 +144,32 @@ class DeviceSummary {
   );
 }
 
+/// New-device login approval (docs/07-auth-architecture.md's device-approval
+/// section) — what an EXISTING device sees to decide whether to approve/deny a
+/// pending sign-in request. Deliberately carries no key material.
+class PendingDeviceLoginSummary {
+  final String id;
+  final String name;
+  final String deviceType;
+  final String createdAt;
+  final String expiresAt;
+  const PendingDeviceLoginSummary({
+    required this.id,
+    required this.name,
+    required this.deviceType,
+    required this.createdAt,
+    required this.expiresAt,
+  });
+  static PendingDeviceLoginSummary fromJson(Map<String, dynamic> json) =>
+      PendingDeviceLoginSummary(
+        id: json['id'] as String,
+        name: json['name'] as String,
+        deviceType: json['deviceType'] as String,
+        createdAt: json['createdAt'] as String,
+        expiresAt: json['expiresAt'] as String,
+      );
+}
+
 class LinkDeviceStartResponse {
   final String linkingToken;
   final String expiresAt;
@@ -185,6 +211,44 @@ class AuthSessionResponse {
         displayName: json['displayName'] as String,
         mustChangePassword: json['mustChangePassword'] as bool,
       );
+}
+
+/// New-device login approval (docs/07-auth-architecture.md's device-approval
+/// section) — mirrors packages/types/src/auth.ts's `LoginResponse` /
+/// `PendingLoginPollResponse` discriminated unions as one class with nullable
+/// fields rather than a sealed hierarchy, since every call site here just checks
+/// `status` once and reads the fields that go with it (no exhaustive-match value
+/// gained from a sealed type for two call sites).
+class LoginResult {
+  /// 'ok' | 'pending_approval' | 'pending' | 'denied'.
+  final String status;
+  final String? userId;
+  final String? deviceId;
+  final String? username;
+  final String? displayName;
+  final bool? mustChangePassword;
+  final String? pendingLoginId;
+  final String? expiresAt;
+  const LoginResult({
+    required this.status,
+    this.userId,
+    this.deviceId,
+    this.username,
+    this.displayName,
+    this.mustChangePassword,
+    this.pendingLoginId,
+    this.expiresAt,
+  });
+  static LoginResult fromJson(Map<String, dynamic> json) => LoginResult(
+    status: json['status'] as String,
+    userId: json['userId'] as String?,
+    deviceId: json['deviceId'] as String?,
+    username: json['username'] as String?,
+    displayName: json['displayName'] as String?,
+    mustChangePassword: json['mustChangePassword'] as bool?,
+    pendingLoginId: json['pendingLoginId'] as String?,
+    expiresAt: json['expiresAt'] as String?,
+  );
 }
 
 class InviteInfoResponse {

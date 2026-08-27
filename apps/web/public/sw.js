@@ -43,22 +43,31 @@ self.addEventListener('push', (event) => {
   const title = data.title || 'Comm';
   const body = data.body || 'You have a new message.';
   const conversationId = data.conversationId;
+  // New-device login approval (docs/07-auth-architecture.md's device-approval
+  // section) — the one push type that should show even while the app is open and
+  // focused: unlike a new message (already visible live in the UI, so a duplicate
+  // OS notification would just be noise), a pending sign-in request has no
+  // equivalent in-page surface unless the Devices screen happens to already be
+  // open, so it can't assume "focused == already seen."
+  const isLoginPending = data.type === 'login_pending';
 
   event.waitUntil(
     (async () => {
-      // If the app is already open and focused, the live WebSocket delivery
-      // (docs/04-websocket-realtime.md) already showed this message in the UI —
-      // a duplicate OS-level notification on top of that would just be noise.
-      const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-      const alreadyLooking = clientsList.some((c) => c.focused);
-      if (alreadyLooking) return;
+      if (!isLoginPending) {
+        // If the app is already open and focused, the live WebSocket delivery
+        // (docs/04-websocket-realtime.md) already showed this message in the UI —
+        // a duplicate OS-level notification on top of that would just be noise.
+        const clientsList = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        const alreadyLooking = clientsList.some((c) => c.focused);
+        if (alreadyLooking) return;
+      }
 
       await self.registration.showNotification(title, {
         body,
         icon: '/icon-192.png',
         badge: '/icon-192.png',
-        tag: conversationId ? `conversation-${conversationId}` : undefined,
-        data: { conversationId },
+        tag: isLoginPending ? 'login-pending' : conversationId ? `conversation-${conversationId}` : undefined,
+        data: { conversationId, type: data.type },
       });
     })(),
   );
@@ -67,7 +76,12 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const conversationId = event.notification.data && event.notification.data.conversationId;
-  const url = conversationId ? `/chats/${conversationId}` : '/chats';
+  const url =
+    event.notification.data && event.notification.data.type === 'login_pending'
+      ? '/devices'
+      : conversationId
+        ? `/chats/${conversationId}`
+        : '/chats';
 
   event.waitUntil(
     (async () => {

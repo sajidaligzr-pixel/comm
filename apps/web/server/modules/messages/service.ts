@@ -51,6 +51,12 @@ function toDto(row: {
     ciphertext: Buffer | null;
     x3dhInit: unknown;
   }>;
+  // Pre-filtered to the CALLER's own userId by the query itself (`where: { userId:
+  // callerUserId }`) — never filtered here, so this is always either empty or
+  // exactly one row (MessageHistoryEntry's composite PK). Absent entirely on
+  // sendMessage's own re-fetch, which has no history entry to show yet anyway (see
+  // this field's own handling below).
+  historyEntries?: Array<{ ciphertext: Buffer }>;
 },
   // Which specific device is asking — REQUIRED whenever `row.recipients` could
   // contain more than one device's row (i.e. `listMessages`, where multi-device
@@ -97,6 +103,7 @@ function toDto(row: {
     serverReceivedAt: row.serverReceivedAt.toISOString(),
     deliveredAt: recipient.deliveredAt?.toISOString() ?? null,
     readAt: recipient.readAt?.toISOString() ?? null,
+    history: row.historyEntries?.[0] ? { ciphertext: row.historyEntries[0].ciphertext.toString('base64') } : null,
   };
 }
 
@@ -300,7 +307,10 @@ export async function listMessages(
       // user's own devices' rows plus other members' devices' rows.
       OR: [{ senderUserId: callerUserId }, { recipients: { some: { recipientDevice: { userId: callerUserId } } } }],
     },
-    include: { recipients: true },
+    // historyEntries here is ALWAYS pre-filtered to the caller's own userId —
+    // never the raw relation — so toDto never has to (and never could safely)
+    // pick the right one out of potentially many other members' entries too.
+    include: { recipients: true, historyEntries: { where: { userId: callerUserId } } },
     orderBy: { serverReceivedAt: 'desc' },
     take: limit + 1,
     ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),

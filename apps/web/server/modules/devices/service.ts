@@ -1,11 +1,25 @@
 import { randomBytes } from 'node:crypto';
 import { prisma, Prisma } from '@comm/database';
-import { AppError, type NewDeviceRegistration, type DeviceSummary, type LinkDeviceStartResponse } from '@comm/types';
+import {
+  AppError,
+  NewDeviceRegistration,
+  type DeviceSummary,
+  type LinkDeviceStartResponse,
+  type PendingDeviceLoginSummary,
+} from '@comm/types';
 import { getRedisClient } from '@comm/security';
 import { recordSecurityEvent } from '../../common/security-events';
-import { publishDeviceRevoked } from '../../realtime/bus';
+import { publishDeviceRevoked, publishPendingDeviceLogin } from '../../realtime/bus';
+import type { IssuedSession } from '../auth/session';
+import { createSession } from '../auth/session';
 
 const LINK_TOKEN_TTL_SECONDS = 5 * 60;
+// How long an existing device has to notice and act on an approval request before
+// the waiting new device gives up and has to start over — long enough to actually
+// notice a push notification and open the app, short enough that a stale request
+// isn't sitting around indefinitely (same order of magnitude as LINK_TOKEN_TTL_SECONDS
+// above).
+const PENDING_LOGIN_TTL_SECONDS = 5 * 60;
 
 /** Prisma's transaction client type — used so this function can run either inside an
  * outer `prisma.$transaction(tx => ...)` (invite redemption / login / device linking,
@@ -217,5 +231,175 @@ export async function completeDeviceLink(
     username: user.username,
     displayName: user.displayName,
     mustChangePassword: user.mustChangePassword,
+  };
+}
+
+// ── New-device login approval ────────────────────────────────────────────────
+// "Send a notification to the other device to approve it first, only then can the
+// new device log in" — docs/07-auth-architecture.md's device-approval section, see
+// `PendingDeviceLogin`'s own schema doc comment for the full lifecycle. Split from
+// `login()` (auth/service.ts) into this module since it's fundamentally more
+// device-registration logic than credential logic — `login()` just calls into it.
+
+export type PendingLoginOutcome =
+  | { status: 'ok'; result: { userId: string; deviceId: string; username: string; displayName: string; mustChangePassword: boolean; session: IssuedSession } }
+  | { status: 'pending' }
+  | { status: 'denied' };
+
+/** Called by `login()` once it's decided a fresh `newDevice` registration needs
+ * approval (the account already has another active device). Notifies every one of
+ * THOSE devices — WS for one that's already connected, push (apps/worker's
+ * push-dispatch.ts, subscribed to the same DEVICE_EVENTS_CHANNEL) for one that
+ * isn't — and returns the id the new device will poll. */
+export async function createPendingDeviceLogin(
+  userId: string,
+  registration: NewDeviceRegistration,
+  ipHash: string | null,
+  userAgent: string | null,
+): Promise<{ id: string; expiresAt: string }> {
+  const expiresAt = new Date(Date.now() + PENDING_LOGIN_TTL_SECONDS * 1000);
+  const pending = await prisma.pendingDeviceLogin.create({
+    data: {
+      userId,
+      name: registration.name,
+      deviceType: registration.deviceType,
+      keyBundlePayload: registration.keyBundle,
+      ipHash,
+      userAgent,
+      expiresAt,
+    },
+  });
+
+  await recordSecurityEvent({ userId, eventType: 'new_device_login_requested', ipHash });
+
+  const notifyDevices = await prisma.device.findMany({ where: { userId, status: 'active' }, select: { id: true } });
+  await Promise.all(
+    notifyDevices.map((d) =>
+      publishPendingDeviceLogin(d.id, pending.id, registration.name, registration.deviceType, pending.createdAt.toISOString()),
+    ),
+  );
+
+  return { id: pending.id, expiresAt: expiresAt.toISOString() };
+}
+
+/** What an EXISTING device sees to decide whether to approve/deny — never the key
+ * bundle itself (docs/03-api-design.md's "never send more than a view needs"
+ * rule), and only ever the CALLER's own pending requests (re-derived from the DB,
+ * never trusted from a client-supplied id alone). Expired-but-still-`pending` rows
+ * are filtered out here rather than needing an active sweep, same as `Invite`. */
+export async function listPendingDeviceLogins(userId: string): Promise<PendingDeviceLoginSummary[]> {
+  const rows = await prisma.pendingDeviceLogin.findMany({
+    where: { userId, status: 'pending', expiresAt: { gt: new Date() } },
+    orderBy: { createdAt: 'desc' },
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    deviceType: r.deviceType,
+    createdAt: r.createdAt.toISOString(),
+    expiresAt: r.expiresAt.toISOString(),
+  }));
+}
+
+/** An EXISTING, already-authenticated device approves or denies a pending request
+ * on ITS OWN account — ownership re-checked from the DB, never assumed from the id
+ * alone (docs/35-authorization.md), same IDOR posture `revokeDevice` already takes.
+ * Deliberately does NOT register the device or issue a session here — that only
+ * ever happens inside the WAITING device's own poll (`completePendingDeviceLogin`
+ * below), so Set-Cookie always lands on the same request that will actually use
+ * it, never smuggled in from this (the approving device's) response. */
+export async function respondToPendingDeviceLogin(callerUserId: string, pendingLoginId: string, approve: boolean): Promise<void> {
+  const pending = await prisma.pendingDeviceLogin.findUnique({ where: { id: pendingLoginId } });
+  if (!pending || pending.userId !== callerUserId) {
+    throw new AppError('NOT_FOUND', 'That sign-in request was not found.');
+  }
+  if (pending.status !== 'pending' || pending.expiresAt.getTime() < Date.now()) {
+    // Already resolved (by this same device, or a race with another of the
+    // account's devices) or expired — idempotent no-op rather than an error, same
+    // posture `revokeDevice` already takes for an already-revoked device.
+    return;
+  }
+
+  const updated = await prisma.pendingDeviceLogin.updateMany({
+    where: { id: pendingLoginId, status: 'pending' },
+    data: { status: approve ? 'approved' : 'denied' },
+  });
+  if (updated.count === 0) return; // lost a race with another of the account's own devices
+
+  await recordSecurityEvent({
+    userId: callerUserId,
+    eventType: approve ? 'new_device_login_approved' : 'new_device_login_denied',
+    metadata: { pendingLoginId, name: pending.name, deviceType: pending.deviceType },
+  });
+}
+
+/**
+ * The WAITING new device's own poll — called repeatedly (every couple of seconds)
+ * until it stops returning `pending`. The atomic compare-and-swap
+ * (`updateMany({where: {status: 'approved'}})`) is what lets this safely be called
+ * more than once concurrently (a slow network retry, React StrictMode, ...): only
+ * the ONE call that actually flips `approved` → `completed` goes on to register the
+ * device + issue a session; every other caller (including a genuine second poll
+ * after success) sees `completed` and is told `pending` — the original winning
+ * call already returned the real session once, which is all the client needs.
+ */
+export async function completePendingDeviceLogin(pendingLoginId: string): Promise<PendingLoginOutcome> {
+  const pending = await prisma.pendingDeviceLogin.findUnique({ where: { id: pendingLoginId } });
+  if (!pending) {
+    return { status: 'denied' };
+  }
+  if (pending.expiresAt.getTime() < Date.now() && pending.status === 'pending') {
+    return { status: 'denied' };
+  }
+  if (pending.status === 'denied') {
+    return { status: 'denied' };
+  }
+  if (pending.status === 'pending') {
+    return { status: 'pending' };
+  }
+  if (pending.status === 'completed') {
+    // Already materialized by an earlier winning poll — nothing left to do here;
+    // the client that gets the real session is whichever call actually won the
+    // race below, not this one.
+    return { status: 'pending' };
+  }
+
+  // status === 'approved' — try to claim it.
+  const claimed = await prisma.pendingDeviceLogin.updateMany({
+    where: { id: pendingLoginId, status: 'approved' },
+    data: { status: 'completed' },
+  });
+  if (claimed.count === 0) {
+    // Lost the race to a concurrent poll — that other call is the one materializing
+    // the device now.
+    return { status: 'pending' };
+  }
+
+  const registration = NewDeviceRegistration.parse({
+    name: pending.name,
+    deviceType: pending.deviceType,
+    keyBundle: pending.keyBundlePayload,
+  });
+
+  const { deviceId, session, user } = await prisma.$transaction(async (tx) => {
+    const { deviceId } = await registerDevice(tx, pending.userId, registration);
+    const session = await createSession(pending.userId, deviceId, pending.ipHash, pending.userAgent, tx);
+    const user = await tx.user.findUniqueOrThrow({ where: { id: pending.userId } });
+    return { deviceId, session, user };
+  });
+
+  await recordSecurityEvent({ userId: pending.userId, eventType: 'new_device_linked', deviceId, ipHash: pending.ipHash });
+  await recordSecurityEvent({ userId: pending.userId, eventType: 'login_success', deviceId, ipHash: pending.ipHash });
+
+  return {
+    status: 'ok',
+    result: {
+      userId: pending.userId,
+      deviceId,
+      username: user.username,
+      displayName: user.displayName,
+      mustChangePassword: user.mustChangePassword,
+      session,
+    },
   };
 }

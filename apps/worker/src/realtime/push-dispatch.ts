@@ -29,8 +29,10 @@ import { createRedisSubscriber, decryptAtRest } from '@comm/security';
 import {
   MESSAGE_EVENTS_CHANNEL,
   CALL_EVENTS_CHANNEL,
+  DEVICE_EVENTS_CHANNEL,
   type MessageEvent,
   type CallEvent,
+  type DeviceEvent,
   type PushSubscriptionRequest,
   type FcmPushSubscriptionRequest,
 } from '@comm/types';
@@ -165,6 +167,21 @@ async function handleCallRing(event: Extract<CallEvent, { type: 'call.ring' }>):
   });
 }
 
+/** New-device login approval (docs/07-auth-architecture.md's device-approval
+ * section) — the one push that has to reach an EXISTING device even if it's fully
+ * backgrounded/closed, since that's the only way most people will ever notice a
+ * sign-in attempt they didn't just make. Both providers get a real, visible
+ * notification (unlike `handleCallRing`, this isn't something a foreground UI
+ * would already be showing live) — tapping it deep-links to the Devices screen in
+ * both clients, same as `notificationclick` in apps/web/public/sw.js. */
+async function handleLoginPending(event: Extract<DeviceEvent, { type: 'login_pending' }>): Promise<void> {
+  const body = `${event.name} wants to sign in — approve it in Devices if this was you.`;
+  await dispatchTo(event.targetDeviceId, {
+    messagePayload: { title: 'New sign-in request', body, type: 'login_pending' },
+    fcmData: { type: 'login_pending', pendingLoginId: event.pendingLoginId, title: 'New sign-in request', body },
+  });
+}
+
 let vapidConfigured = false;
 let fcmConfigured = false;
 
@@ -211,14 +228,18 @@ export function startPushDispatcher(): void {
   }
   if (!vapidConfigured && !fcmConfigured) return; // nothing to subscribe for
 
-  // One connection, both channels — ioredis multiplexes fine over a single
+  // One connection, all channels — ioredis multiplexes fine over a single
   // subscriber, and the `channel` check in the shared 'message' handler below
-  // already routes each event to the right side, so there's no need for two.
-  // Calls only ever push via FCM (see handleCallRing's docstring), so the call
+  // already routes each event to the right side, so there's no need for more than
+  // one. Calls only ever push via FCM (see handleCallRing's docstring), so the call
   // channel is only subscribed when FCM is actually configured — subscribing to it
   // with only VAPID set would just mean every event routes to a no-op.
+  // DEVICE_EVENTS_CHANNEL (new-device login approval) is subscribed regardless —
+  // handleLoginPending sends both a web_push and an FCM payload, unlike calls.
   const subscriber = createRedisSubscriber();
-  const channels = fcmConfigured ? [MESSAGE_EVENTS_CHANNEL, CALL_EVENTS_CHANNEL] : [MESSAGE_EVENTS_CHANNEL];
+  const channels = fcmConfigured
+    ? [MESSAGE_EVENTS_CHANNEL, CALL_EVENTS_CHANNEL, DEVICE_EVENTS_CHANNEL]
+    : [MESSAGE_EVENTS_CHANNEL, DEVICE_EVENTS_CHANNEL];
   subscriber.subscribe(...channels).catch((err) => {
     console.error('[worker] failed to subscribe for push dispatch', err);
   });
@@ -253,8 +274,23 @@ export function startPushDispatcher(): void {
           console.error('[worker] call push dispatch error', err);
         }
       })();
+    } else if (channel === DEVICE_EVENTS_CHANNEL) {
+      void (async () => {
+        let event: DeviceEvent;
+        try {
+          event = JSON.parse(raw) as DeviceEvent;
+        } catch {
+          return;
+        }
+        if (event.type !== 'login_pending') return; // 'revoked' has no push — the socket close itself is instant
+        try {
+          await handleLoginPending(event);
+        } catch (err) {
+          console.error('[worker] login-pending push dispatch error', err);
+        }
+      })();
     }
   });
 
-  console.log('[worker] push dispatcher subscribed to message/call events');
+  console.log('[worker] push dispatcher subscribed to message/call/device events');
 }

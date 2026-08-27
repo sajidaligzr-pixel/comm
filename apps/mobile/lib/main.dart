@@ -47,7 +47,14 @@ Future<void> main() async {
   // notifications tap at all.
   initLocalNotifications(
     onTap: (tap) {
-      container.read(routerProvider).push('/chats/${tap.conversationId}');
+      if (tap.openDevices) {
+        // New-device login approval (docs/07-auth-architecture.md) — no
+        // conversation to jump to, just the Devices screen where the pending
+        // request itself lives.
+        container.read(routerProvider).push('/devices');
+      } else if (tap.conversationId != null) {
+        container.read(routerProvider).push('/chats/${tap.conversationId}');
+      }
     },
   );
   // Same "deliberately not awaited" reasoning as initLocalNotifications above —

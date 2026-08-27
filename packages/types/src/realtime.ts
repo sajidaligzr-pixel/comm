@@ -17,7 +17,19 @@ export const GROUP_EVENTS_CHANNEL = 'comm:group-events';
 export const GROUP_CALL_EVENTS_CHANNEL = 'comm:group-call-events';
 export const LOCATION_EVENTS_CHANNEL = 'comm:location-events';
 
-export type DeviceEvent = { type: 'revoked'; deviceId: string };
+export type DeviceEvent =
+  | { type: 'revoked'; deviceId: string }
+  /** A brand-new device is waiting for approval (docs/07-auth-architecture.md's
+   * device-approval section) — fanned out to every one of the account's OTHER
+   * currently active devices the instant `login()` creates the `PendingDeviceLogin`
+   * row, same as every other per-device realtime event's `targetDeviceId`
+   * convention. Purely a live nudge for an already-open/connected client (the
+   * Devices screen's own fetch is the durable source of truth, same "REST is
+   * durable, WS is just the fast path" relationship `group.key-share` already has
+   * to its own REST catch-up) — a device that's backgrounded/closed instead relies
+   * entirely on the push notification apps/worker's push-dispatch.ts sends for this
+   * same event. */
+  | { type: 'login_pending'; targetDeviceId: string; pendingLoginId: string; name: string; deviceType: string; requestedAt: string };
 
 /**
  * Live-location fan-out (docs/09-trust-boundaries.md's "Live location sharing"

@@ -99,7 +99,21 @@ class AuthController extends StateNotifier<AuthState> {
   /// Full username+password login — handles both a returning device (this phone has
   /// already registered before, we have a remembered deviceId) and a brand-new one
   /// (register a fresh device + identity as part of this call).
-  Future<void> login(String username, String password) async {
+  ///
+  /// A brand-new device may come back `pending_approval`
+  /// (docs/07-auth-architecture.md's device-approval section) instead of
+  /// completing immediately — `onPendingApproval` lets the login screen show a
+  /// waiting UI the instant that happens; `isCancelled` is polled between retries
+  /// so the screen's own "Cancel" action can stop this loop without needing a
+  /// cancellation token type. Returns normally once a real session exists, throws
+  /// [ApiException] on denial/expiry, or returns early (leaving state
+  /// [AuthSignedOut]) if cancelled.
+  Future<void> login(
+    String username,
+    String password, {
+    void Function(String pendingLoginId)? onPendingApproval,
+    bool Function()? isCancelled,
+  }) async {
     setActiveAccount(username);
     final knownDeviceId = await getRememberedDeviceId(username);
     // Local identity persists independently of the remembered device-id hint — if
@@ -112,7 +126,7 @@ class AuthController extends StateNotifier<AuthState> {
       newIdentity = await createLocalIdentity(password);
     }
 
-    final AuthSessionResponse result;
+    LoginResult result;
     try {
       result = returning
           ? await _authApi.login(
@@ -138,7 +152,26 @@ class AuthController extends StateNotifier<AuthState> {
       rethrow;
     }
 
-    await setRememberedDeviceId(username, result.deviceId);
+    if (result.status == 'pending_approval') {
+      onPendingApproval?.call(result.pendingLoginId!);
+      for (;;) {
+        if (isCancelled?.call() ?? false) return;
+        await Future.delayed(const Duration(seconds: 2));
+        if (isCancelled?.call() ?? false) return;
+        final poll = await _authApi.pollPendingLogin(result.pendingLoginId!);
+        if (poll.status == 'pending') continue;
+        if (poll.status == 'denied') {
+          throw ApiException(
+            'AUTH_INVALID',
+            'That sign-in request was denied or expired. Please try again.',
+          );
+        }
+        result = poll; // 'ok' — fall through to the same completion path below
+        break;
+      }
+    }
+
+    await setRememberedDeviceId(username, result.deviceId!);
     await setRememberedUsername(username);
 
     if (returning) {
@@ -161,7 +194,7 @@ class AuthController extends StateNotifier<AuthState> {
     final profile = await _usersApi.me();
     state = AuthSignedIn(
       profile,
-      mustChangePassword: result.mustChangePassword,
+      mustChangePassword: result.mustChangePassword!,
     );
   }
 

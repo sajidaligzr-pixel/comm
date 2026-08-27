@@ -10,7 +10,11 @@ class AuthApi {
   const AuthApi(this._client);
   final ApiClient _client;
 
-  Future<AuthSessionResponse> login({
+  /// Returns `status: 'ok'` (a normal completed login) or `status:
+  /// 'pending_approval'` (docs/07-auth-architecture.md's device-approval section —
+  /// this device isn't signed in yet; the caller polls [pollPendingLogin] until an
+  /// already-signed-in device approves/denies it).
+  Future<LoginResult> login({
     required String username,
     required String password,
     NewDeviceRegistration? newDevice,
@@ -24,7 +28,21 @@ class AuthApi {
         if (newDevice != null) 'newDevice': newDevice.toJson(),
         if (deviceId != null) 'deviceId': deviceId,
       },
-      parse: (data) => AuthSessionResponse.fromJson(data as Map<String, dynamic>),
+      parse: (data) => LoginResult.fromJson(data as Map<String, dynamic>),
+    );
+  }
+
+  /// Polled every couple of seconds by the waiting new device
+  /// (docs/07-auth-architecture.md) until it stops returning `status: 'pending'`.
+  /// Public/unauthenticated on the server — the id itself is the bearer
+  /// capability — so this deliberately does NOT go through the normal
+  /// cookie-authenticated request path any differently; ApiClient sends whatever
+  /// cookies exist regardless, which is fine (there are none yet for this device).
+  Future<LoginResult> pollPendingLogin(String pendingLoginId) {
+    return _client.request(
+      '/api/auth/login/pending/$pendingLoginId',
+      method: 'GET',
+      parse: (data) => LoginResult.fromJson(data as Map<String, dynamic>),
     );
   }
 

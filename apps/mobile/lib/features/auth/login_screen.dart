@@ -17,6 +17,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _passwordController = TextEditingController();
   String? _error;
   bool _submitting = false;
+  // New-device login approval (docs/07-auth-architecture.md's device-approval
+  // section) — set the instant login() reports pending_approval; _cancelled is
+  // checked between poll retries so "Cancel" below can stop the wait without a
+  // separate cancellation-token type.
+  bool _waitingForApproval = false;
+  bool _cancelled = false;
   // Surfaced here (a screen reachable pre-login, no digging through phone
   // Settings needed — Android's own App Info page only ever shows
   // versionName, which has stayed "1.0.0" across every build so far, not the
@@ -54,9 +60,20 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     setState(() {
       _error = null;
       _submitting = true;
+      _waitingForApproval = false;
+      _cancelled = false;
     });
     try {
-      await ref.read(authControllerProvider.notifier).login(username, password);
+      await ref
+          .read(authControllerProvider.notifier)
+          .login(
+            username,
+            password,
+            onPendingApproval: (_) {
+              if (mounted) setState(() => _waitingForApproval = true);
+            },
+            isCancelled: () => _cancelled,
+          );
       // Navigation happens automatically via routerProvider's redirect reacting to
       // the new AuthState — nothing to push here.
     } on ApiException catch (e) {
@@ -64,12 +81,65 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     } catch (e) {
       setState(() => _error = 'Something went wrong. Please try again.');
     } finally {
-      if (mounted) setState(() => _submitting = false);
+      if (mounted) {
+        setState(() {
+          _submitting = false;
+          _waitingForApproval = false;
+        });
+      }
     }
+  }
+
+  void _cancelApproval() {
+    setState(() {
+      _cancelled = true;
+      _waitingForApproval = false;
+      _submitting = false;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_waitingForApproval) {
+      // New-device login approval (docs/07-auth-architecture.md) — this device
+      // sent its credentials but can't finish signing in until an
+      // already-signed-in device approves it from its own Devices screen.
+      return Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 400),
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 24),
+                    Text(
+                      'Check your other device — approve this sign-in from its Devices screen to continue.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'This request expires in a few minutes if nobody responds.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    OutlinedButton(onPressed: _cancelApproval, child: const Text('Cancel')),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return Scaffold(
       body: SafeArea(
         child: Center(

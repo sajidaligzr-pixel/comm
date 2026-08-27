@@ -69,6 +69,9 @@ model User {
   blockedByUsers          BlockedUser[]           @relation("BlockedBy")
   location                UserLocation?
   locationViewerGrant     LocationViewer?
+  pendingDeviceLogins     PendingDeviceLogin[]
+  historyKey              UserHistoryKey?
+  messageHistoryEntries   MessageHistoryEntry[]
 
   @@map("users")
 }
@@ -230,6 +233,52 @@ model Session {
   @@map("sessions")
 }
 
+// New-device login approval ("send a notification to approve a new sign-in before
+// it can complete" — docs/07-auth-architecture.md's device-approval section). Only
+// created when `login()`'s `newDevice` branch runs AND the account already has at
+// least one other active device — the account's very first device (normally only
+// reached via invite redemption, not login) has nothing to approve against, so it
+// still completes immediately, same as before this feature existed.
+//
+// `keyBundlePayload` holds the candidate device's public key bundle exactly as
+// `NewDeviceRegistration.keyBundle` would — PUBLIC key material only, the same
+// sensitivity `registerDevice` already stores permanently once approved, just held
+// here temporarily until then. `status` starts `pending`; an existing device
+// resolves it to `approved`/`denied` (`server/modules/devices/service.ts`'s
+// `respondToPendingDeviceLogin`); the waiting new device's own poll
+// (`completePendingDeviceLogin`) is what atomically claims an `approved` row and
+// flips it to `completed` — a compare-and-swap via `updateMany({where: {status:
+// 'approved'}})`, so two concurrent polls can never both materialize the device
+// twice. A `pending` row past `expiresAt` is treated as expired at read time
+// (never resolves to anything) rather than needing an active sweep — same
+// `expiresAt`-checked-at-read-time pattern `Invite` already uses.
+model PendingDeviceLogin {
+  id               String                   @id @default(uuid()) @db.Uuid
+  userId           String                   @map("user_id") @db.Uuid
+  name             String
+  deviceType       DeviceType               @map("device_type")
+  keyBundlePayload Json                     @map("key_bundle_payload")
+  status           PendingDeviceLoginStatus @default(pending)
+  ipHash           String?                  @map("ip_hash")
+  userAgent        String?                  @map("user_agent")
+  createdAt        DateTime                 @default(now()) @map("created_at")
+  expiresAt        DateTime                 @map("expires_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@map("pending_device_logins")
+}
+
+enum PendingDeviceLoginStatus {
+  pending
+  approved
+  denied
+  // Set only by the winning `completePendingDeviceLogin` poll, once it has actually
+  // registered the device + issued a session — see this model's own docstring.
+  completed
+}
+
 // docs/02-database-schema.md's original sketch, docs/13-roadmap.md's blocked-users
 // pass. Enforced server-side on every message/call path (createOrGetDirectConversation,
 // sendMessage, the call.* signaling handlers), never just hidden client-side —
@@ -323,6 +372,12 @@ enum SecurityEventType {
   account_provisioned
   account_suspended
   account_deleted
+  // New-device login approval (PendingDeviceLogin) — recorded at each state
+  // transition, same audit-trail treatment `new_device_linked`/`device_revoked`
+  // already get.
+  new_device_login_requested
+  new_device_login_approved
+  new_device_login_denied
 }
 
 // ── Privacy & notifications (schema laid down now; Phase 2 seeds sane defaults on
@@ -457,11 +512,11 @@ model Message {
   // Client-generated (UUIDv7) — doubles as the idempotency key for the WS/REST
   // ingest path (docs/02-database-schema.md#message-ids): INSERT ... ON CONFLICT
   // (id) DO NOTHING, so a retried send from a flaky connection never duplicates.
-  id               String              @id @db.Uuid
-  conversationId   String              @map("conversation_id") @db.Uuid
-  senderUserId     String              @map("sender_user_id") @db.Uuid
-  senderDeviceId   String              @map("sender_device_id") @db.Uuid
-  envelopeType     MessageEnvelopeType @map("envelope_type")
+  id               String                 @id @db.Uuid
+  conversationId   String                 @map("conversation_id") @db.Uuid
+  senderUserId     String                 @map("sender_user_id") @db.Uuid
+  senderDeviceId   String                 @map("sender_device_id") @db.Uuid
+  envelopeType     MessageEnvelopeType    @map("envelope_type")
   // The Double Ratchet header (sender ratchet pubkey + PN + N — 40 raw bytes,
   // ratchet/double-ratchet.ts's `encodeHeader`) travels separately from the AEAD
   // ciphertext: it's routing/ratchet-bookkeeping metadata the *server* never needs
@@ -475,18 +530,18 @@ model Message {
   // pairings can't share one Double-Ratchet ciphertext) — these columns are then
   // unused going forward, kept only as the fallback `toDto` reads for any `direct`
   // message sent before that existed (see MessageRecipient's own comment).
-  envelopeHeader   Bytes?              @map("envelope_header")
+  envelopeHeader   Bytes?                 @map("envelope_header")
   ciphertext       Bytes?
   // Present only on the first message of a brand-new X3DH session — see
   // packages/crypto's `OutboundSessionResult.x3dhInit`. Stored as opaque JSON
   // (base64 fields), never parsed server-side beyond routing it to the recipient.
-  x3dhInit         Json?               @map("x3dh_init")
-  contentTypeHint  MessageContentType  @map("content_type_hint")
-  replyToMessageId String?             @map("reply_to_message_id") @db.Uuid
-  sentAt           DateTime            @map("sent_at")
-  serverReceivedAt DateTime            @default(now()) @map("server_received_at")
-  editedAt         DateTime?           @map("edited_at")
-  deletedAt        DateTime?           @map("deleted_at")
+  x3dhInit         Json?                  @map("x3dh_init")
+  contentTypeHint  MessageContentType     @map("content_type_hint")
+  replyToMessageId String?                @map("reply_to_message_id") @db.Uuid
+  sentAt           DateTime               @map("sent_at")
+  serverReceivedAt DateTime               @default(now()) @map("server_received_at")
+  editedAt         DateTime?              @map("edited_at")
+  deletedAt        DateTime?              @map("deleted_at")
   // Which of the three tombstone paths produced this deletion — null until
   // `deletedAt` is set. Purely a UI hint (server/modules/messages/service.ts's
   // `deleteMessage`, apps/worker/src/jobs/cleanup.ts's two sweeps): all three paths
@@ -496,13 +551,14 @@ model Message {
   // retention pass).
   deletionReason   MessageDeletionReason? @map("deletion_reason")
 
-  conversation Conversation       @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender       User               @relation(fields: [senderUserId], references: [id], onDelete: Restrict)
-  senderDevice Device             @relation(fields: [senderDeviceId], references: [id], onDelete: Restrict)
-  recipients   MessageRecipient[]
-  reactions    MessageReaction[]
-  starredBy    StarredMessage[]
-  attachment   MessageAttachment?
+  conversation   Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender         User                  @relation(fields: [senderUserId], references: [id], onDelete: Restrict)
+  senderDevice   Device                @relation(fields: [senderDeviceId], references: [id], onDelete: Restrict)
+  recipients     MessageRecipient[]
+  reactions      MessageReaction[]
+  starredBy      StarredMessage[]
+  attachment     MessageAttachment?
+  historyEntries MessageHistoryEntry[]
 
   @@index([conversationId, serverReceivedAt])
   @@index([senderUserId])
@@ -577,15 +633,75 @@ model MessageRecipient {
   // every tombstone path (manual delete, disappearing timer, media retention) — see
   // those call sites for why: leaving live ciphertext here after a "delete" would
   // defeat the point of nulling it on `Message` at all.
-  envelopeHeader Bytes? @map("envelope_header")
-  ciphertext     Bytes?
-  x3dhInit       Json?  @map("x3dh_init")
+  envelopeHeader    Bytes?    @map("envelope_header")
+  ciphertext        Bytes?
+  x3dhInit          Json?     @map("x3dh_init")
 
   message         Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
   recipientDevice Device  @relation(fields: [recipientDeviceId], references: [id], onDelete: Cascade)
 
   @@id([messageId, recipientDeviceId])
   @@map("message_recipients")
+}
+
+// Multi-device HISTORY sync ("log in anywhere, see your full message history, like
+// WhatsApp" — docs/07-auth-architecture.md's history-key section). Every account
+// has exactly one symmetric History Key (HK), generated client-side the first time
+// any of that account's devices needs one, and wrapped (AEAD-encrypted) under an
+// Argon2id key derived from the account's own login PASSWORD before ever leaving
+// the device — the server only ever stores/serves the wrapped bytes, never the raw
+// key. Any device that knows the password can re-derive the same wrapping key and
+// unwrap HK immediately on login, with no other device needing to be online —
+// that's what makes this different from (and simpler than) a QR-linked-companion
+// history transfer, at a real, disclosed cost: unlike this app's per-device Double
+// Ratchet/Megolm sessions, HK's confidentiality is bounded by the account password
+// alone, same as this deployment's own login already is (see docs/08-threat-model.md's
+// updated note). `wrappedKey` is `wrapBytes(kek, hk)` (packages/crypto/src/storage/wrap.ts)
+// stored as one blob — nonce||ciphertext+tag, same convention every other locally-wrapped
+// secret in this app already uses (identity.ts, group-sessions.ts, ...) — `salt` is
+// the separate Argon2id KDF parameter needed to re-derive `kek` from the password.
+model UserHistoryKey {
+  userId     String   @id @map("user_id") @db.Uuid
+  wrappedKey Bytes    @map("wrapped_key")
+  salt       Bytes
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_history_keys")
+}
+
+// One row per (message, participating account) — the actual history-sync payload:
+// that message's full plaintext (content bytes/contentTypeHint/any media key,
+// whatever a normal decrypt would hand back), re-encrypted under `userId`'s own
+// `UserHistoryKey`. Written client-side the first time THAT account's own client
+// sees the plaintext by any means — the ORIGINAL SENDER's device at send time, or
+// any RECIPIENT device the instant it decrypts the message via its normal live
+// pairwise/group session — never derived server-side (the server never has
+// plaintext to encrypt in the first place). Once written, ANY of that account's
+// devices, including ones added later with no live session of their own, can
+// unwrap HK and decrypt every row addressed to them — this is what makes a brand
+// new device (or a secondary device that was never key-shared/targeted for a given
+// message) able to show full history immediately, not just messages sent after it
+// joined. A message neither the sender nor any recipient device has yet decrypted
+// live has no row here yet — same "no catch-up path until someone's actually online
+// to see it" limitation `sendMessage`'s own docstring already discloses for the
+// live delivery path.
+model MessageHistoryEntry {
+  messageId  String   @map("message_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  // `wrapBytes(hk, plaintext)` — one blob, nonce||ciphertext+tag, same convention
+  // as UserHistoryKey.wrappedKey above.
+  ciphertext Bytes
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, userId])
+  @@index([userId, createdAt])
+  @@map("message_history_entries")
 }
 
 /// INTENTIONALLY UNUSED — kept for historical/documentation reasons, not wired
@@ -673,8 +789,8 @@ model Group {
   // `User.avatarObjectKey` (a signed download URL is minted per-request, see
   // media/service.ts's `createDownloadUrl`). Null means "no avatar set," rendered
   // as initials on both clients, same fallback the user-avatar path already uses.
-  avatarObjectKey String?  @map("avatar_object_key")
-  createdAt       DateTime @default(now()) @map("created_at")
+  avatarObjectKey      String?  @map("avatar_object_key")
+  createdAt            DateTime @default(now()) @map("created_at")
 
   conversation Conversation?
   members      GroupMember[]

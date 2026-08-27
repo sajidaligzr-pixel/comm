@@ -75,6 +75,14 @@ Future<void> _showFromData(Map<String, dynamic> data) async {
     );
     final messageId = data['messageId'] as String?;
     if (messageId != null) unawaited(_ackDelivered(messageId));
+  } else if (type == 'login_pending') {
+    // New-device login approval (docs/07-auth-architecture.md's device-approval
+    // section) — this device is one of the account's EXISTING devices; someone
+    // (hopefully the same person) just tried to add a new one.
+    await showLoginPendingNotification(
+      title: data['title'] as String? ?? 'New sign-in request',
+      body: data['body'] as String? ?? 'Approve or deny it in Devices.',
+    );
   }
 }
 

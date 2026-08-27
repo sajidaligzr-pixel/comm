@@ -12,6 +12,9 @@ export const SecurityEventType = z.enum([
   'account_provisioned',
   'account_suspended',
   'account_deleted',
+  'new_device_login_requested',
+  'new_device_login_approved',
+  'new_device_login_denied',
 ]);
 export type SecurityEventType = z.infer<typeof SecurityEventType>;
 

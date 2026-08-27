@@ -14,3 +14,4 @@ export * from './groups';
 export * from './locations';
 export * from './realtime';
 export * from './blocking';
+export * from './history';
