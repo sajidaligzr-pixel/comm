@@ -60,6 +60,7 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ id:
           conversationId={conversationId}
           groupId={group.id}
           currentUserId={ctx.userId}
+          currentDeviceId={ctx.deviceId}
           members={group.members}
           disappearingTimerMs={disappearingTimerToMs(conversation.disappearingTimer)}
         />
@@ -97,6 +98,7 @@ export default async function ChatThreadPage({ params }: { params: Promise<{ id:
       <MessageThread
         conversationId={conversationId}
         currentUserId={ctx.userId}
+        currentDeviceId={ctx.deviceId}
         otherUserId={conversation.otherUser.id}
         otherDisplayName={conversation.otherUser.displayName}
         disappearingTimerMs={disappearingTimerToMs(conversation.disappearingTimer)}

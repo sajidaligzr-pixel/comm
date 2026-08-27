@@ -8,6 +8,7 @@ import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity } from '@/lib/crypto/identity';
 import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
 import { setActiveAccount } from '@/lib/crypto/active-account';
+import { ensureHistoryKey } from '@/lib/crypto/history-key';
 
 // Scoped by username — see login-form.tsx's identical helper and active-account.ts's
 // docstring for why.
@@ -45,6 +46,10 @@ export function LinkDeviceCompleteForm({ token, username }: { token: string; use
       });
       localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
       setUnlockedIdentity(kek, identity);
+      // This device typed the real account password above (see this form's own
+      // note on why, for local key wrapping) — same bootstrap every other
+      // password-based path uses (history-key.ts's own docstring).
+      await ensureHistoryKey(kek, password);
       router.push('/chats');
       router.refresh();
     } catch (err) {

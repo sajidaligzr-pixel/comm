@@ -8,6 +8,7 @@ import { formatBubbleTime, formatDateSeparator, formatRecordingTime, isSameCalen
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { encryptForDevice, decryptFromDeviceOnce } from '@/lib/crypto/conversation-crypto';
 import { getCurrentKek } from '@/lib/crypto/kek-holder';
+import { syncHistoryEntry, tryDecryptViaHistory } from '@/lib/crypto/history-sync';
 import {
   loadCachedMessages,
   appendCachedMessage,
@@ -107,12 +108,19 @@ async function compressImageForSend(file: File): Promise<Uint8Array> {
 export function MessageThread({
   conversationId,
   currentUserId,
+  currentDeviceId,
   otherUserId,
   otherDisplayName,
   disappearingTimerMs,
 }: {
   conversationId: string;
   currentUserId: string;
+  /** THIS device specifically — distinct from `currentUserId`, which is shared
+   * by every device this account is signed into. Needed so the live 'new' handler
+   * below can tell "a message I sent from a DIFFERENT device of my own, which I
+   * should still show live" apart from "a message this exact device/tab already
+   * rendered optimistically the instant it was sent" (sendEncrypted below). */
+  currentDeviceId: string;
   otherUserId: string;
   otherDisplayName: string;
   /** `null` = disappearing messages off. Server-side enforcement (the actual
@@ -365,30 +373,55 @@ export function MessageThread({
       let latest = cached;
       for (const item of page.items) {
         if (item.senderUserId === currentUserId) {
-          // Own outgoing message — already durably cached from when it was sent, so
-          // there's nothing to decrypt; just seed its delivered/read state, which
-          // otherwise wouldn't be known again until a NEW live WS event arrives.
+          // Own outgoing message (from THIS device or another of this account's
+          // own) — seed its delivered/read state either way, which otherwise
+          // wouldn't be known again until a NEW live WS event arrives.
           seededStatus[item.id] = { delivered: !!item.deliveredAt, read: !!item.readAt };
-          continue;
         }
         if (cachedIds.has(item.id)) continue;
+
+        // Attempted regardless of sender — self-fan-out means an own message
+        // sent from a DIFFERENT one of this account's devices has a genuine
+        // per-device Double Ratchet envelope targeting THIS device too, exactly
+        // like a message from anyone else; only a message this device was never
+        // a live target for at all (sent before this device existed, or before
+        // this account's own self-fan-out fix shipped) actually needs the
+        // history-key fallback below.
+        let resolved: CachedMessage | null = null;
         try {
           const plaintext = await decryptFromDeviceOnce(item.id, item.senderDeviceId, item.envelope, item.x3dhInit);
-          latest = await appendCachedMessage(kek, {
+          resolved = {
             id: item.id,
             conversationId,
             senderUserId: item.senderUserId,
-            isOwn: false,
+            isOwn: item.senderUserId === currentUserId,
             contentTypeHint: item.contentTypeHint,
             ...decodeMessagePlaintext(item.contentTypeHint, plaintext),
             sentAt: item.sentAt,
             replyToMessageId: item.replyToMessageId,
-          });
+          };
         } catch {
-          // Undecryptable on this device (e.g. sent to a different device before
-          // this one existed) — skipped rather than shown as an error; an honest
-          // Phase 3 limitation of the per-device session model, not a bug.
+          // Undecryptable via the live per-device session — falls through to
+          // the history-key fallback below rather than being given up on here.
         }
+        if (!resolved) {
+          // Multi-device message history sync (docs/07-auth-architecture.md) —
+          // this account's own copy of this message, if any of this account's
+          // devices has successfully decrypted/sent it before. Covers both a
+          // brand-new device's own past sends (no live session ever existed for
+          // those on THIS device) and another member's message this device
+          // simply wasn't a live target for.
+          resolved = tryDecryptViaHistory(item.history?.ciphertext);
+        }
+        if (resolved) {
+          latest = await appendCachedMessage(kek, resolved);
+          // Idempotent no-op if some other of this account's own devices already
+          // wrote this — see syncHistoryEntry's own docstring.
+          void syncHistoryEntry(resolved);
+        }
+        // else: undecryptable on this device via either path yet — an honest
+        // limitation (no device of this account has ever seen this message's
+        // plaintext), not a bug; skipped rather than shown as an error.
       }
       if (!cancelled) {
         setMessages(latest);
@@ -421,22 +454,40 @@ export function MessageThread({
 
     const offNew = onRealtimeEvent('new', (payload) => {
       const message = payload.message as MessageDto;
-      if (message.conversationId !== conversationId || message.senderUserId === currentUserId) return;
+      // Only skip a message THIS exact device sent (sendEncrypted below already
+      // rendered it optimistically) — NOT every message from this account, since
+      // self-fan-out means one of this account's OTHER devices sending something
+      // is exactly the "see it live on your laptop too" case this is for (real
+      // multi-device sync, not just next-time-you-open-it catch-up).
+      if (message.conversationId !== conversationId || message.senderDeviceId === currentDeviceId) return;
       void (async () => {
         const kek = getCurrentKek();
         if (!kek) return;
         try {
-          const plaintext = await decryptFromDeviceOnce(message.id, message.senderDeviceId, message.envelope, message.x3dhInit);
-          const updated = await appendCachedMessage(kek, {
-            id: message.id,
-            conversationId,
-            senderUserId: message.senderUserId,
-            isOwn: false,
-            contentTypeHint: message.contentTypeHint,
-            ...decodeMessagePlaintext(message.contentTypeHint, plaintext),
-            sentAt: message.sentAt,
-            replyToMessageId: message.replyToMessageId,
-          });
+          let resolved: CachedMessage;
+          try {
+            const plaintext = await decryptFromDeviceOnce(message.id, message.senderDeviceId, message.envelope, message.x3dhInit);
+            resolved = {
+              id: message.id,
+              conversationId,
+              senderUserId: message.senderUserId,
+              isOwn: message.senderUserId === currentUserId,
+              contentTypeHint: message.contentTypeHint,
+              ...decodeMessagePlaintext(message.contentTypeHint, plaintext),
+              sentAt: message.sentAt,
+              replyToMessageId: message.replyToMessageId,
+            };
+          } catch (decryptErr) {
+            // Multi-device message history sync fallback (docs/07-auth-architecture.md)
+            // — this specific device wasn't a live target for this message (e.g. it
+            // was added after the sender resolved its recipient list), but another
+            // of this account's own devices may already have a copy.
+            const viaHistory = tryDecryptViaHistory(message.history?.ciphertext);
+            if (!viaHistory) throw decryptErr;
+            resolved = viaHistory;
+          }
+          const updated = await appendCachedMessage(kek, resolved);
+          void syncHistoryEntry(resolved);
           setMessages(updated);
           // REST, not sendRealtimeEvent — same "don't leave a fragile WS-only path"
           // reasoning as the catch-up loop above and the group key-share fix before
@@ -582,6 +633,11 @@ export function MessageThread({
         replyToMessageId,
       };
       setMessages(await appendCachedMessage(kek, optimistic));
+      // Multi-device message history sync (docs/07-auth-architecture.md) — the
+      // SENDER already has the plaintext right here, no decrypt needed; this is
+      // what lets this account's OWN other/future devices recover this exact
+      // message later even if they were never a live pairwise target for it.
+      void syncHistoryEntry(optimistic);
 
       await apiFetch(`/api/conversations/${conversationId}/messages`, {
         method: 'POST',
@@ -640,21 +696,30 @@ export function MessageThread({
       const knownIds = new Set(messages.map((m) => m.id));
       const additions: CachedMessage[] = [];
       for (const item of page.items) {
-        if (item.senderUserId === currentUserId || knownIds.has(item.id)) continue;
+        if (knownIds.has(item.id)) continue;
+        // See the initial catch-up loop's identical note: attempted regardless
+        // of sender, then falls back to the history-key entry (docs/07-auth-architecture.md)
+        // if this device was never a live target for it at all.
+        let resolved: CachedMessage | null = null;
         try {
           const plaintext = await decryptFromDeviceOnce(item.id, item.senderDeviceId, item.envelope, item.x3dhInit);
-          additions.push({
+          resolved = {
             id: item.id,
             conversationId,
             senderUserId: item.senderUserId,
-            isOwn: false,
+            isOwn: item.senderUserId === currentUserId,
             contentTypeHint: item.contentTypeHint,
             ...decodeMessagePlaintext(item.contentTypeHint, plaintext),
             sentAt: item.sentAt,
             replyToMessageId: item.replyToMessageId,
-          });
+          };
         } catch {
-          // See the initial catch-up loop's note.
+          // Falls through to the history-key fallback below.
+        }
+        if (!resolved) resolved = tryDecryptViaHistory(item.history?.ciphertext);
+        if (resolved) {
+          additions.push(resolved);
+          void syncHistoryEntry(resolved);
         }
       }
       skipNextAutoScrollRef.current = true;

@@ -23,6 +23,7 @@ import { cn } from '@/lib/cn';
 import { formatBubbleTime, formatDateSeparator, isSameCalendarDay } from '@/lib/format';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { getCurrentKek } from '@/lib/crypto/kek-holder';
+import { syncHistoryEntry, tryDecryptViaHistory } from '@/lib/crypto/history-sync';
 import {
   loadCachedMessages,
   appendCachedMessage,
@@ -96,12 +97,18 @@ export function GroupMessageThread({
   conversationId,
   groupId,
   currentUserId,
+  currentDeviceId,
   members,
   disappearingTimerMs,
 }: {
   conversationId: string;
   groupId: string;
   currentUserId: string;
+  /** THIS device specifically — see message-thread.tsx's identical prop for why
+   * this needs to be separate from `currentUserId` (self-fan-out means one of
+   * this account's OTHER devices sending a group message should still show up
+   * live here, not just on this device's next open). */
+  currentDeviceId: string;
   members: GroupMemberDto[];
   disappearingTimerMs: number | null;
 }): React.JSX.Element {
@@ -280,23 +287,38 @@ export function GroupMessageThread({
       let latest = cached;
       for (const item of page.items) {
         if (cachedIds.has(item.id)) continue;
-        if (item.senderUserId === currentUserId) continue; // our own — already durably cached when sent
+        // Attempted regardless of sender, including this account's OWN messages
+        // sent from a DIFFERENT device — every group member's device shares one
+        // Megolm-style session per sender, so as long as THIS device was ever
+        // key-shared for that sender's session, it can decrypt an own-message
+        // from another of this account's devices exactly like anyone else's.
+        let resolved: CachedMessage | null = null;
         try {
           const plaintext = await decryptWithRetry(item.id, item.senderUserId, item.envelope);
-          latest = await appendCachedMessage(kek, {
+          resolved = {
             id: item.id,
             conversationId,
             senderUserId: item.senderUserId,
-            isOwn: false,
+            isOwn: item.senderUserId === currentUserId,
             contentTypeHint: item.contentTypeHint,
             ...decodeMessagePlaintext(item.contentTypeHint, plaintext),
             sentAt: item.sentAt,
             replyToMessageId: item.replyToMessageId,
-          });
+          };
         } catch {
-          // Genuinely undecryptable (e.g. sent before this device joined, or the
-          // key-share hasn't arrived even after a sync attempt) — skipped, not shown
-          // as an error, same as the 1:1 thread's own catch-up loop.
+          // Genuinely undecryptable live (e.g. sent before this device joined/was
+          // key-shared, or the key-share hasn't arrived even after a sync
+          // attempt) — falls through to the history-key fallback below.
+        }
+        if (!resolved) {
+          // Multi-device message history sync (docs/07-auth-architecture.md) —
+          // this account's own copy, if any of this account's devices has
+          // already decrypted/sent this message.
+          resolved = tryDecryptViaHistory(item.history?.ciphertext);
+        }
+        if (resolved) {
+          latest = await appendCachedMessage(kek, resolved);
+          void syncHistoryEntry(resolved);
         }
       }
       if (!cancelled) {
@@ -324,22 +346,36 @@ export function GroupMessageThread({
 
     const offNew = onRealtimeEvent('new', (payload) => {
       const message = payload.message as MessageDto;
-      if (message.conversationId !== conversationId || message.senderUserId === currentUserId) return;
+      // Only skip a message THIS exact device sent — NOT every message from this
+      // account, since self-fan-out means one of this account's OTHER devices
+      // sending a group message is exactly the "see it live on your laptop too"
+      // case this is for (see message-thread.tsx's identical fix).
+      if (message.conversationId !== conversationId || message.senderDeviceId === currentDeviceId) return;
       void (async () => {
         const kek = getCurrentKek();
         if (!kek) return;
         try {
-          const plaintext = await decryptWithRetry(message.id, message.senderUserId, message.envelope);
-          const updated = await appendCachedMessage(kek, {
-            id: message.id,
-            conversationId,
-            senderUserId: message.senderUserId,
-            isOwn: false,
-            contentTypeHint: message.contentTypeHint,
-            ...decodeMessagePlaintext(message.contentTypeHint, plaintext),
-            sentAt: message.sentAt,
-            replyToMessageId: message.replyToMessageId,
-          });
+          let resolved: CachedMessage;
+          try {
+            const plaintext = await decryptWithRetry(message.id, message.senderUserId, message.envelope);
+            resolved = {
+              id: message.id,
+              conversationId,
+              senderUserId: message.senderUserId,
+              isOwn: message.senderUserId === currentUserId,
+              contentTypeHint: message.contentTypeHint,
+              ...decodeMessagePlaintext(message.contentTypeHint, plaintext),
+              sentAt: message.sentAt,
+              replyToMessageId: message.replyToMessageId,
+            };
+          } catch (decryptErr) {
+            // Multi-device message history sync fallback (docs/07-auth-architecture.md).
+            const viaHistory = tryDecryptViaHistory(message.history?.ciphertext);
+            if (!viaHistory) throw decryptErr;
+            resolved = viaHistory;
+          }
+          const updated = await appendCachedMessage(kek, resolved);
+          void syncHistoryEntry(resolved);
           setMessages(updated);
           // REST, not sendRealtimeEvent — same reasoning as message-thread.tsx's 1:1
           // equivalent: no retry if the socket happens to not be open a few `await`s
@@ -425,6 +461,9 @@ export function GroupMessageThread({
         replyToMessageId: null,
       };
       setMessages(await appendCachedMessage(kek, optimistic));
+      // Multi-device message history sync (docs/07-auth-architecture.md) — see
+      // message-thread.tsx's identical call for the full reasoning.
+      void syncHistoryEntry(optimistic);
 
       await apiFetch(`/api/conversations/${conversationId}/messages`, {
         method: 'POST',
@@ -469,21 +508,27 @@ export function GroupMessageThread({
       const knownIds = new Set(messages.map((m) => m.id));
       const additions: CachedMessage[] = [];
       for (const item of page.items) {
-        if (item.senderUserId === currentUserId || knownIds.has(item.id)) continue;
+        if (knownIds.has(item.id)) continue;
+        let resolved: CachedMessage | null = null;
         try {
           const plaintext = await decryptWithRetry(item.id, item.senderUserId, item.envelope);
-          additions.push({
+          resolved = {
             id: item.id,
             conversationId,
             senderUserId: item.senderUserId,
-            isOwn: false,
+            isOwn: item.senderUserId === currentUserId,
             contentTypeHint: item.contentTypeHint,
             ...decodeMessagePlaintext(item.contentTypeHint, plaintext),
             sentAt: item.sentAt,
             replyToMessageId: item.replyToMessageId,
-          });
+          };
         } catch {
           // See the initial catch-up loop's note.
+        }
+        if (!resolved) resolved = tryDecryptViaHistory(item.history?.ciphertext);
+        if (resolved) {
+          additions.push(resolved);
+          void syncHistoryEntry(resolved);
         }
       }
       skipNextAutoScrollRef.current = true;

@@ -8,6 +8,7 @@ import { Input, Label, FieldError } from './ui/input';
 import { Dialog } from './ui/dialog';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { clearUnlockedIdentity } from '@/lib/crypto/kek-holder';
+import { clearCurrentHistoryKey } from '@/lib/crypto/history-key-holder';
 import { wipeCryptoDb } from '@/lib/crypto/db';
 
 /**
@@ -44,6 +45,7 @@ export function DeleteAccountSection(): React.JSX.Element {
     try {
       await apiFetch('/api/auth/delete-account', { method: 'POST', body: { password } });
       clearUnlockedIdentity();
+      clearCurrentHistoryKey();
       await wipeCryptoDb();
       router.push('/login');
       router.refresh();

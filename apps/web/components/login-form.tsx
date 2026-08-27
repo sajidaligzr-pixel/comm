@@ -9,6 +9,7 @@ import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity, unlockLocalIdentity, hasLocalIdentity } from '@/lib/crypto/identity';
 import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
 import { setActiveAccount } from '@/lib/crypto/active-account';
+import { ensureHistoryKey } from '@/lib/crypto/history-key';
 
 // New-device login approval (docs/07-auth-architecture.md's device-approval
 // section) — a second (or later) device no longer completes on submit alone; the
@@ -85,6 +86,7 @@ export function LoginForm(): React.JSX.Element {
     // already derived) the local KEK and hold it in memory for this tab's
     // lifetime — see lib/crypto/kek-holder.ts. One Argon2id derivation per login,
     // never repeated within the same page load.
+    let kek: Uint8Array;
     if (returning) {
       const unlocked = await unlockLocalIdentity(password);
       if (!unlocked) {
@@ -99,9 +101,18 @@ export function LoginForm(): React.JSX.Element {
         throw new ApiError('AUTH_INVALID', 'Could not unlock this device’s local keys with that password.');
       }
       setUnlockedIdentity(unlocked.kek, unlocked.identity);
+      kek = unlocked.kek;
     } else {
       setUnlockedIdentity(newIdentity!.kek, newIdentity!.identity);
+      kek = newIdentity!.kek;
     }
+
+    // Multi-device message history sync (docs/07-auth-architecture.md) — this is
+    // the one moment this tab genuinely has the plaintext password in memory (not
+    // true of a future biometric unlock), so it's the only place a brand-new
+    // account-level History Key can ever be bootstrapped. Best-effort: never
+    // blocks sign-in on a failure (see ensureHistoryKey's own docstring).
+    await ensureHistoryKey(kek, password);
 
     // The real enforcement is (app)/layout.tsx's server-side redirect
     // (docs/07-auth-architecture.md) — this is just avoiding an extra round trip

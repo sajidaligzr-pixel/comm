@@ -8,6 +8,7 @@ import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity } from '@/lib/crypto/identity';
 import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
 import { setActiveAccount } from '@/lib/crypto/active-account';
+import { ensureHistoryKey } from '@/lib/crypto/history-key';
 
 // Scoped by username — see login-form.tsx's identical helper and active-account.ts's
 // docstring for why: a browser that already has a different account's identity
@@ -52,6 +53,9 @@ export function InviteRedeemForm({ token, username }: { token: string; username:
       });
       localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
       setUnlockedIdentity(kek, identity);
+      // This account's very first device — bootstraps its History Key too, same
+      // as any other password-based login (see history-key.ts's own docstring).
+      await ensureHistoryKey(kek, password);
       router.push('/chats');
       router.refresh();
     } catch (err) {

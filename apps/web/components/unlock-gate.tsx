@@ -6,6 +6,7 @@ import { getCurrentKek, setUnlockedIdentity } from '@/lib/crypto/kek-holder';
 import { unlockLocalIdentity } from '@/lib/crypto/identity';
 import { setActiveAccount } from '@/lib/crypto/active-account';
 import { isBiometricUnlockEnabled, isPlatformAuthenticatorAvailable, unlockWithBiometrics } from '@/lib/crypto/biometric-unlock';
+import { ensureHistoryKey } from '@/lib/crypto/history-key';
 import { BiometricEnrollPrompt } from './biometric-enroll-prompt';
 import { Button } from './ui/button';
 import { Input, Label, FieldError } from './ui/input';
@@ -112,6 +113,10 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
         return;
       }
       setUnlockedIdentity(result.kek, result.identity);
+      // No password available on this path — ensureHistoryKey falls back to
+      // whatever's already cached locally from an earlier password unlock (see
+      // its own docstring); never blocks getting into the app.
+      void ensureHistoryKey(result.kek, null);
       setUnlocked(true);
     } finally {
       setBiometricBusy(false);
@@ -134,6 +139,7 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
         return;
       }
       setUnlockedIdentity(result.kek, result.identity);
+      await ensureHistoryKey(result.kek, password);
       setUnlocked(true);
     } finally {
       setSubmitting(false);
