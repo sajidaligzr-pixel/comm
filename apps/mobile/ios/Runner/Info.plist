@@ -54,6 +54,15 @@
 	     crash-not-just-deny behavior as the photo library key above. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Comm needs access to your microphone to make and receive voice calls.</string>
+	<!-- Required by BOTH image_picker's camera-capture option (not just its photo-
+	     library option above — thread_screen.dart's "Photo" attach action lets you
+	     take a new photo, not only pick an existing one) and flutter_webrtc's
+	     getUserMedia for video calls (features/calls/) — missing entirely was a
+	     real App Store rejection (ITMS-90683), not a guess: Apple's own binary
+	     validation caught a reference to a camera-requiring API with no matching
+	     purpose string. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Comm needs access to your camera to take photos to send in a chat and for video calls.</string>
 	<!-- Required by local_auth (features/auth/biometric_unlock.dart) for Face ID
 	     specifically — Touch ID needs no key, but without this one iOS shows a
 	     dialog saying the app hasn't been updated to support Face ID instead of

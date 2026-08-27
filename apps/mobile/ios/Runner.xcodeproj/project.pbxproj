@@ -655,6 +655,16 @@
 				CLANG_WARN_SUSPICIOUS_MOVE = YES;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				// CODE_SIGN_STYLE = Automatic below insists on choosing the
+				// signing identity itself — pinning this to "iPhone Distribution"
+				// directly conflicts with that ("conflicting provisioning
+				// settings", found live), so this stays a Development identity;
+				// automatic signing re-signs with the real Distribution identity
+				// at `-exportArchive` time (method: app-store), not here. The
+				// actual archive-time blocker on a brand-new Developer Program
+				// enrollment is Apple's own "no devices on this team yet"
+				// restriction on Development-profile creation — fixed by
+				// registering one device, not by touching this setting.
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
