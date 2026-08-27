@@ -7,7 +7,7 @@
 | External network attacker | Can observe/intercept network traffic, not TLS keys | TLS/WSS everywhere, HSTS, certificate pinning considered for a future native client — see [11-deployment-architecture](11-deployment-architecture.md) |
 | Unauthenticated attacker against the API | Can send arbitrary requests | Auth guards on every route, rate limiting, schema validation, no route trusts client-asserted identity |
 | Malicious/abusive registered user | Valid account, wants to spam/harass/enumerate | Rate limits, blocking enforced server-side, report pipeline, admin suspension |
-| Compromised user device (malware, stolen laptop) | Full access to that device's local storage/keys while compromised | Per-device keys (blast radius is one device, not the account — see [06-device-architecture](06-device-architecture.md)), instant device revocation, forward secrecy limits exposure of past messages even on that device |
+| Compromised user device (malware, stolen laptop) | Full access to that device's local storage/keys while compromised | Per-device keys (blast radius is one device, not the account — see [06-device-architecture](06-device-architecture.md)), instant device revocation. Forward secrecy still limits a device to messages it was itself a legitimate target for — **except** the account's own message-history-sync entries (see below), which a compromised device with the local KEK in memory can unwrap in full, same ceiling as the password-compromise row below |
 | Stolen session (cookie theft short of full device compromise) | Valid access/refresh token | Short-lived access tokens, refresh rotation + reuse detection ([07-auth-architecture](07-auth-architecture.md)), device/session revocation, `HttpOnly` cookies limit the easiest theft vector (JS read) |
 | Malicious browser extension | Can read page DOM/JS heap while the page is open | Documented as a real residual risk — see [Compromised browser](#compromised-browser) below. Not something a web app can fully defend against |
 | Malicious administrator | Has admin-panel access | Scoped by design to account lifecycle + abuse triage; **no code path exists that can decrypt a user's messages** — see [Can an administrator decrypt messages?](#security-review-answers) |
@@ -20,6 +20,15 @@
 | Supply-chain compromise (malicious npm dependency) | Injected code in a dependency we install | Lockfiles, `npm audit`/Dependabot, isolating `packages/crypto` and `packages/security` so a compromised unrelated dependency (e.g. in a UI library) can't reach key material by construction — see [01-folder-structure](01-folder-structure.md) module isolation |
 | Insider (engineer with prod DB access) | Same ceiling as "database compromise" above, plus deploy access | Least-privilege DB roles ([11-deployment-architecture](11-deployment-architecture.md)), no plaintext message content to access regardless of privilege level |
 | Physical device theft | Physical access to a logged-in device | Local key storage requires the password-derived KEK in memory ([05-crypto-architecture](05-crypto-architecture.md)); OS/browser lock-screen is the outer defense this project doesn't control |
+
+## Multi-device message history sync's password-bounded confidentiality
+
+[07-auth-architecture](07-auth-architecture.md)'s history-key section is a deliberate, disclosed departure from this app's usual per-device-pairwise-session guarantee, made knowingly rather than found later: every message's history-sync entry (`message_history_entries`) is decryptable by anyone who can derive the account's password-wrapped History Key — which means anyone who knows the account **password**, full stop, not anyone who compromised a *specific* device. Two things keep this from being a bigger step than it looks:
+
+- This deployment's login was already password-based — the server necessarily sees the plaintext password at every login already, so this doesn't hand the server (or anyone who compromises it at the right moment) a new capability it didn't already have reason to be trusted not to (mis)use.
+- Once multi-device fan-out shipped, a password alone was *already* sufficient to register a new device that receives every future message via self-fan-out — this feature extends that same existing bound to historical messages too, rather than opening a materially new exposure. The account's practical security ceiling was already the password from that point on.
+
+What this is **not**: a change to direct/group message confidentiality in transit or in the pairwise/Megolm sessions themselves — those are untouched, still per-device, still forward-secret for a device that was never a party to a given session. It's specifically the *local backup copy* this feature adds that carries the weaker bound, and only for accounts that have actually bootstrapped a History Key (every account will, in practice, once any device logs in with a password after this shipped).
 
 ## Authorization rule (applies everywhere)
 

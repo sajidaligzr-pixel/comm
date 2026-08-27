@@ -213,6 +213,16 @@ Client-side, a **separate** provider/controller from 1:1 calling on both platfor
 - **Native CallKit ringing for group calls** (Android, via `flutter_callkit_incoming`) — not adapted for the N-way case this pass; a group-call invite surfaces only as this app's own in-app banner (`_InviteBanner`), not a native incoming-call screen the way a 1:1 call does. iOS CallKit was already unsupported before this pass, unrelated.
 - **Per-device granularity** — like 1:1 calling and the rest of this app's calling story, a call targets a specific device, not "a user"; a member on multiple devices joins from whichever device they choose, same as everywhere else.
 
+### New-device login approval ✅ — shipped after the WhatsApp-parity batch above, requested directly
+
+"Send a notification to the other device to approve it first, only then can the new device log in" — the passive `new_device_linked` notification Phase 2's original login flow shipped with (surfaced, never gating) is now a real gate for any device beyond the account's first: a `pending_device_logins` row instead of immediate registration, live WS + push notification to every existing active device, Approve/Deny from the Devices screen, and — the one subtlety worth flagging — completion happens on the **waiting device's own poll**, never smuggled in from the approving device's response, so `Set-Cookie` always lands on the request that will actually use it. See [07-auth-architecture](07-auth-architecture.md)'s own section for the full design.
+
+### Multi-device message history sync ✅ — also requested directly, closes the "log in anywhere, see everything" gap
+
+The multi-device fan-out pass above (Phase 3's tracked gap) only ever covered messages sent *after* a device joined — asked directly why a fresh login on the web app didn't show existing history, the honest answer was forward secrecy: a device only ever had a live decrypt path for messages it was a legitimate target for. Fixed with a password-derived History Key (HK) any of an account's devices can independently re-derive on login (no companion device needs to be online, unlike the QR-linked-companion model), plus one `message_history_entries` row per (message, account) written the moment any of that account's own devices sees the plaintext by any means. This was previously tracked below as "Encrypted account backups... needs its own password-derived-KDF design pass" — that design pass happened, and it shipped as part of this feature, not deferred further. See [07-auth-architecture](07-auth-architecture.md)'s section and [08-threat-model](08-threat-model.md)'s note on the disclosed password-bounded trade-off this accepts.
+
+Found and fixed alongside, not a separate pass: both `message-thread.tsx`/`group-message-thread.tsx` (web) and `thread_screen.dart` (mobile) had a real live-sync gap of their own — a message sent from one of an account's OTHER devices (self-fan-out's whole point) was either silently skipped by the live `'new'` handler (web, keyed on sender *user*, not sender *device*) or given up on immediately with a hardcoded placeholder instead of attempting the perfectly valid live decrypt self-fan-out already provides (mobile). Both fixed as part of this same pass, since the history-key fallback needed the same call sites touched anyway.
+
 ## Phase 5 — Groups
 Group CRUD, membership/roles, and a real Megolm-style rotating group ratchet shipped early — see above. Remaining: invite links, promote/demote UI, group avatars, and `only_admins_can_message`'s settings UI (the field and its server-side enforcement both exist, just no toggle in the client yet).
 
@@ -257,6 +267,5 @@ Stand up the topology in [11-deployment-architecture](11-deployment-architecture
 
 - Public/self-serve registration (would require redesigning [07-auth-architecture](07-auth-architecture.md)'s trust model)
 - Phone-number authentication/discovery
-- Encrypted account backups (master-prompt §44) — needs its own password-derived-KDF design pass before implementation
 - Native Android client — the API/WS/crypto protocol is designed to support this without backend changes (master-prompt §95), but no native client work starts before the web platform is stable
 - Privacy-preserving contact discovery mechanism selection ([09-trust-boundaries](09-trust-boundaries.md)) — deferred to its own design spike, not bundled into Phase 2's contacts CRUD
