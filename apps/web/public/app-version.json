@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 15,
+  "buildNumber": 17,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-15.apk",
-  "releaseNotes": "Adds a build number on the login screen so we can confirm updates are landing correctly. This update is required."
+  "apkUrl": "/downloads/comm-17.apk",
+  "releaseNotes": "You can now see your full chat history when you log in anywhere, not just new messages. Group chats now reach every device you're signed into. New sign-ins on an unfamiliar device now need approval from one of your other devices first. This update is required."
 }
