@@ -49,3 +49,4 @@ google-services.json
 /apps/web/public/downloads/
 GoogleService-Info.plist
 AuthKey_QAXPMB3CZF.p8
+voip_services.cer
