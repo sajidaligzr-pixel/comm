@@ -35,6 +35,18 @@
 ///   "permission strings must match what the app actually does" rule this
 ///   feature was built under rules out.
 ///
+/// - Battery optimization exemption (Settings.ACTION_REQUEST_IGNORE_
+///   BATTERY_OPTIMIZATIONS, via Permission.ignoreBatteryOptimizations):
+///   without this, a real Android device (confirmed live via adb on a Samsung
+///   phone — dumpsys deviceidle whitelist) can silently fail to actually show
+///   the incoming-call screen for a closed/backgrounded app, even though the
+///   FCM push itself demonstrably still arrives — Doze/App Standby throttles
+///   what a backgrounded app's process is allowed to do once woken, separately
+///   from whether it gets woken at all. Google Play's Battery policy names
+///   VoIP/real-time-communication apps as the intended exception to "don't
+///   request this permission" — this app's calling feature is exactly that,
+///   not a battery-life workaround dressed up as one.
+///
 /// Notifications are deliberately NOT asked here — main.dart already requests
 /// that unconditionally at process start (initLocalNotifications/
 /// initPushNotifications), the earliest possible moment, so it's already
@@ -60,7 +72,7 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../storage/prefs.dart';
 import '../location/location_service_hooks.dart';
 
-const _currentOnboardingVersion = 2;
+const _currentOnboardingVersion = 3;
 
 class PermissionsOnboardingPrompt extends StatefulWidget {
   const PermissionsOnboardingPrompt({super.key});
@@ -103,6 +115,10 @@ class _PermissionsOnboardingPromptState extends State<PermissionsOnboardingPromp
         // why "While Using" is genuinely sufficient for this feature's design.
         await LocationServiceHooks.ensureStarted();
       }
+      // No-op on iOS (permission_handler only wires this up for Android) and a
+      // harmless already-granted no-op on a device that's already exempted —
+      // see this file's own docstring for why this is asked at all.
+      await Permission.ignoreBatteryOptimizations.request();
     } finally {
       await setPermissionsOnboardingVersionSeen(_currentOnboardingVersion);
       if (mounted) setState(() => _visible = false);
@@ -148,7 +164,8 @@ class _PermissionsOnboardingPromptState extends State<PermissionsOnboardingPromp
                           const SizedBox(height: 4),
                           Text(
                             'Microphone, for calls and voice notes. Location, visible live to this app\'s '
-                            "admins — even while it's closed. Asked once; change either anytime in Settings.",
+                            "admins — even while it's closed. Battery, so calls and messages still arrive "
+                            "when it's closed. Asked once; change any of it anytime in Settings.",
                             style: theme.textTheme.bodySmall,
                           ),
                           const SizedBox(height: 8),

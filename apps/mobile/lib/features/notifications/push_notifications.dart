@@ -25,6 +25,7 @@
 library;
 
 import 'dart:async' show unawaited;
+import 'dart:developer' as developer;
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -48,10 +49,20 @@ import 'local_notifications.dart';
 /// reference it (the reference only exists via a native callback registration).
 @pragma('vm:entry-point')
 Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
-  WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
-  await ensurePluginInitializedForBackgroundIsolate();
-  await _showFromData(message.data);
+  // A background isolate throwing here would otherwise vanish with zero
+  // trace in logcat — found live while chasing a real report of calls not
+  // ringing (root cause turned out to be the OS's own Doze/battery-standby
+  // throttling, not a bug in this function, but the silence itself made that
+  // far harder to rule in or out than it should have been). Kept as a
+  // permanent safety net, not a one-off debugging aid.
+  try {
+    WidgetsFlutterBinding.ensureInitialized();
+    await Firebase.initializeApp();
+    await ensurePluginInitializedForBackgroundIsolate();
+    await _showFromData(message.data);
+  } catch (e, st) {
+    developer.log('firebaseMessagingBackgroundHandler threw', name: 'Comm', error: e, stackTrace: st);
+  }
 }
 
 Future<void> _showFromData(Map<String, dynamic> data) async {

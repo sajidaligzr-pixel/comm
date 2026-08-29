@@ -48,6 +48,21 @@
          of foreground service this is, alongside the general one. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <!-- Lets features/permissions/permissions_prompt.dart's onboarding card ask
+         the user to exempt this app from Doze/App Standby battery restrictions
+         (Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, wrapped by
+         permission_handler's Permission.ignoreBatteryOptimizations). Found live:
+         without this exemption, a call push (FCM data message, high-priority)
+         can still reach a backgrounded/closed app's native layer but never
+         reliably reach the point of actually showing the CallKit ringing UI —
+         confirmed on a real device via adb (dumpsys deviceidle whitelist showed
+         this app absent while e.g. Life360 was present), and fixed the instant
+         the app was added to that same whitelist. Google Play's Battery policy
+         explicitly permits this permission for apps whose "core functionality
+         could be impaired" by battery optimization, naming VoIP/real-time-
+         communication apps as the intended exception — which this app's calling
+         feature squarely is, not a generic battery-life workaround. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <application
         android:label="Comm"
         android:name="${applicationName}"
