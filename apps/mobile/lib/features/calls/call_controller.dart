@@ -237,10 +237,33 @@ class CallController extends StateNotifier<CallUiState> {
     String otherDisplayName,
   ) async {
     if (state.phase != CallPhase.idle || getActiveCallKind() != null) return;
+
+    final callId = _uuid.v4();
+    final call = ActiveCall(
+      callId: callId,
+      conversationId: conversationId,
+      otherUserId: otherUserId,
+      otherDisplayName: otherDisplayName,
+      isOutgoing: true,
+    );
+    // Set BEFORE the mic-permission check below, not after — CallOverlay only
+    // renders once `call`/`phase` are populated (see its own idle/null guard at
+    // the top of build()), so a permission denial hitting the early-return
+    // below used to be entirely invisible: no dialog, no banner, nothing (found
+    // live on iOS — see ios/Podfile's own comment on the permission_handler
+    // setup gap that had been masking this).
+    state = state.copyWith(
+      phase: CallPhase.outgoing,
+      call: call,
+      statusText: 'Calling…',
+      clearMicError: true,
+    );
+
     if (!await _ensureMicPermission()) {
       state = state.copyWith(
         micError: 'Microphone access is needed to make a call.',
       );
+      _teardown('Call ended');
       return;
     }
 
@@ -251,6 +274,7 @@ class CallController extends StateNotifier<CallUiState> {
       state = state.copyWith(
         micError: 'Microphone access is needed to make a call.',
       );
+      _teardown('Call ended');
       return;
     }
     _localStream = stream;
@@ -267,21 +291,6 @@ class CallController extends StateNotifier<CallUiState> {
     // on an assumed default for something that matters" fix web's own
     // call-provider.tsx already applies via `selectAudioOutput(false)`.
     unawaited(Helper.setSpeakerphoneOn(false));
-
-    final callId = _uuid.v4();
-    final call = ActiveCall(
-      callId: callId,
-      conversationId: conversationId,
-      otherUserId: otherUserId,
-      otherDisplayName: otherDisplayName,
-      isOutgoing: true,
-    );
-    state = state.copyWith(
-      phase: CallPhase.outgoing,
-      call: call,
-      statusText: 'Calling…',
-      clearMicError: true,
-    );
 
     final iceServers = await _callsApi.turnCredentials();
     final pc = await _createPeerConnection(iceServers);

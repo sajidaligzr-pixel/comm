@@ -42,5 +42,27 @@ end
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+
+    # permission_handler compiles every permission group's real implementation
+    # out entirely (down to an empty stub class with no methods at all — see
+    # permission_handler_apple's strategies/*.m, each wrapped in
+    # `#if PERMISSION_X ... #else @implementation ... @end #endif`) unless its
+    # macro is defined here — this is required setup on iOS specifically, per
+    # the package's own README, that this Podfile never had. Found live: on the
+    # very first real-device iOS build, Permission.microphone.request() (calls,
+    # voice notes) and Permission.locationWhenInUse.request() (live location
+    # sharing) both silently misbehaved instead of prompting, and the app
+    # crashed outright reaching into the still-declared-but-unimplemented
+    # method on the stub class. Only the three groups this app's Dart code
+    # actually calls (see the exact `Permission.*` call sites) are enabled —
+    # matches this project's "don't over-ask for what isn't used" rule.
+    target.build_configurations.each do |config|
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)']
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] += [
+        'PERMISSION_MICROPHONE=1',   # Permission.microphone — calls, voice notes
+        'PERMISSION_LOCATION=1',     # Permission.locationWhenInUse — live location sharing
+        'PERMISSION_BLUETOOTH=1',    # Permission.bluetoothConnect — call audio routed to a headset
+      ]
+    end
   end
 end

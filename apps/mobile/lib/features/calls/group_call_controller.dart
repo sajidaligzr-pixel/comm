@@ -226,10 +226,25 @@ class GroupCallController extends StateNotifier<GroupCallUiState> {
     ActiveGroupCall call,
     String statusWhileWaiting,
   ) async {
+    // Set BEFORE the mic-permission check below, not after — GroupCallOverlay
+    // only renders once `phase` is non-idle (see its own guard at the top of
+    // build()), so a permission denial hitting an early return used to be
+    // entirely invisible: no dialog, no banner, nothing (same gap as
+    // call_controller.dart's startCall — see that fix's own comment, and
+    // ios/Podfile's comment on the underlying permission_handler setup gap).
+    state = state.copyWith(
+      phase: GroupCallPhase.active,
+      call: call,
+      participants: const [],
+      statusText: statusWhileWaiting,
+      clearMicError: true,
+    );
+
     if (!await _ensureMicPermission()) {
       state = state.copyWith(
         micError: 'Microphone access is needed to join a call.',
       );
+      _teardownAll('Call ended');
       return false;
     }
     late final MediaStream stream;
@@ -239,6 +254,7 @@ class GroupCallController extends StateNotifier<GroupCallUiState> {
       state = state.copyWith(
         micError: 'Microphone access is needed to join a call.',
       );
+      _teardownAll('Call ended');
       return false;
     }
     _localStream = stream;
@@ -248,13 +264,6 @@ class GroupCallController extends StateNotifier<GroupCallUiState> {
     // every real device (found live on 1:1 calling; a group call sets up its own
     // WebRTC audio session the identical way, so it has the identical gap).
     unawaited(Helper.setSpeakerphoneOn(false));
-    state = state.copyWith(
-      phase: GroupCallPhase.active,
-      call: call,
-      participants: const [],
-      statusText: statusWhileWaiting,
-      clearMicError: true,
-    );
     return true;
   }
 
