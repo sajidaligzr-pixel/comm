@@ -84,21 +84,29 @@ Future<void> _uploadVoipToken(ProviderContainer container, String token) async {
   } catch (_) {}
 }
 
+/// Re-reads the plugin's natively-cached VoIP token and uploads it — used by
+/// `actionDidUpdateDevicePushTokenVoip`'s handler above, since 3.x's version of
+/// that event no longer carries the token value inline (see that case's own
+/// comment).
+Future<void> _refreshAndUploadVoipToken(ProviderContainer container) async {
+  final token = await FlutterCallkitIncoming.getDevicePushTokenVoIP();
+  if (token != null) unawaited(_uploadVoipToken(container, token));
+}
+
 /// Registers the Accept/Decline event listener (and, on Android, the extra runtime
 /// permissions `showIncomingCall` needs) — call once from main.dart, alongside
 /// `initPushNotifications`/`initLocalNotifications`. Runs on iOS too now (see this
 /// file's own docstring on what iOS actually needs from here) — only the
 /// Android-specific permission requests below stay platform-gated.
 Future<void> initCallKit(ProviderContainer container) async {
+  // 3.x replaced the old `Event` enum + generic `.event`/`.body` map with a
+  // sealed `CallEvent` class hierarchy — one concrete subtype per event,
+  // matched below with Dart 3 pattern-matching cases instead of a plain enum
+  // switch. Functionally equivalent to the old handling, just typed.
   FlutterCallkitIncoming.onEvent.listen((event) {
     if (event == null) return;
-    final body = event.body as Map<String, dynamic>;
-    final callId = body['id'] as String?;
-    final extra = body['extra'] as Map<dynamic, dynamic>?;
-    final conversationId = extra?['conversationId'] as String?;
-
-    switch (event.event) {
-      case Event.actionCallAccept:
+    switch (event) {
+      case CallEventActionCallAccept():
         // Same entry point the old notification "Accept" action button used —
         // catches CallController up via REST if nothing has told it about this
         // call yet, then answers immediately. Safe to call even if a live WS
@@ -107,9 +115,13 @@ Future<void> initCallKit(ProviderContainer container) async {
           container.read(callControllerProvider.notifier).acceptPendingCall(),
         );
         break;
-      case Event.actionCallDecline:
-        if (callId == null || conversationId == null) break;
-        unawaited(_declineFromEvent(conversationId, callId));
+      case CallEventActionCallDecline(:final callKitParams):
+        final callId = callKitParams.id;
+        final conversationId =
+            callKitParams.extra?['conversationId'] as String?;
+        if (conversationId != null) {
+          unawaited(_declineFromEvent(conversationId, callId));
+        }
         // Belt-and-suspenders: if a live WS call.ring also independently put
         // CallController into its own `incoming` state for this exact call (a
         // race with the push/callkit path, same kind of race `_onRing`'s own
@@ -120,25 +132,27 @@ Future<void> initCallKit(ProviderContainer container) async {
           controller.rejectCall('declined');
         }
         break;
-      case Event.actionDidUpdateDevicePushTokenVoip:
-        // iOS only — AppDelegate.swift forwards PKPushRegistry's token here via
-        // setDevicePushTokenVoIP (fired at launch, and again whenever Apple
-        // rotates it). Android never emits this event at all.
-        final token = body['deviceTokenVoIP'] as String?;
-        if (token != null) unawaited(_uploadVoipToken(container, token));
+      case CallEventActionDidUpdateDevicePushTokenVoip():
+        // iOS only — AppDelegate.swift forwards PKPushRegistry's token here
+        // (fired at launch, and again whenever Apple rotates it). Android
+        // never emits this event at all. Unlike 2.x, the event itself no
+        // longer carries the token value — re-fetch it from the plugin's own
+        // native cache instead (same call initCallKit already makes below for
+        // the cold-start case).
+        unawaited(_refreshAndUploadVoipToken(container));
         break;
-      case Event.actionCallTimeout:
-      case Event.actionCallEnded:
-      case Event.actionCallIncoming:
-      case Event.actionCallStart:
-      case Event.actionCallConnected:
-      case Event.actionCallCallback:
-      case Event.actionCallToggleHold:
-      case Event.actionCallToggleMute:
-      case Event.actionCallToggleDmtf:
-      case Event.actionCallToggleGroup:
-      case Event.actionCallToggleAudioSession:
-      case Event.actionCallCustom:
+      case CallEventActionCallTimeout():
+      case CallEventActionCallEnded():
+      case CallEventActionCallIncoming():
+      case CallEventActionCallStart():
+      case CallEventActionCallConnected():
+      case CallEventActionCallCallback():
+      case CallEventActionCallToggleHold():
+      case CallEventActionCallToggleMute():
+      case CallEventActionCallToggleDmtf():
+      case CallEventActionCallToggleGroup():
+      case CallEventActionCallToggleAudioSession():
+      case CallEventActionCallCustom():
         break;
     }
   });
@@ -151,7 +165,7 @@ Future<void> initCallKit(ProviderContainer container) async {
     // the plugin already cached natively regardless of the event having fired
     // first, same "REST is the durable catch-up, the event is just the fast path"
     // relationship checkPendingCall (call_controller.dart) already has.
-    final existing = await FlutterCallkitIncoming.getDevicePushTokenVoIP() as String?;
+    final existing = await FlutterCallkitIncoming.getDevicePushTokenVoIP();
     if (existing != null) unawaited(_uploadVoipToken(container, existing));
   }
 
@@ -195,8 +209,6 @@ Future<void> showIncomingCall({
       nameCaller: callerName,
       appName: 'Comm',
       type: 0, // audio call — this app has no video calling
-      textAccept: 'Accept',
-      textDecline: 'Decline',
       duration: _ringTimeoutMs,
       extra: {'conversationId': conversationId},
       missedCallNotification: const NotificationParams(
@@ -211,6 +223,11 @@ Future<void> showIncomingCall({
       ),
       android: const AndroidParams(
         isCustomNotification: true,
+        // Moved here from CallKitParams's own top-level fields — 3.x relocated
+        // these two onto AndroidParams (iOS never had a text-accept/decline
+        // concept in the first place, CallKit renders its own localized labels).
+        textAccept: 'Accept',
+        textDecline: 'Decline',
         ringtonePath: 'ringtone', // android/app/src/main/res/raw/ringtone.wav —
         // the same file local_notifications.dart's own (non-looping) call channel
         // sound already uses, kept as one shared asset rather than two.

@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 21,
+  "buildNumber": 23,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-21.apk",
-  "releaseNotes": "Fixed voice messages (and photos sent inline) showing up blank in one-on-one chats — they were being received and decrypted correctly, just not displayed."
+  "apkUrl": "/downloads/comm-23.apk",
+  "releaseNotes": "Calls now ring more reliably when the app is closed or the phone is asleep. Added voice-note playback speed (1.5x/2x), muted chat notifications while that chat is already open, and asked for a battery-optimization exemption so calls keep arriving in the background."
 }

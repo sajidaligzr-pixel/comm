@@ -1,7 +1,7 @@
 name: comm_mobile
 description: "Comm — native Flutter client for the existing Comm backend (apps/web, apps/worker). See apps/mobile/README.md for architecture and how this maps to the TypeScript client it replaces."
 publish_to: 'none'
-version: 1.0.0+21
+version: 1.0.0+23
 
 environment:
   sdk: ^3.10.7
@@ -68,7 +68,12 @@ dependencies:
   # than hand-rolling the ConnectionService/PhoneAccount plumbing directly (a
   # notoriously fragile, poorly-documented native API). Used only for the incoming-
   # call UI/ringing itself; the message notification path is untouched.
-  flutter_callkit_incoming: ^2.5.4
+  # 3.1.5 (was 2.5.4) — carries real Android fixes matching this app's own
+  # observed real-device symptoms: always calling startForeground (prevents the
+  # foreground service silently failing to start), a self-managed Telecom
+  # ConnectionService, and the native OnDecline callback actually firing in a
+  # fully-terminated app — see docs on the ringing-reliability investigation.
+  flutter_callkit_incoming: ^3.1.5
 
   # --- Misc -------------------------------------------------------------------
   # Models (api/dtos.dart) are hand-written, not codegen'd (see that file's own
