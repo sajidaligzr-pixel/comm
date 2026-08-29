@@ -71,7 +71,7 @@ import flutter_callkit_incoming
     let handle = payload.dictionaryPayload["handle"] as? String ?? ""
     let data = flutter_callkit_incoming.Data(id: id, nameCaller: nameCaller, handle: handle, type: 0)
     if let extra = payload.dictionaryPayload["extra"] as? [String: Any] {
-      data.extra = extra
+      data.extra = extra as NSDictionary
     }
     SwiftFlutterCallkitIncomingPlugin.sharedInstance?.showCallkitIncoming(data, fromPushKit: true) {
       completion()
