@@ -41,30 +41,3 @@ export const LinkDeviceCompleteRequest = z.object({
   device: NewDeviceRegistration,
 });
 export type LinkDeviceCompleteRequest = z.infer<typeof LinkDeviceCompleteRequest>;
-
-/**
- * New-device login approval ("send a notification to the other device to approve
- * it first" — docs/07-auth-architecture.md's device-approval section). A `pending`
- * row is what `login()`'s `newDevice` branch creates instead of completing
- * immediately, whenever the account already has another active device to approve
- * against — see `PendingDeviceLogin`'s own schema doc comment for the full flow.
- */
-export const PendingDeviceLoginStatus = z.enum(['pending', 'approved', 'denied', 'completed']);
-export type PendingDeviceLoginStatus = z.infer<typeof PendingDeviceLoginStatus>;
-
-/** Shown to an EXISTING device deciding whether to approve/deny — deliberately
- * carries no key material, just enough to recognize the request (docs/03-api-design.md's
- * "never send more than a view needs" rule). */
-export const PendingDeviceLoginSummary = z.object({
-  id: z.string().uuid(),
-  name: DeviceName,
-  deviceType: DeviceType,
-  createdAt: z.string().datetime(),
-  expiresAt: z.string().datetime(),
-});
-export type PendingDeviceLoginSummary = z.infer<typeof PendingDeviceLoginSummary>;
-
-export const RespondPendingDeviceLoginRequest = z.object({
-  approve: z.boolean(),
-});
-export type RespondPendingDeviceLoginRequest = z.infer<typeof RespondPendingDeviceLoginRequest>;

@@ -147,10 +147,13 @@ async function sweepDisappearingMessages(now: Date): Promise<number> {
     });
 
     for (const message of expired) {
-      // Both updates in one transaction — see server/modules/messages/service.ts's
-      // deleteMessage for why the per-recipient row also needs clearing: a direct
-      // message's actual ciphertext may live there instead of on `Message` itself
-      // (multi-device fan-out).
+      // All three in one transaction — see server/modules/messages/service.ts's
+      // tombstoneMessages for why the per-recipient row AND every participant's
+      // MessageHistoryEntry both need clearing too: a direct message's actual
+      // ciphertext may live on MessageRecipient instead of Message itself
+      // (multi-device fan-out), and leaving MessageHistoryEntry untouched would let
+      // a "deleted" message's content stay fully recoverable via history sync on a
+      // newly-added device.
       await prisma.$transaction([
         prisma.message.update({
           where: { id: message.id },
@@ -160,6 +163,7 @@ async function sweepDisappearingMessages(now: Date): Promise<number> {
           where: { messageId: message.id },
           data: { ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull },
         }),
+        prisma.messageHistoryEntry.deleteMany({ where: { messageId: message.id } }),
       ]);
       for (const device of devices) {
         const event: MessageEvent = {
@@ -252,7 +256,7 @@ async function sweepExpiredMedia(now: Date): Promise<number> {
       await storage.deleteObject(message.attachment.objectKey);
     }
 
-    // Same "both need clearing together" reasoning as sweepDisappearingMessages above.
+    // Same "all three need clearing together" reasoning as sweepDisappearingMessages above.
     await prisma.$transaction([
       prisma.message.update({
         where: { id: message.id },
@@ -262,6 +266,7 @@ async function sweepExpiredMedia(now: Date): Promise<number> {
         where: { messageId: message.id },
         data: { ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull },
       }),
+      prisma.messageHistoryEntry.deleteMany({ where: { messageId: message.id } }),
     ]);
 
     const userIds = userIdsByConversation.get(message.conversationId) ?? [];

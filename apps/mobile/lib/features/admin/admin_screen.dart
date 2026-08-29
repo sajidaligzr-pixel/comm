@@ -176,6 +176,39 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
     }
   }
 
+  /// Confirmed via a dialog, not a bare button — meaningfully more destructive/
+  /// irreversible than suspending (see AdminApi.deleteUser's own docstring).
+  Future<void> _delete(ProvisionedUserSummary user) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Delete @${user.username}?'),
+        content: Text(
+          "This permanently deletes @${user.username}'s account. Every direct conversation "
+          "they're part of is deleted entirely for everyone in it, and their own messages "
+          "inside any group they belong to are removed too. Groups themselves, and other "
+          "members' own messages in them, are left alone. This can't be undone.",
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await ref.read(adminApiProvider).deleteUser(user.id);
+      await _load();
+    } on ApiException catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -304,14 +337,28 @@ class _AdminScreenState extends ConsumerState<AdminScreen> {
 
   Widget _buildUserCard(BuildContext context, ProvisionedUserSummary u) {
     final suspended = u.status == 'suspended';
+    final deleted = u.status == 'deleted';
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
         title: Text('${u.displayName}  ·  @${u.username}'),
         subtitle: Text('${u.status} · created ${DateTime.tryParse(u.createdAt)?.toLocal().toString().split('.').first ?? u.createdAt}'),
-        trailing: suspended
-            ? const Chip(label: Text('suspended', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact)
-            : TextButton(onPressed: () => _suspend(u), child: const Text('Suspend')),
+        trailing: deleted
+            ? const Chip(label: Text('deleted', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact)
+            : Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (suspended)
+                    const Chip(label: Text('suspended', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact)
+                  else
+                    TextButton(onPressed: () => _suspend(u), child: const Text('Suspend')),
+                  TextButton(
+                    onPressed: () => _delete(u),
+                    style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+                    child: const Text('Delete'),
+                  ),
+                ],
+              ),
       ),
     );
   }

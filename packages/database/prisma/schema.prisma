@@ -234,25 +234,12 @@ model Session {
   @@map("sessions")
 }
 
-// New-device login approval ("send a notification to approve a new sign-in before
-// it can complete" — docs/07-auth-architecture.md's device-approval section). Only
-// created when `login()`'s `newDevice` branch runs AND the account already has at
-// least one other active device — the account's very first device (normally only
-// reached via invite redemption, not login) has nothing to approve against, so it
-// still completes immediately, same as before this feature existed.
-//
-// `keyBundlePayload` holds the candidate device's public key bundle exactly as
-// `NewDeviceRegistration.keyBundle` would — PUBLIC key material only, the same
-// sensitivity `registerDevice` already stores permanently once approved, just held
-// here temporarily until then. `status` starts `pending`; an existing device
-// resolves it to `approved`/`denied` (`server/modules/devices/service.ts`'s
-// `respondToPendingDeviceLogin`); the waiting new device's own poll
-// (`completePendingDeviceLogin`) is what atomically claims an `approved` row and
-// flips it to `completed` — a compare-and-swap via `updateMany({where: {status:
-// 'approved'}})`, so two concurrent polls can never both materialize the device
-// twice. A `pending` row past `expiresAt` is treated as expired at read time
-// (never resolves to anything) rather than needing an active sweep — same
-// `expiresAt`-checked-at-read-time pattern `Invite` already uses.
+// INTENTIONALLY UNUSED — same "kept for historical/documentation reasons, not
+// wired into any route" precedent MessageReaction below already established. Was
+// new-device login approval ("send a notification to approve a new sign-in before
+// it can complete" — built, then explicitly asked to be removed again, see
+// docs/07-auth-architecture.md's device-approval section for the full history).
+// Login always completes immediately again regardless of existing-device count.
 model PendingDeviceLogin {
   id               String                   @id @default(uuid()) @db.Uuid
   userId           String                   @map("user_id") @db.Uuid
@@ -604,6 +591,12 @@ enum MessageDeletionReason {
   // sender-or-genuine-recipient authorization carve-out). Distinct from `manual`
   // so the client can show "Opened" rather than a generic "deleted" placeholder.
   viewed
+  // An admin deleted the sender's account (server/modules/admin/service.ts's
+  // `adminDeleteUser`) — every direct conversation that account was part of is
+  // torn down entirely, and its own messages inside any group it belonged to are
+  // tombstoned with this reason, distinct from `manual` so the client can show
+  // "This account was deleted" rather than a generic "deleted" placeholder.
+  account_deleted
 }
 
 enum MessageEnvelopeType {

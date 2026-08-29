@@ -37,14 +37,11 @@ const _androidChannel = AndroidNotificationChannel(
   sound: RawResourceAndroidNotificationSound('message'),
 );
 
-/// A tapped notification's payload, decoded — either a message (has
-/// `conversationId`) or a new-device login approval request (`openDevices`,
-/// docs/07-auth-architecture.md's device-approval section; that notification
-/// carries no conversation to jump to, just "go see the Devices screen").
+/// A tapped notification's payload, decoded — a message notification carries
+/// `conversationId`.
 class NotificationTap {
   final String? conversationId;
-  final bool openDevices;
-  const NotificationTap({this.conversationId, this.openDevices = false});
+  const NotificationTap({this.conversationId});
 }
 
 NotificationTap? _decodeTapPayload(String? raw) {
@@ -52,9 +49,6 @@ NotificationTap? _decodeTapPayload(String? raw) {
   try {
     final decoded = jsonDecode(raw);
     if (decoded is! Map<String, dynamic>) return null;
-    if (decoded['type'] == 'login_pending') {
-      return const NotificationTap(openDevices: true);
-    }
     final conversationId = decoded['conversationId'] as String?;
     if (conversationId == null || conversationId.isEmpty) return null;
     return NotificationTap(conversationId: conversationId);
@@ -137,35 +131,6 @@ Future<void> showNewMessageNotification({
     body,
     const NotificationDetails(android: androidDetails, iOS: iosDetails),
     payload: jsonEncode({'type': 'message', 'conversationId': conversationId}),
-  );
-}
-
-/// New-device login approval (docs/07-auth-architecture.md's device-approval
-/// section) — the one notification that has to reach an EXISTING device even
-/// fully backgrounded/closed, since that's the only way most people will ever
-/// notice a sign-in attempt they didn't just make. Uses the same messages
-/// channel/importance as `showNewMessageNotification` above (still just a plain
-/// tray notification, not a call-style ring) but its own fixed id — unlike a
-/// per-conversation message, there's only ever one meaningful "you have a pending
-/// sign-in request" notification at a time, so a second one replaces the first
-/// rather than stacking.
-Future<void> showLoginPendingNotification({
-  required String title,
-  required String body,
-}) async {
-  const androidDetails = AndroidNotificationDetails(
-    _channelId,
-    _channelName,
-    importance: Importance.high,
-    priority: Priority.high,
-  );
-  const iosDetails = DarwinNotificationDetails();
-  await _plugin.show(
-    0x6c6f676e, // 'logn' — fixed, distinct from any conversationId-derived id
-    title,
-    body,
-    const NotificationDetails(android: androidDetails, iOS: iosDetails),
-    payload: jsonEncode({'type': 'login_pending'}),
   );
 }
 

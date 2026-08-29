@@ -14,14 +14,10 @@ describe('login', () => {
     const { userId, username, password } = await createActiveUser();
     createdUserIds.push(userId);
 
-    const outcome = await login({ username, password, newDevice: fakeDeviceRegistration() }, null, 'vitest');
+    const result = await login({ username, password, newDevice: fakeDeviceRegistration() }, null, 'vitest');
 
-    // A brand-new account's very first device (created via createActiveUser
-    // above, no prior devices) has nothing to approve against, so this still
-    // completes immediately — see login()'s own docstring.
-    if (outcome.status !== 'ok') throw new Error(`expected 'ok', got ${outcome.status}`);
-    expect(outcome.result.userId).toBe(userId);
-    expect(outcome.result.session.accessToken).toBeTruthy();
+    expect(result.userId).toBe(userId);
+    expect(result.session.accessToken).toBeTruthy();
 
     const events = await prisma.securityEvent.findMany({ where: { userId }, orderBy: { createdAt: 'asc' } });
     const types = events.map((e) => e.eventType);
@@ -34,8 +30,7 @@ describe('login', () => {
     createdUserIds.push(userId);
 
     const first = await login({ username, password, newDevice: fakeDeviceRegistration() }, null, 'vitest');
-    if (first.status !== 'ok') throw new Error(`expected 'ok', got ${first.status}`);
-    await login({ username, password, deviceId: first.result.deviceId }, null, 'vitest');
+    await login({ username, password, deviceId: first.deviceId }, null, 'vitest');
 
     const devices = await prisma.device.findMany({ where: { userId } });
     expect(devices).toHaveLength(1);

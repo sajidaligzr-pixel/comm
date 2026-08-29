@@ -37,4 +37,12 @@ class AdminApi {
   Future<void> suspendUser(String userId, String reason) {
     return _client.requestVoid('/api/admin/users/$userId/suspend', body: {'reason': reason});
   }
+
+  /// See adminDeleteUser's own docstring (server/modules/admin/service.ts) for
+  /// exactly what this does beyond the account itself — every direct
+  /// conversation this user was part of is deleted entirely, and their own
+  /// messages inside any group they belonged to are tombstoned.
+  Future<void> deleteUser(String userId) {
+    return _client.requestVoid('/api/admin/users/$userId', method: 'DELETE');
+  }
 }

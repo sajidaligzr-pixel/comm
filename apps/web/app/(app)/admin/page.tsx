@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { getAdminContextOrRedirect } from '@/server/common/page-auth';
 import { listProvisionedUsers } from '@/server/modules/admin/service';
 import { ProvisionUserForm } from '@/components/provision-user-form';
-import { Card } from '@/components/ui/card';
+import { AccountsList } from '@/components/accounts-list';
 
 export default async function AdminPage() {
   await getAdminContextOrRedirect();
@@ -32,19 +32,8 @@ export default async function AdminPage() {
 
         <div>
           <h2 className="text-sm font-semibold text-foreground">All accounts</h2>
-          <div className="mt-2 space-y-2">
-            {users.map((u) => (
-              <Card key={u.id} className="flex items-center justify-between p-3">
-                <div>
-                  <p className="text-sm font-medium text-foreground">
-                    {u.displayName} <span className="text-muted-foreground">@{u.username}</span>
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {u.status} · created {new Date(u.createdAt).toLocaleDateString()}
-                  </p>
-                </div>
-              </Card>
-            ))}
+          <div className="mt-2">
+            <AccountsList initialUsers={users} />
           </div>
         </div>
       </div>

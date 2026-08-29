@@ -24,25 +24,4 @@ class DevicesApi {
       parse: (data) => LinkDeviceStartResponse.fromJson(data as Map<String, dynamic>),
     );
   }
-
-  /// New-device login approval (docs/07-auth-architecture.md's device-approval
-  /// section) — the durable "did I miss the live push" catch-up, same
-  /// REST-is-durable/WS-is-just-the-fast-path relationship group key-shares
-  /// already have.
-  Future<List<PendingDeviceLoginSummary>> listPendingLogins() {
-    return _client.request(
-      '/api/devices/pending',
-      method: 'GET',
-      parse: (data) => (data as List)
-          .map((e) => PendingDeviceLoginSummary.fromJson(e as Map<String, dynamic>))
-          .toList(),
-    );
-  }
-
-  Future<void> respondToPendingLogin(String pendingLoginId, {required bool approve}) {
-    return _client.requestVoid(
-      '/api/devices/pending/$pendingLoginId',
-      body: {'approve': approve},
-    );
-  }
 }

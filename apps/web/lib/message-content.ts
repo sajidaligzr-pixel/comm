@@ -54,6 +54,7 @@ export interface DecodedMessageContent {
  */
 export function deletedPlaceholderText(contentTypeHint: string, deletedReason: MessageDeletionReason | undefined): string {
   if (deletedReason === 'viewed') return 'Opened';
+  if (deletedReason === 'account_deleted') return 'This message is from a deleted account';
   if (deletedReason !== 'media_retention') return 'This message was deleted';
   if (contentTypeHint === 'voice') return 'This voice message has expired';
   if (contentTypeHint === 'image') return 'This photo has expired';

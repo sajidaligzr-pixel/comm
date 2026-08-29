@@ -121,13 +121,6 @@ export function initRealtimeSubscriber(): void {
           // distinguishes "signed out elsewhere" from a generic disconnect using this.
           socket.close(4001, 'device_revoked');
         }
-        return;
-      }
-      if (event.type === 'login_pending') {
-        // Purely a live nudge for an already-connected device — the Devices
-        // screen's own GET /api/devices/pending is the durable source of truth
-        // (DeviceEvent's own doc comment).
-        forwardToDevice(event.targetDeviceId, event);
       }
       return;
     }

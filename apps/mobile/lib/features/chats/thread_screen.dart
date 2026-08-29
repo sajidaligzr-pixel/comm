@@ -2415,6 +2415,7 @@ int? disappearingTimerToMs(String timer) {
 /// adapted to mobile's own content-type vocabulary (see _replyPreviewText's
 /// docstring on why there's no separate 'image' case here).
 String deletedPlaceholderText(String contentTypeHint, String? deletedReason) {
+  if (deletedReason == 'account_deleted') return 'This message is from a deleted account';
   if (deletedReason != 'media_retention') return 'This message was deleted';
   if (contentTypeHint == 'voice') return 'This voice message has expired';
   if (contentTypeHint == 'media') return 'This file has expired';

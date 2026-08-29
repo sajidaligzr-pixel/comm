@@ -1,4 +1,4 @@
-import { prisma, Prisma } from '@comm/database';
+import { prisma, Prisma, type MessageDeletionReason } from '@comm/database';
 import { AppError, type SendMessageRequest, type MessageDto, type StarredMessageDto, type MessageReceiptDto } from '@comm/types';
 import { requireConversationMembership, getAllOtherMembersActiveDeviceIds } from '../conversations/service';
 import { claimPendingUpload } from '../media/service';
@@ -381,18 +381,49 @@ export async function markConversationRead(callerUserId: string, conversationId:
   return true;
 }
 
+/** Prisma's transaction client type, same alias devices/service.ts already uses —
+ * lets this run either inside an outer transaction (adminDeleteUser, apps/worker's
+ * sweeps) or standalone. */
+export type Db = Prisma.TransactionClient | typeof prisma;
+
+/**
+ * The one place a message is ever actually tombstoned — every call site in this
+ * file, apps/worker's disappearing-timer/media-retention sweeps, and
+ * adminDeleteUser all fold into this. Clears ciphertext everywhere it could still
+ * live: `Message` itself, every per-device `MessageRecipient` row (multi-device
+ * fan-out may put a `direct` message's real ciphertext there instead), AND every
+ * account's own `MessageHistoryEntry` copy (multi-device history sync) — this last
+ * one closes a real gap the original tombstone transaction had: nulling
+ * Message/MessageRecipient alone left a "deleted" message's plaintext-equivalent
+ * still fully recoverable by any participant's History Key on a newly-added
+ * device. Bulk (`messageIds`, not one at a time) so a caller tombstoning many
+ * messages at once (adminDeleteUser) does it as one statement per table, not N.
+ */
+export async function tombstoneMessages(db: Db, messageIds: string[], deletionReason: MessageDeletionReason): Promise<void> {
+  if (messageIds.length === 0) return;
+  await db.message.updateMany({
+    where: { id: { in: messageIds } },
+    data: { deletedAt: new Date(), ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason },
+  });
+  await db.messageRecipient.updateMany({
+    where: { messageId: { in: messageIds } },
+    data: { ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull },
+  });
+  await db.messageHistoryEntry.deleteMany({ where: { messageId: { in: messageIds } } });
+}
+
 /**
  * Two distinct authorized callers, not one: the SENDER deleting their own
  * message (the original, only case this ever handled — reason `manual`), or —
  * new, docs/13-roadmap.md's view-once pass — a genuine RECIPIENT tombstoning a
  * `view_once` message the instant they open it (reason `viewed`, so the client
  * shows "Opened" rather than a generic "deleted" placeholder). Both end up
- * calling the exact same tombstone transaction below; only who's allowed to
- * trigger it, and why, differs. A recipient can only ever self-tombstone a
- * `view_once` message specifically — this is NOT a general "any member can
- * delete any message" hole, and idempotent by construction (the transaction
- * below is safe to run twice: a race between the viewer's own multiple devices
- * both opening it just re-nulls already-null columns).
+ * calling `tombstoneMessages` above; only who's allowed to trigger it, and why,
+ * differs. A recipient can only ever self-tombstone a `view_once` message
+ * specifically — this is NOT a general "any member can delete any message"
+ * hole, and idempotent by construction (safe to run twice: a race between the
+ * viewer's own multiple devices both opening it just re-nulls already-null
+ * columns).
  */
 export async function deleteMessage(
   callerUserId: string,
@@ -416,25 +447,7 @@ export async function deleteMessage(
     throw new AppError('NOT_FOUND', 'Message not found.');
   }
 
-  // Tombstone: ciphertext genuinely nulled out, not just flagged
-  // (docs/02-database-schema.md's "On deletion" note) — a later DB compromise can't
-  // retroactively decrypt "deleted" content. `Prisma.JsonNull` (not plain `null`)
-  // is required to actually clear a JSON column rather than leave it untouched —
-  // Prisma treats a bare `null` here as ambiguous. A `direct` message's actual
-  // ciphertext may live on its `MessageRecipient` rows instead of `Message` itself
-  // now (multi-device fan-out, this module's own docstring) — both need clearing in
-  // the same transaction, or a "deleted" message could still have live ciphertext
-  // sitting in a per-recipient row.
-  await prisma.$transaction([
-    prisma.message.update({
-      where: { id: messageId },
-      data: { deletedAt: new Date(), ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull, deletionReason },
-    }),
-    prisma.messageRecipient.updateMany({
-      where: { messageId },
-      data: { ciphertext: null, envelopeHeader: null, x3dhInit: Prisma.JsonNull },
-    }),
-  ]);
+  await tombstoneMessages(prisma, [messageId], deletionReason);
   return { conversationId: message.conversationId, deletionReason };
 }
 

@@ -40,9 +40,8 @@ describe('change password', () => {
     const user = await prisma.user.findUniqueOrThrow({ where: { id: userId } });
     expect(user.mustChangePassword).toBe(false);
 
-    const loginOutcome = await login({ username, password: newPassword, deviceId }, null, 'vitest');
-    if (loginOutcome.status !== 'ok') throw new Error(`expected 'ok', got ${loginOutcome.status}`);
-    expect(loginOutcome.result.mustChangePassword).toBe(false);
+    const loginResult = await login({ username, password: newPassword, deviceId }, null, 'vitest');
+    expect(loginResult.mustChangePassword).toBe(false);
 
     // Old password must no longer work.
     await expect(login({ username, password, deviceId }, null, 'vitest')).rejects.toMatchObject({

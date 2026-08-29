@@ -264,17 +264,17 @@ export async function setGroupMemberRole(
  * (new outbound session, redistributed to only the current member set) is entirely
  * client-driven, triggered by the `group.members-changed` event this publishes.
  */
-export async function removeGroupMember(groupId: string, callerUserId: string, targetUserId: string): Promise<GroupSummary> {
-  await requireGroupAdmin(groupId, callerUserId);
+/**
+ * The actual removal, with no caller/authorization check of its own — shared by
+ * `removeGroupMember` below (a group admin removing someone, gated by
+ * `requireGroupAdmin` before this ever runs) and `adminDeleteUser`
+ * (admin/service.ts — a platform admin deleting an account entirely, which isn't
+ * necessarily a group admin of every group that account happens to belong to; its
+ * authority comes from `requireAdmin` at the platform level instead, a stronger
+ * bar than any single group's own admin role).
+ */
+async function removeGroupMemberInternal(groupId: string, targetUserId: string): Promise<void> {
   const group = await prisma.group.findUniqueOrThrow({ where: { id: groupId }, include: { conversation: true } });
-
-  const membership = await prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId: targetUserId } } });
-  if (!membership || membership.removedAt) {
-    throw new AppError('NOT_FOUND', 'That user is not in the group.');
-  }
-  if (targetUserId === callerUserId) {
-    throw new AppError('VALIDATION_FAILED', 'Use a dedicated "leave group" action instead.');
-  }
 
   const latestSession = await prisma.groupSession.findFirst({ where: { groupId }, orderBy: { epoch: 'desc' } });
   const nextEpoch = (latestSession?.epoch ?? -1) + 1;
@@ -289,8 +289,37 @@ export async function removeGroupMember(groupId: string, callerUserId: string, t
     }
     await tx.groupSession.create({ data: { groupId, epoch: nextEpoch } });
   });
+}
 
+export async function removeGroupMember(groupId: string, callerUserId: string, targetUserId: string): Promise<GroupSummary> {
+  await requireGroupAdmin(groupId, callerUserId);
+
+  const membership = await prisma.groupMember.findUnique({ where: { groupId_userId: { groupId, userId: targetUserId } } });
+  if (!membership || membership.removedAt) {
+    throw new AppError('NOT_FOUND', 'That user is not in the group.');
+  }
+  if (targetUserId === callerUserId) {
+    throw new AppError('VALIDATION_FAILED', 'Use a dedicated "leave group" action instead.');
+  }
+
+  await removeGroupMemberInternal(groupId, targetUserId);
   return toGroupSummary(groupId, callerUserId);
+}
+
+/** Used only by `adminDeleteUser` (admin/service.ts) — removes every active
+ * membership this account has anywhere, skipping the "is caller a group admin of
+ * THIS group" check (see removeGroupMemberInternal's own docstring for why) and
+ * the self-removal guard (irrelevant here — a deleted account is never the
+ * caller). Returns nothing; the account being deleted has no UI left to show a
+ * GroupSummary to. */
+export async function removeUserFromAllGroups(targetUserId: string): Promise<void> {
+  const memberships = await prisma.groupMember.findMany({
+    where: { userId: targetUserId, removedAt: null },
+    select: { groupId: true },
+  });
+  for (const { groupId } of memberships) {
+    await removeGroupMemberInternal(groupId, targetUserId);
+  }
 }
 
 // ── Group avatar ──────────────────────────────────────────────────────────────

@@ -51,20 +51,6 @@ export async function publishDeviceRevoked(deviceId: string): Promise<void> {
   await getRedisClient().publish(DEVICE_EVENTS_CHANNEL, JSON.stringify(event));
 }
 
-/** New-device login approval (docs/07-auth-architecture.md's device-approval
- * section) — fanned out to every one of the account's OTHER active devices; see
- * DeviceEvent's own doc comment for the WS-vs-push relationship. */
-export async function publishPendingDeviceLogin(
-  targetDeviceId: string,
-  pendingLoginId: string,
-  name: string,
-  deviceType: string,
-  requestedAt: string,
-): Promise<void> {
-  const event: DeviceEvent = { type: 'login_pending', targetDeviceId, pendingLoginId, name, deviceType, requestedAt };
-  await getRedisClient().publish(DEVICE_EVENTS_CHANNEL, JSON.stringify(event));
-}
-
 /** Fanned out to every current viewer's active devices — see
  * `locations/service.ts#getLocationViewerDeviceIds` for how that set is resolved. */
 export async function publishLocationUpdate(targetDeviceId: string, location: LiveLocation): Promise<void> {

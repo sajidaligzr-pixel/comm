@@ -1,6 +1,6 @@
 import type { NextRequest } from 'next/server';
 import { RATE_LIMIT_RULES } from '@comm/security';
-import { LoginRequest, type LoginResponse } from '@comm/types';
+import { LoginRequest, type AuthSessionResponse } from '@comm/types';
 import { handleRoute, jsonOk } from '@/server/common/errors';
 import { parseBody } from '@/server/common/validate';
 import { enforceCombinedRateLimit } from '@/server/common/rate-limit';
@@ -23,28 +23,19 @@ export async function POST(req: NextRequest) {
     const ipHash = hashIp(getClientIp(req));
     const userAgent = req.headers.get('user-agent');
 
-    const outcome = await login(body, ipHash, userAgent);
+    const result = await login(body, ipHash, userAgent);
 
-    if (outcome.status === 'pending_approval') {
-      // No cookies set — this device isn't signed in yet. The client polls
-      // GET /api/auth/login/pending/:id (docs/07-auth-architecture.md) until an
-      // existing device approves/denies it.
-      const payload: LoginResponse = { status: 'pending_approval', pendingLoginId: outcome.pendingLoginId, expiresAt: outcome.expiresAt };
-      return jsonOk(payload);
-    }
-
-    const payload: LoginResponse = {
-      status: 'ok',
-      userId: outcome.result.userId,
-      deviceId: outcome.result.deviceId,
-      username: outcome.result.username,
-      displayName: outcome.result.displayName,
-      mustChangePassword: outcome.result.mustChangePassword,
+    const payload: AuthSessionResponse = {
+      userId: result.userId,
+      deviceId: result.deviceId,
+      username: result.username,
+      displayName: result.displayName,
+      mustChangePassword: result.mustChangePassword,
     };
     const res = jsonOk(payload);
 
-    setAccessTokenCookie(res, outcome.result.session.accessToken, outcome.result.session.accessTokenMaxAgeSeconds);
-    setRefreshTokenCookie(res, outcome.result.session.refreshToken, outcome.result.session.refreshTokenMaxAgeSeconds);
+    setAccessTokenCookie(res, result.session.accessToken, result.session.accessTokenMaxAgeSeconds);
+    setRefreshTokenCookie(res, result.session.refreshToken, result.session.refreshTokenMaxAgeSeconds);
     setCsrfCookie(res);
 
     return res;

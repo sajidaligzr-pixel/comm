@@ -26,11 +26,6 @@ class DevicesScreen extends ConsumerStatefulWidget {
 class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   List<DeviceSummary>? _devices;
   String? _error;
-  // New-device login approval (docs/07-auth-architecture.md's device-approval
-  // section) — null while loading, [] once loaded with nothing pending (so the
-  // section render below can tell "still loading" apart from "genuinely empty").
-  List<PendingDeviceLoginSummary>? _pendingLogins;
-  String? _respondingToId;
 
   bool _biometricChecked = false;
   bool _biometricSupported = false;
@@ -42,56 +37,7 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
   void initState() {
     super.initState();
     _load();
-    _loadPendingLogins();
     _loadBiometricState();
-    // New-device login approval (docs/07-auth-architecture.md) — the REST fetch
-    // above is the durable source of truth (covers this screen being opened from
-    // the push notification itself); this is just the live nudge for whenever
-    // this screen already happens to be open when another login attempt starts.
-    ref.read(realtimeClientProvider).on('login_pending', _onLoginPendingEvent);
-  }
-
-  void _onLoginPendingEvent(Map<String, dynamic> _) => _loadPendingLogins();
-
-  @override
-  void dispose() {
-    ref.read(realtimeClientProvider).off('login_pending', _onLoginPendingEvent);
-    super.dispose();
-  }
-
-  Future<void> _loadPendingLogins() async {
-    try {
-      final pending = await ref.read(devicesApiProvider).listPendingLogins();
-      if (mounted) setState(() => _pendingLogins = pending);
-    } on ApiException {
-      // Non-critical view — leave it null (hidden) rather than blocking the rest
-      // of this screen on a failed fetch.
-    }
-  }
-
-  Future<void> _respondToPendingLogin(
-    PendingDeviceLoginSummary req, {
-    required bool approve,
-  }) async {
-    setState(() => _respondingToId = req.id);
-    try {
-      await ref
-          .read(devicesApiProvider)
-          .respondToPendingLogin(req.id, approve: approve);
-      if (mounted) {
-        setState(() {
-          _pendingLogins = _pendingLogins?.where((p) => p.id != req.id).toList();
-        });
-      }
-    } on ApiException catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(e.message)));
-      }
-    } finally {
-      if (mounted) setState(() => _respondingToId = null);
-    }
   }
 
   Future<void> _loadBiometricState() async {
@@ -350,63 +296,6 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
     );
   }
 
-  /// New-device login approval (docs/07-auth-architecture.md's device-approval
-  /// section) — one card per pending request, mirroring the biometric card's
-  /// "renders nothing at all until there's something to show" shape above.
-  Widget? _buildPendingLoginsSection(BuildContext context) {
-    final pending = _pendingLogins;
-    if (pending == null || pending.isEmpty) return null;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final req in pending)
-          Card(
-            margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '${req.name} wants to sign in',
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          "If this wasn't you, deny it.",
-                          style: Theme.of(context).textTheme.bodySmall,
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  if (_respondingToId == req.id)
-                    const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  else ...[
-                    TextButton(
-                      onPressed: () => _respondToPendingLogin(req, approve: false),
-                      child: const Text('Deny'),
-                    ),
-                    FilledButton(
-                      onPressed: () => _respondToPendingLogin(req, approve: true),
-                      child: const Text('Approve'),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
   Widget _buildBody() {
     if (_error != null) return ErrorState(message: _error!, onRetry: _load);
     final devices = _devices;
@@ -414,18 +303,13 @@ class _DevicesScreenState extends ConsumerState<DevicesScreen> {
       return const Center(child: CircularProgressIndicator());
     }
 
-    final pendingLoginsSection = _buildPendingLoginsSection(context);
     final biometricCard = _buildBiometricCard(context);
     final otherDeviceCount = devices.where((d) => !d.isCurrentDevice).length;
 
     return RefreshIndicator(
-      onRefresh: () => Future.wait([_load(), _loadPendingLogins(), _loadBiometricState()]),
+      onRefresh: () => Future.wait([_load(), _loadBiometricState()]),
       child: ListView(
         children: [
-          if (pendingLoginsSection != null) ...[
-            const SizedBox(height: 8),
-            pendingLoginsSection,
-          ],
           if (biometricCard != null) ...[
             biometricCard,
             const SizedBox(height: 8),

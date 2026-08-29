@@ -57,38 +57,13 @@ export const AuthSessionResponse = z.object({
 });
 export type AuthSessionResponse = z.infer<typeof AuthSessionResponse>;
 
-/**
- * `POST /api/auth/login`'s actual response shape (docs/07-auth-architecture.md's
- * device-approval section) — a brand-new device no longer always completes
- * immediately: if the account already has another active device to approve
- * against, login instead returns `pending_approval` with nothing usable yet (no
- * cookies are set for that branch). The client then polls
- * `GET /api/auth/login/pending/:id` (`PendingLoginPollResponse` below), which
- * itself returns `ok` + sets the session cookies the instant it observes the
- * request was approved — completion happens on the WAITING device's own request,
- * never smuggled in from the approving device's response, so Set-Cookie always
- * lands on the same origin/request that will actually use it.
- */
-export const LoginResponse = z.discriminatedUnion('status', [
-  AuthSessionResponse.extend({ status: z.literal('ok') }),
-  z.object({
-    status: z.literal('pending_approval'),
-    pendingLoginId: z.string().uuid(),
-    expiresAt: z.string().datetime(),
-  }),
-]);
+// `POST /api/auth/login`'s response shape — always completes immediately (see
+// docs/07-auth-architecture.md's login flow). A new-device login approval gate
+// was built and then explicitly removed again, requested directly — every
+// brand-new device now registers and signs in the same request, same as
+// invite redemption already does for an account's first device.
+export const LoginResponse = AuthSessionResponse;
 export type LoginResponse = z.infer<typeof LoginResponse>;
-
-export const PendingLoginPollResponse = z.discriminatedUnion('status', [
-  AuthSessionResponse.extend({ status: z.literal('ok') }),
-  z.object({ status: z.literal('pending') }),
-  z.object({ status: z.literal('denied') }),
-  // Also returned once `expiresAt` has passed — no separate `expired` status
-  // needed since the client's next move is identical (start over): re-run
-  // createLocalIdentity/login from scratch, since the pending row was single-use
-  // material for one specific submission.
-]);
-export type PendingLoginPollResponse = z.infer<typeof PendingLoginPollResponse>;
 
 export const ChangePasswordRequest = z.object({
   currentPassword: Password,

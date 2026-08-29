@@ -106,7 +106,7 @@ Differs slightly from this section's original sketch: the request that actually 
 | `/calls/pending` | GET | The durable counterpart to a live `call.ring` WS event — apps/mobile checks this on every WS reconnect, since a device that was closed/backgrounded when a call rang has no way to receive that event a second time. `null` (not 404) when nothing's pending — the normal case. See `server/modules/calls/pending.ts` | **Shipped** |
 
 ### `/admin`, `/audit` — shipped (Phase 2)
-`POST /admin/users` (provision + generate invite), `POST /admin/users/:id/suspend`, `GET /audit/security-events` (self-scoped) — **no route in `/admin` reads message content, by construction there is no service method that could return it.** `GET /admin/reports` waits on the `reports` table (Phase 9).
+`POST /admin/users` (provision + generate invite), `POST /admin/users/:id/suspend`, `DELETE /admin/users/:id` (permanent account deletion, requested directly — see `adminDeleteUser`'s own docstring, `server/modules/admin/service.ts`, for the disclosed scope: every direct conversation the account was part of is deleted entirely, its own messages inside any group it belonged to are tombstoned, the group itself and other members' messages are untouched), `GET /audit/security-events` (self-scoped) — **no route in `/admin` reads message content, by construction there is no service method that could return it.** `GET /admin/reports` waits on the `reports` table (Phase 9).
 
 ### `/privacy` — not yet shipped
 Schema (`user_privacy_settings`) exists and is seeded with defaults on invite redemption ([02-database-schema](02-database-schema.md)); no CRUD route over it yet. Straightforward once scheduled — not a design gap, just not built.

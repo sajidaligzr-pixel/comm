@@ -54,5 +54,10 @@ void main() {
     test('a null reason (an old cached row) falls through to the generic text', () {
       expect(deletedPlaceholderText('voice', null), 'This message was deleted');
     });
+
+    test('account_deleted gets its own distinct text, regardless of content type', () {
+      expect(deletedPlaceholderText('text', 'account_deleted'), 'This message is from a deleted account');
+      expect(deletedPlaceholderText('voice', 'account_deleted'), 'This message is from a deleted account');
+    });
   });
 }

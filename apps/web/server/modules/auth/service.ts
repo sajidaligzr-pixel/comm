@@ -1,7 +1,7 @@
 import { prisma } from '@comm/database';
 import { hashPassword, verifyPassword, needsRehash, hashToken } from '@comm/security';
 import { AppError, type InviteInfoResponse, type LoginRequest, type NewDeviceRegistration } from '@comm/types';
-import { registerDevice, createPendingDeviceLogin } from '../devices/service';
+import { registerDevice } from '../devices/service';
 import { recordSecurityEvent } from '../../common/security-events';
 import { createSession, type IssuedSession } from './session';
 
@@ -113,12 +113,6 @@ export interface LoginResult {
   session: IssuedSession;
 }
 
-/** `login()`'s actual return shape now that a brand-new device doesn't always
- * complete immediately — see `LoginResponse`/`PendingLoginPollResponse` in
- * packages/types/src/auth.ts and `PendingDeviceLogin`'s schema doc comment for the
- * full device-approval flow this is part of. */
-export type LoginOutcome = { status: 'ok'; result: LoginResult } | { status: 'pending_approval'; pendingLoginId: string; expiresAt: string };
-
 /**
  * See docs/07-auth-architecture.md's login flow and brute-force section. Rate
  * limiting happens at the route layer (docs/03-api-design.md); this function focuses
@@ -127,7 +121,7 @@ export type LoginOutcome = { status: 'ok'; result: LoginResult } | { status: 'pe
  * the former case) so a timing side channel doesn't reveal account existence ahead of
  * the rate limiter doing its job either way.
  */
-export async function login(input: LoginRequest, ipHash: string | null, userAgent: string | null): Promise<LoginOutcome> {
+export async function login(input: LoginRequest, ipHash: string | null, userAgent: string | null): Promise<LoginResult> {
   const user = await prisma.user.findUnique({ where: { username: input.username } });
 
   const DUMMY_HASH =
@@ -156,16 +150,6 @@ export async function login(input: LoginRequest, ipHash: string | null, userAgen
     }
     deviceId = device.id;
   } else if (input.newDevice) {
-    // New-device login approval (docs/07-auth-architecture.md's device-approval
-    // section): a brand-new device only ever completes immediately if there's
-    // literally no other active device to approve against — normally unreachable
-    // (the account's first device is created via invite redemption, not login),
-    // kept as a defensive fallback rather than assumed impossible.
-    const existingDeviceCount = await prisma.device.count({ where: { userId: user.id, status: 'active' } });
-    if (existingDeviceCount > 0) {
-      const pending = await createPendingDeviceLogin(user.id, input.newDevice, ipHash, userAgent);
-      return { status: 'pending_approval', pendingLoginId: pending.id, expiresAt: pending.expiresAt };
-    }
     const created = await registerDevice(prisma, user.id, input.newDevice);
     deviceId = created.deviceId;
     isNewDevice = true;
@@ -186,15 +170,12 @@ export async function login(input: LoginRequest, ipHash: string | null, userAgen
   }
 
   return {
-    status: 'ok',
-    result: {
-      userId: user.id,
-      deviceId,
-      username: user.username,
-      displayName: user.displayName,
-      mustChangePassword: user.mustChangePassword,
-      session,
-    },
+    userId: user.id,
+    deviceId,
+    username: user.username,
+    displayName: user.displayName,
+    mustChangePassword: user.mustChangePassword,
+    session,
   };
 }
 
