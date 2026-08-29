@@ -27,6 +27,11 @@ function isIos(): boolean {
   return /iphone|ipad|ipod/i.test(navigator.userAgent);
 }
 
+function isAndroid(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /android/i.test(navigator.userAgent);
+}
+
 function recentlyDismissed(): boolean {
   const raw = localStorage.getItem(DISMISSED_KEY);
   if (!raw) return false;
@@ -40,13 +45,36 @@ function recentlyDismissed(): boolean {
  * platform gets its own instructional variant below). Installing just gets the app
  * its own window/home-screen icon; it does NOT mean offline support exists yet
  * (docs/13-roadmap.md's Phase 8) — the copy here doesn't claim otherwise.
+ *
+ * Android is deliberately routed to a different outcome entirely: a real native
+ * app exists (apps/mobile) with things the PWA can't do (killed-app push via FCM,
+ * background location, CallKit-style ringing) — so an Android visitor should end up
+ * with that APK, not this site's PWA shell. `beforeinstallprompt` is never even
+ * listened for there; `/app-version.json` (the same file apps/mobile's own in-app
+ * updater polls) is fetched to point "Download" at whatever the current release is,
+ * so this component never needs editing when a new build ships.
  */
 export function InstallPrompt(): React.JSX.Element | null {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [showIosHint, setShowIosHint] = useState(false);
+  const [apkUrl, setApkUrl] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
+    if (isStandalone() || recentlyDismissed()) return;
+
+    if (isAndroid()) {
+      fetch('/app-version.json')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data: { apkUrl?: string } | null) => {
+          if (data?.apkUrl) setApkUrl(data.apkUrl);
+        })
+        .catch(() => {
+          // No network, or the file's missing/malformed — just don't show the banner.
+        });
+      return;
+    }
+
     if ('serviceWorker' in navigator) {
       // Installability (and therefore `beforeinstallprompt` firing at all, on
       // Chromium) requires an active service worker — see public/sw.js's own note
@@ -56,8 +84,6 @@ export function InstallPrompt(): React.JSX.Element | null {
         // prompt — never worth surfacing as a user-facing error.
       });
     }
-
-    if (isStandalone() || recentlyDismissed()) return;
 
     function onBeforeInstallPrompt(e: Event) {
       e.preventDefault();
@@ -84,18 +110,36 @@ export function InstallPrompt(): React.JSX.Element | null {
     setDeferredPrompt(null);
   }
 
-  if (dismissed || (!deferredPrompt && !showIosHint)) return null;
+  if (dismissed || (!deferredPrompt && !showIosHint && !apkUrl)) return null;
 
   return (
     <div
       role="dialog"
-      aria-label="Install Comm"
+      aria-label={apkUrl ? 'Get the Comm app' : 'Install Comm'}
       className="fixed inset-x-3 bottom-3 z-50 mx-auto flex max-w-sm items-start gap-3 rounded-2xl border border-border bg-background p-3 shadow-lg sm:inset-x-auto sm:right-4 sm:bottom-4"
     >
       <Logo wordmark={false} className="h-9 w-9 flex-shrink-0" />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-foreground">Install Comm</p>
-        {deferredPrompt ? (
+        <p className="text-sm font-medium text-foreground">{apkUrl ? 'Get the Comm app' : 'Install Comm'}</p>
+        {apkUrl ? (
+          <>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              Download the Android app for background notifications and calls.
+            </p>
+            <div className="mt-2 flex gap-2">
+              <a
+                href={apkUrl}
+                download
+                className="inline-flex h-8 items-center justify-center rounded-xl bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:opacity-90"
+              >
+                Download
+              </a>
+              <Button variant="ghost" onClick={dismiss} className="h-8 px-3 text-xs">
+                Not now
+              </Button>
+            </div>
+          </>
+        ) : deferredPrompt ? (
           <>
             <p className="mt-0.5 text-xs text-muted-foreground">Add it to your home screen for quick, full-screen access.</p>
             <div className="mt-2 flex gap-2">
