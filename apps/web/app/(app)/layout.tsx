@@ -12,6 +12,7 @@ import { GroupCallProvider } from '@/components/call/group-call-provider';
 import { GroupSessionProvider } from '@/components/group/group-session-provider';
 import { NotificationPrompt } from '@/components/notification-prompt';
 import { LocationPrompt } from '@/components/location-prompt';
+import { PendingLoginBanner } from '@/components/pending-login-banner';
 import { UnlockGate } from '@/components/unlock-gate';
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
@@ -55,6 +56,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                   <Link href="/chats" className="hover:text-foreground">
                     Chats
                   </Link>
+                  <Link href="/devices" className="hover:text-foreground">
+                    Devices
+                  </Link>
                   {admin && (
                     <Link href="/admin" className="hover:text-foreground">
                       Admin
@@ -71,6 +75,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                 {/* Icon-only nav on narrow screens, where the wordmark + text links above
                     would crowd the header — same destinations, just compact. */}
                 <nav className="flex items-center gap-1 sm:hidden">
+                  <Link
+                    href="/devices"
+                    className="flex h-9 items-center rounded-lg px-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    Devices
+                  </Link>
                   {admin && (
                     <Link
                       href="/admin"
@@ -91,6 +101,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
                 <SignOutButton />
               </div>
             </header>
+            <PendingLoginBanner />
             <main className="flex min-h-0 flex-1 flex-col">
               <UnlockGate>{children}</UnlockGate>
             </main>
