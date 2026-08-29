@@ -30,6 +30,35 @@ else
   echo "==> Updated $(git rev-parse --short "$before") -> $(git rev-parse --short "$after")"
 fi
 
+echo "==> Verifying the advertised Android build is actually servable"
+# Found live (2026-08-29): app-version.json got committed/deployed pointing at an
+# APK that hadn't been scp'd to public/downloads/ yet, so an already-installed app
+# saw "update available," tried to download it, got a 404, and showed the user a
+# generic "no internet connection"-looking failure — for a MANDATORY update, which
+# meant the app was fully blocked until the file actually showed up. That was a
+# manual-release ordering mistake, not something this script could have caused on
+# its own, but this check makes the same mistake impossible to ship regardless of
+# what order the two steps (upload APK, deploy the version bump) happen in: a
+# commit that advertises a build with no matching file on disk now fails the
+# deploy outright, before PM2 ever reloads onto it, rather than going live broken.
+if [ -f apps/web/public/app-version.json ]; then
+  apk_path=$(node -e "
+    const info = require('./apps/web/public/app-version.json');
+    const apkUrl = info.apkUrl || '';
+    // A full external URL (http...) isn't something this script can check locally
+    // — only the repo-relative '/downloads/...' convention every release so far
+    // has used is verifiable here.
+    console.log(apkUrl.startsWith('/') ? apkUrl : '');
+  ")
+  if [ -n "$apk_path" ] && [ ! -f "apps/web/public${apk_path}" ]; then
+    echo "==> ABORT: app-version.json advertises '${apk_path}' but that file doesn't"
+    echo "    exist at apps/web/public${apk_path}. Upload the APK to that path first,"
+    echo "    THEN deploy the commit that bumps app-version.json — never the other"
+    echo "    way around. Refusing to deploy a version bump with nothing behind it."
+    exit 1
+  fi
+fi
+
 echo "==> Installing dependencies"
 # Deliberately plain `npm ci`, no NODE_ENV=production set for this step. tsx, turbo,
 # and typescript are all devDependencies — apps/web and apps/worker's own "start"
