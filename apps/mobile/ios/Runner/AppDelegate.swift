@@ -102,6 +102,15 @@ import flutter_callkit_incoming
     // (call_controller.dart) is what actually resolves this call server-side.
   }
 
+  // New required protocol member as of flutter_callkit_incoming 3.x (previously
+  // 2.5.8 had no such requirement) — CXProviderDelegate's own reset callback,
+  // fired if the system invalidates the whole CXProvider (e.g. Springboard
+  // restarting CallKit). No native action to fulfill here either, same reasoning
+  // as onTimeOut above: there's nothing call-specific to acknowledge, and
+  // CallController's own state (backed by the WS/push signaling, not this
+  // provider) is what actually tracks a call's real lifecycle.
+  func providerDidReset() {}
+
   // This app doesn't opt into flutter_webrtc's manual-audio mode (no
   // RTCAudioSession.useManualAudio call anywhere in call_controller.dart) — it
   // lets CallKit manage the shared AVAudioSession and WebRTC's own audio session

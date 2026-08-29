@@ -226,7 +226,7 @@ SPEC CHECKSUMS:
   FirebaseInstallations: bd8e80f51d4c8bdc6c872011dede0b800c5b49ea
   FirebaseMessaging: 313d69fe6529c8846813d1660b65d7d38bc16954
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
-  flutter_callkit_incoming: cb8138af67cda6dd981f7101a5d709003af21502
+  flutter_callkit_incoming: a143995975818a3717524decd3566d5ca7a8c608
   flutter_local_notifications: 395056b3175ba4f08480a7c5de30cd36d69827e4
   flutter_secure_storage: 1ed9476fba7e7a782b22888f956cce43e2c62f13
   flutter_webrtc: fd0d3bdef8766a0736dbbe2e5b7e85f1f3c52117
