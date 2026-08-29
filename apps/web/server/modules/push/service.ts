@@ -1,6 +1,6 @@
 import { prisma, PushProvider } from '@comm/database';
 import { encryptAtRest } from '@comm/security';
-import type { AnyPushSubscriptionRequest } from '@comm/types';
+import type { AnyPushSubscriptionRequest, VoipPushTokenRequest } from '@comm/types';
 
 /**
  * Push subscription storage (docs/13-roadmap.md's push notification pass) — the
@@ -45,4 +45,26 @@ export async function deletePushSubscription(deviceId: string): Promise<void> {
 export async function hasPushSubscription(deviceId: string): Promise<boolean> {
   const row = await prisma.pushSubscription.findUnique({ where: { deviceId }, select: { deviceId: true } });
   return !!row;
+}
+
+/**
+ * Apple PushKit VoIP token storage — the iOS closed-app-ringing pass
+ * (docs/13-roadmap.md, docs/07-auth-architecture.md's calling section). A separate
+ * table/function from savePushSubscription above, not a shared shape — see
+ * VoipPushToken's own schema doc comment for why. Reuses the same encryption key as
+ * regular push subscriptions: both exist purely to protect a third-party push
+ * token at rest, no reason to provision/rotate a second secret for the same job.
+ */
+export async function saveVoipPushToken(deviceId: string, body: VoipPushTokenRequest): Promise<void> {
+  const plaintext = Buffer.from(body.token, 'utf8');
+  const ciphertext = encryptAtRest(encKey(), plaintext);
+  await prisma.voipPushToken.upsert({
+    where: { deviceId },
+    create: { deviceId, tokenCiphertext: ciphertext },
+    update: { tokenCiphertext: ciphertext },
+  });
+}
+
+export async function deleteVoipPushToken(deviceId: string): Promise<void> {
+  await prisma.voipPushToken.deleteMany({ where: { deviceId } });
 }

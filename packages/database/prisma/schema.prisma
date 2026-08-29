@@ -141,6 +141,7 @@ model Device {
   sentMessages           Message[]
   messageRecipient       MessageRecipient[]
   pushSubscription       PushSubscription?
+  voipPushToken          VoipPushToken?
   groupKeySharesSent     GroupKeyShare[]    @relation("GroupKeyShareFrom")
   groupKeySharesReceived GroupKeyShare[]    @relation("GroupKeyShareTo")
   reportedLocation       UserLocation?
@@ -454,6 +455,26 @@ model PushSubscription {
 enum PushProvider {
   web_push
   fcm
+}
+
+// A separate table, not a third PushProvider value on PushSubscription above —
+// iOS needs BOTH a regular FCM token (message/login-pending pushes) AND this VoIP
+// token (calls only) live on the same device at once, which PushSubscription's
+// one-row-per-deviceId shape can't represent. VoIP pushes are Apple's own
+// PushKit/CallKit mechanism (docs/13-roadmap.md's iOS closed-app-ringing pass) —
+// the only delivery path that can reliably wake a fully-closed iOS app to ring an
+// incoming call the way Android's FCM data push already does; a regular
+// remote-notification can't. Android has no equivalent row here — it never needs
+// one, FCM already covers its calls too.
+model VoipPushToken {
+  deviceId        String   @id @map("device_id") @db.Uuid
+  tokenCiphertext Bytes    @map("token_ciphertext")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("voip_push_tokens")
 }
 
 // ── Conversations & messages (direct: Phase 3; group: docs/13-roadmap.md's group

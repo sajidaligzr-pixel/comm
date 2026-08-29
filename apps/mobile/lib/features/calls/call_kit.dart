@@ -9,11 +9,21 @@
 /// this app hand-rolling the notoriously fragile PhoneAccount/ConnectionService
 /// plumbing directly — see pubspec.yaml's own comment on why.
 ///
-/// iOS is deliberately untouched here (guarded out below): CallKit needs PushKit
-/// registration (AppDelegate.swift, entitlements) this app doesn't have yet, and
-/// iOS work is explicitly paused for now (see push_notifications.dart's own
-/// iOS-scope notes) — calling into flutter_callkit_incoming there without that setup
-/// would be worse than doing nothing.
+/// iOS closed-app ringing (docs/13-roadmap.md's iOS closed-app-ringing pass) works
+/// through a genuinely different mechanism from Android's, and most of it never
+/// touches this file at all: an incoming call arrives as an Apple PushKit VoIP
+/// push, handled entirely natively in ios/Runner/AppDelegate.swift
+/// (`didReceiveIncomingPushWith`), which reports straight to CallKit — Flutter
+/// isn't even running yet at that point, so there's no Dart code to call into. What
+/// DOES belong here for iOS: the VoIP device-token bookkeeping below
+/// (`_uploadVoipToken`/the `actionDidUpdateDevicePushTokenVoip` case), and
+/// `initCallKit`'s Accept/Decline event listener, which fires once Flutter is
+/// running again — CallKit answering a call always brings this app to the
+/// foreground per Apple's own design, so that's guaranteed by the time the user
+/// actually taps Accept/Decline on the native UI. `showIncomingCall` stays
+/// Android-only below: iOS never receives the FCM `type: 'call'` push
+/// `showIncomingCall` reacts to once its VoIP token is registered (see
+/// apps/worker's `handleCallRing`), so there's no scenario where iOS needs it.
 ///
 /// Scope, stated plainly, same spirit as push_notifications.dart's own: this covers
 /// the call notification/ringing UI a push (or a cold/background app) shows. The
@@ -31,6 +41,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
 import '../../api/calls_api.dart';
+import '../../app/providers.dart' show pushApiProvider;
 import 'call_controller.dart' show callControllerProvider;
 
 /// Matches `CallController._ringTimeout` (call_controller.dart) — after this long
@@ -59,13 +70,26 @@ Future<void> _declineFromEvent(String conversationId, String callId) async {
   }
 }
 
-/// Registers the Accept/Decline event listener and requests the Android
-/// permissions `showIncomingCall` needs — call once from main.dart, alongside
-/// `initPushNotifications`/`initLocalNotifications`. No-ops entirely on iOS/other
-/// platforms (see this file's own docstring).
-Future<void> initCallKit(ProviderContainer container) async {
-  if (!Platform.isAndroid) return;
+/// Uploads a freshly-issued/rotated VoIP device token to this app's own server
+/// (POST /api/push/voip-token, apps/worker's handleCallRing is what actually sends
+/// through it) — mirrors push_notifications.dart's own FCM-token upload, just a
+/// separate route/table (see VoipPushToken's own schema doc comment for why).
+/// Best-effort: a transient failure here just means this device stays on the FCM
+/// call-push fallback (handleCallRing's own docstring) until the next token event
+/// or app launch retries it, not a broken call path.
+Future<void> _uploadVoipToken(ProviderContainer container, String token) async {
+  if (token.isEmpty) return; // didInvalidatePushTokenFor's empty-string case — nothing to upload
+  try {
+    await container.read(pushApiProvider).subscribeVoip(token);
+  } catch (_) {}
+}
 
+/// Registers the Accept/Decline event listener (and, on Android, the extra runtime
+/// permissions `showIncomingCall` needs) — call once from main.dart, alongside
+/// `initPushNotifications`/`initLocalNotifications`. Runs on iOS too now (see this
+/// file's own docstring on what iOS actually needs from here) — only the
+/// Android-specific permission requests below stay platform-gated.
+Future<void> initCallKit(ProviderContainer container) async {
   FlutterCallkitIncoming.onEvent.listen((event) {
     if (event == null) return;
     final body = event.body as Map<String, dynamic>;
@@ -96,6 +120,13 @@ Future<void> initCallKit(ProviderContainer container) async {
           controller.rejectCall('declined');
         }
         break;
+      case Event.actionDidUpdateDevicePushTokenVoip:
+        // iOS only — AppDelegate.swift forwards PKPushRegistry's token here via
+        // setDevicePushTokenVoIP (fired at launch, and again whenever Apple
+        // rotates it). Android never emits this event at all.
+        final token = body['deviceTokenVoIP'] as String?;
+        if (token != null) unawaited(_uploadVoipToken(container, token));
+        break;
       case Event.actionCallTimeout:
       case Event.actionCallEnded:
       case Event.actionCallIncoming:
@@ -107,17 +138,32 @@ Future<void> initCallKit(ProviderContainer container) async {
       case Event.actionCallToggleDmtf:
       case Event.actionCallToggleGroup:
       case Event.actionCallToggleAudioSession:
-      case Event.actionDidUpdateDevicePushTokenVoip:
       case Event.actionCallCustom:
         break;
     }
   });
 
+  if (Platform.isIOS) {
+    // Catch-up for the real race on cold start: PKPushRegistry registration (and
+    // its didUpdate credentials callback) happens in AppDelegate's
+    // didFinishLaunchingWithOptions, which can fire before Flutter's own Dart-side
+    // listener above ever subscribes — getDevicePushTokenVoIP() returns whatever
+    // the plugin already cached natively regardless of the event having fired
+    // first, same "REST is the durable catch-up, the event is just the fast path"
+    // relationship checkPendingCall (call_controller.dart) already has.
+    final existing = await FlutterCallkitIncoming.getDevicePushTokenVoIP() as String?;
+    if (existing != null) unawaited(_uploadVoipToken(container, existing));
+  }
+
+  if (!Platform.isAndroid) return;
+
   // Android 13+/14+ runtime permissions this UI needs — same two-step shape as
   // local_notifications.dart's own requestNotificationsPermission/
   // requestFullScreenIntentPermission, just through this plugin's own channel
   // (its internal permission bookkeeping is separate from
-  // flutter_local_notifications', so both plugins request independently).
+  // flutter_local_notifications', so both plugins request independently). iOS has
+  // no equivalent runtime-permission step: PushKit/CallKit registration
+  // (AppDelegate.swift) is all it needs.
   await FlutterCallkitIncoming.requestNotificationPermission({
     'title': 'Notification permission',
     'rationaleMessagePermission':
@@ -182,9 +228,12 @@ Future<void> showIncomingCall({
 /// Called once a call is resolved through any path (answered, declined, ended,
 /// timed out) — same "one choke point clears it regardless of how the call ended"
 /// reasoning `CallController._teardown`'s own docstring already states for the
-/// local ringtone/tray notification it also clears. No-ops on iOS.
+/// local ringtone/tray notification it also clears. Runs on iOS too now: if this
+/// particular call arrived via a VoIP push, there's a real native CallKit session
+/// to end; if it didn't (live in-app WS call, no CallKit session ever shown), this
+/// is a harmless no-op — the try/catch below already treats a failure here as
+/// best-effort regardless of why it failed.
 Future<void> endCallKit(String callId) async {
-  if (!Platform.isAndroid) return;
   try {
     await FlutterCallkitIncoming.endCall(callId);
   } catch (_) {
@@ -197,9 +246,9 @@ Future<void> endCallKit(String callId) async {
 /// Purely cosmetic: updates the native call UI/history entry to reflect that
 /// WebRTC actually connected, per flutter_callkit_incoming's own README ("call this
 /// when WebRTC/P2P is established"). Safe to skip on failure — nothing in this
-/// app's own call state depends on it. No-ops on iOS.
+/// app's own call state depends on it. Same "harmless no-op if there's no matching
+/// native session" reasoning as endCallKit above now that this runs on iOS too.
 Future<void> setCallKitConnected(String callId) async {
-  if (!Platform.isAndroid) return;
   try {
     await FlutterCallkitIncoming.setCallConnected(callId);
   } catch (_) {}

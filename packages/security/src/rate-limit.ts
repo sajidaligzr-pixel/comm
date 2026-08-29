@@ -120,6 +120,7 @@ export const RATE_LIMIT_RULES = {
   callSignal: { namespace: 'calls:signal', windowSeconds: 60, max: 120 } satisfies RateLimitRule,
   callTurnCredentials: { namespace: 'calls:turn-credentials', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
   pushSubscribe: { namespace: 'push:subscribe', windowSeconds: 60, max: 10 } satisfies RateLimitRule,
+  voipPushTokenSubscribe: { namespace: 'push:voip-token', windowSeconds: 60, max: 10 } satisfies RateLimitRule,
   // Sized-tier per docs/03-api-design.md's Uploads route class — a legitimate client
   // sends a handful of files a minute at most; this bounds storage-churn/abuse, not
   // normal use.

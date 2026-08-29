@@ -40,3 +40,18 @@ export type FcmPushSubscriptionRequest = z.infer<typeof FcmPushSubscriptionReque
  * `provider`-less legacy web_push body above still parses). */
 export const AnyPushSubscriptionRequest = z.union([FcmPushSubscriptionRequest, WebPushSubscriptionRequest]);
 export type AnyPushSubscriptionRequest = z.infer<typeof AnyPushSubscriptionRequest>;
+
+/**
+ * Apple PushKit's VoIP device token (hex string, from `PKPushRegistry`'s
+ * `didUpdate credentials` delegate callback — apps/mobile's ios/Runner/AppDelegate.swift)
+ * — a separate table from PushSubscription above, not a third provider value on it,
+ * because an iOS device needs BOTH an FCM token (message/login-pending pushes) and
+ * this VoIP token (calls only) live at once; see VoipPushToken's own schema doc
+ * comment. No `provider` field needed the way FCM/web_push have — VoIP push only
+ * has the one real-world provider (Apple's own PushKit/APNs), there's no second
+ * shape to distinguish from.
+ */
+export const VoipPushTokenRequest = z.object({
+  token: z.string().min(1).max(256),
+});
+export type VoipPushTokenRequest = z.infer<typeof VoipPushTokenRequest>;

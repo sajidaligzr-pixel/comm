@@ -91,11 +91,16 @@
 	     not harmful to have present ahead of them.
 	     `location` is location_service.dart's own background mode (features/location/)
 	     — lets the app keep receiving location updates while backgrounded, subject to
-	     iOS's own throttling of exactly how often (see that file's docstring). -->
+	     iOS's own throttling of exactly how often (see that file's docstring).
+	     `voip` is PushKit's own required background mode (AppDelegate.swift,
+	     call_kit.dart) — without it, a VoIP push is delivered to a suspended/killed
+	     app but the OS never actually wakes it to run didReceiveIncomingPushWith,
+	     silently defeating the entire feature. -->
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
 		<string>location</string>
+		<string>voip</string>
 	</array>
 	<!-- Export compliance — every encrypted app hits App Store Connect's "Missing
 	     Compliance" step on its first upload without this key (found live,

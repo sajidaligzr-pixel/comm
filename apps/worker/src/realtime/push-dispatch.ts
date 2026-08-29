@@ -21,6 +21,7 @@
  * can be unconfigured independently — a deployment with only VAPID keys set still
  * pushes to browsers, one with only the FCM credential still pushes to phones.
  */
+import http2 from 'node:http2';
 import webpush from 'web-push';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
@@ -152,11 +153,142 @@ async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): 
   });
 }
 
+/**
+ * Apple PushKit VoIP push (docs/13-roadmap.md's iOS closed-app-ringing pass,
+ * docs/07-auth-architecture.md's calling section) — the ONLY delivery path that
+ * reliably wakes a fully-closed iOS app to ring an incoming call the way Android's
+ * FCM data push already does; a regular remote-notification can't. Firebase/FCM has
+ * no `apns-push-type: voip` option, so this bypasses it entirely and talks straight
+ * to Apple's APNs HTTP/2 API, authenticated via the VoIP Services Certificate
+ * (docs on obtaining one: apps/mobile's ios/Runner/AppDelegate.swift docstring) —
+ * certificate-based mTLS, not the JWT/token auth the regular APNs Auth Key uses,
+ * matching flutter_callkit_incoming's own documented setup for this plugin.
+ */
+let apnsVoipCert: string | null = null;
+
+/** `APNS_VOIP_PEM` is the full contents of the `.pem` produced by
+ * `openssl pkcs12 -in VoIP_Services_Certificate.p12 -out VOIP.pem -nodes -clcerts`
+ * (certificate + private key concatenated in one file, no passphrase after
+ * `-nodes`) as one env var — same "everything through env vars, nothing read from a
+ * mounted file" convention `FCM_SERVICE_ACCOUNT_JSON`/VAPID keys above already use.
+ * Node's TLS layer reads whichever PEM block type it needs out of a combined
+ * string, so the same value works for both the `cert` and `key` connect options
+ * below. */
+function configureApnsVoip(): boolean {
+  const pem = process.env.APNS_VOIP_PEM;
+  if (!pem) return false;
+  apnsVoipCert = pem;
+  return true;
+}
+
+/** Distinguishes "this token is dead, stop trying it" from every other failure —
+ * same job `isGoneError` does for FCM/web-push, just against APNs' own status
+ * codes/reasons (410 Unregistered is the expected "uninstalled/token rotated"
+ * case; 400 BadDeviceToken covers a malformed/stale one slipping through). */
+function isApnsGoneStatus(status: number | undefined, reason: string): boolean {
+  return status === 410 || (status === 400 && reason === 'BadDeviceToken');
+}
+
+async function sendApnsVoip(token: string, payload: Record<string, unknown>): Promise<void> {
+  if (!apnsVoipCert) throw new Error('APNs VoIP is not configured');
+  // Bundle ID matches apps/mobile/ios/Runner.xcodeproj's PRODUCT_BUNDLE_IDENTIFIER —
+  // the VoIP topic is always that bundle ID with a literal `.voip` suffix, Apple's
+  // own fixed convention, not a separately-configurable value.
+  const topic = 'com.comm.commMobile.voip';
+
+  await new Promise<void>((resolve, reject) => {
+    // Always the production APNs host: apps/mobile's entitlements comment notes
+    // Xcode swaps aps-environment to "production" automatically for an
+    // Archive/TestFlight/App-Store build (which is the only kind this app ships),
+    // and the sandbox host only accepts tokens from a development-signed build.
+    const client = http2.connect('https://api.push.apple.com', { cert: apnsVoipCert!, key: apnsVoipCert! });
+    client.on('error', reject);
+
+    const req = client.request({
+      ':method': 'POST',
+      ':path': `/3/device/${token}`,
+      'apns-topic': topic,
+      'apns-push-type': 'voip',
+      'apns-priority': '10',
+      'content-type': 'application/json',
+    });
+
+    let status: number | undefined;
+    let body = '';
+    req.on('response', (headers) => {
+      status = headers[':status'] as number | undefined;
+    });
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => {
+      body += chunk;
+    });
+    req.on('end', () => {
+      client.close();
+      if (status === 200) {
+        resolve();
+        return;
+      }
+      let reason = '';
+      try {
+        reason = (JSON.parse(body) as { reason?: string }).reason ?? '';
+      } catch {
+        // Non-JSON/empty body — reason stays '', isApnsGoneStatus still works off status alone.
+      }
+      if (isApnsGoneStatus(status, reason)) {
+        reject(Object.assign(new Error(`APNs VoIP push rejected: ${status} ${reason}`), { apnsGone: true }));
+        return;
+      }
+      reject(new Error(`APNs VoIP push failed: ${status} ${reason || body}`));
+    });
+    req.on('error', (err) => {
+      client.close();
+      reject(err);
+    });
+    req.end(JSON.stringify(payload));
+  });
+}
+
+/** Same "this app's own encryption key, not the raw token" convention as
+ * `decodeSubscription` above — the VoIP token is stored as plain UTF-8 bytes, not
+ * JSON (see `saveVoipPushToken`, apps/web/server/modules/push/service.ts), since
+ * there's only ever the one shape to store, unlike FCM/web_push's union. */
+function decryptVoipToken(ciphertext: Buffer): string {
+  return decryptAtRest(pushEncKey(), ciphertext).toString('utf8');
+}
+
 /** No web_push equivalent — browsers ringing from a fully-closed tab was never in
- * scope (docs/13-roadmap.md), only apps/mobile asked for this. `messagePayload` is
- * left unset in the `dispatchTo` call below on purpose: a `web_push`-provider
- * subscription simply gets nothing for a call event, same as it always has. */
+ * scope (docs/13-roadmap.md), only apps/mobile asked for this. An iOS device with a
+ * registered VoIP token (see VoipPushToken's own schema doc comment) gets ONLY the
+ * VoIP push below, never also the FCM one — a regular remote-notification alongside
+ * it would be redundant at best (this app has no video calling) and unreliable at
+ * worst (Apple throttles/delays plain background pushes in a way that defeats the
+ * whole point of ringing promptly). Android (no VoipPushToken row ever exists for
+ * it) and an iOS device that hasn't registered one yet both fall through to the
+ * existing FCM path unchanged. */
 async function handleCallRing(event: Extract<CallEvent, { type: 'call.ring' }>): Promise<void> {
+  if (apnsVoipConfigured) {
+    const voipRow = await prisma.voipPushToken.findUnique({ where: { deviceId: event.targetDeviceId } });
+    if (voipRow) {
+      const token = decryptVoipToken(voipRow.tokenCiphertext);
+      try {
+        await sendApnsVoip(token, {
+          id: event.callId,
+          nameCaller: event.fromDisplayName,
+          handle: '',
+          isVideo: false,
+          extra: { conversationId: event.conversationId },
+        });
+      } catch (err) {
+        if ((err as { apnsGone?: boolean }).apnsGone) {
+          await prisma.voipPushToken.deleteMany({ where: { deviceId: event.targetDeviceId } });
+        } else {
+          console.error('[worker] APNs VoIP push failed', err);
+        }
+      }
+      return;
+    }
+  }
+
   await dispatchTo(event.targetDeviceId, {
     fcmData: {
       type: 'call',
@@ -184,6 +316,7 @@ async function handleLoginPending(event: Extract<DeviceEvent, { type: 'login_pen
 
 let vapidConfigured = false;
 let fcmConfigured = false;
+let apnsVoipConfigured = false;
 
 function configureVapid(): boolean {
   const publicKey = process.env.VAPID_PUBLIC_KEY;
@@ -220,26 +353,32 @@ function configureFcm(): boolean {
 export function startPushDispatcher(): void {
   vapidConfigured = configureVapid();
   fcmConfigured = configureFcm();
+  apnsVoipConfigured = configureApnsVoip();
   if (!vapidConfigured) {
     console.log('[worker] VAPID keys not configured — web push dispatch disabled (see .env.example)');
   }
   if (!fcmConfigured) {
     console.log('[worker] FCM_SERVICE_ACCOUNT_JSON not configured — FCM push dispatch disabled (see .env.example)');
   }
-  if (!vapidConfigured && !fcmConfigured) return; // nothing to subscribe for
+  if (!apnsVoipConfigured) {
+    console.log('[worker] APNS_VOIP_PEM not configured — iOS closed-app call ringing disabled (see .env.example)');
+  }
+  if (!vapidConfigured && !fcmConfigured && !apnsVoipConfigured) return; // nothing to subscribe for
 
   // One connection, all channels — ioredis multiplexes fine over a single
   // subscriber, and the `channel` check in the shared 'message' handler below
   // already routes each event to the right side, so there's no need for more than
-  // one. Calls only ever push via FCM (see handleCallRing's docstring), so the call
-  // channel is only subscribed when FCM is actually configured — subscribing to it
-  // with only VAPID set would just mean every event routes to a no-op.
+  // one. Calls push via FCM or APNs VoIP (see handleCallRing's docstring), so the
+  // call channel is only subscribed when at least one of those is actually
+  // configured — subscribing to it with only VAPID set would just mean every event
+  // routes to a no-op.
   // DEVICE_EVENTS_CHANNEL (new-device login approval) is subscribed regardless —
   // handleLoginPending sends both a web_push and an FCM payload, unlike calls.
   const subscriber = createRedisSubscriber();
-  const channels = fcmConfigured
-    ? [MESSAGE_EVENTS_CHANNEL, CALL_EVENTS_CHANNEL, DEVICE_EVENTS_CHANNEL]
-    : [MESSAGE_EVENTS_CHANNEL, DEVICE_EVENTS_CHANNEL];
+  const channels =
+    fcmConfigured || apnsVoipConfigured
+      ? [MESSAGE_EVENTS_CHANNEL, CALL_EVENTS_CHANNEL, DEVICE_EVENTS_CHANNEL]
+      : [MESSAGE_EVENTS_CHANNEL, DEVICE_EVENTS_CHANNEL];
   subscriber.subscribe(...channels).catch((err) => {
     console.error('[worker] failed to subscribe for push dispatch', err);
   });

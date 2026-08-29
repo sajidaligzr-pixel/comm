@@ -22,4 +22,17 @@ class PushApi {
 
   Future<void> unsubscribe() =>
       _client.requestVoid('/api/push/unsubscribe', method: 'POST');
+
+  /// Apple PushKit's VoIP device token (call_kit.dart) — a separate route from
+  /// subscribeFcm above, not the same one with a different provider string, since
+  /// an iOS device needs both live at once (see VoipPushToken's own schema doc
+  /// comment, packages/database/prisma/schema.prisma).
+  Future<void> subscribeVoip(String token) => _client.requestVoid(
+    '/api/push/voip-token',
+    method: 'POST',
+    body: {'token': token},
+  );
+
+  Future<void> unsubscribeVoip() =>
+      _client.requestVoid('/api/push/voip-token', method: 'DELETE');
 }
