@@ -108,8 +108,8 @@ async function dispatchTo(deviceId: string, payload: { messagePayload?: unknown;
       // unlike the per-message push below) — until now this whole function was
       // silent on success, so a report of "the phone never rang" had nothing
       // server-side to confirm or rule out FCM actually accepted the send.
-      if (payload.fcmData.type === 'call') {
-        console.log(`[worker] call FCM push accepted for device ${deviceId}`);
+      if (payload.fcmData.type === 'call' || payload.fcmData.type === 'call-end') {
+        console.log(`[worker] ${payload.fcmData.type} FCM push accepted for device ${deviceId}`);
       }
     } else {
       if (!vapidConfigured || !payload.messagePayload) return;
@@ -305,6 +305,32 @@ async function handleCallRing(event: Extract<CallEvent, { type: 'call.ring' }>):
   });
 }
 
+/** Tells a device that may be showing CallKit's incoming-call UI (because a
+ * `call.ring` push woke it from a fully-closed state — see `handleCallRing`
+ * above) to dismiss it: the caller cancelled/hung up before this device
+ * answered, or the call was answered/declined on another of this user's
+ * devices. Without this, a device woken purely by FCM into a background
+ * isolate (no live WS — call_controller.dart's `CallController` never runs
+ * there at all) keeps ringing until its own local ~45s no-answer timeout even
+ * though the call is already over — found live testing exactly this
+ * scenario: cancelling a call from apps/web while apps/mobile's callee was
+ * still in a fully-terminated state.
+ *
+ * Android/FCM only for now, deliberately: iOS's own ring is native
+ * PushKit -> CallKit, and the VoIP push that wakes it spins up the full
+ * Flutter engine (not just an isolate the way FCM's background handler
+ * does), which reaches `CallController`'s live WS far more reliably in
+ * practice. A real gap worth the same treatment later if it's ever actually
+ * reported there too, not chased blind today.
+ */
+async function handleCallStopRinging(
+  event: Extract<CallEvent, { type: 'call.ended' | 'call.rejected' }>,
+): Promise<void> {
+  await dispatchTo(event.targetDeviceId, {
+    fcmData: { type: 'call-end', callId: event.callId },
+  });
+}
+
 let vapidConfigured = false;
 let fcmConfigured = false;
 let apnsVoipConfigured = false;
@@ -393,9 +419,16 @@ export function startPushDispatcher(): void {
         } catch {
           return;
         }
-        if (event.type !== 'call.ring') return; // only the initial invite needs to wake a closed app
         try {
-          await handleCallRing(event);
+          if (event.type === 'call.ring') {
+            await handleCallRing(event);
+          } else if (event.type === 'call.ended' || event.type === 'call.rejected') {
+            // Dismisses CallKit's incoming-call UI on a device that a `call.ring`
+            // push may have just woken from fully-closed — see
+            // handleCallStopRinging's own docstring for why this needs its own
+            // push rather than relying on the live WS event alone.
+            await handleCallStopRinging(event);
+          }
         } catch (err) {
           console.error('[worker] call push dispatch error', err);
         }

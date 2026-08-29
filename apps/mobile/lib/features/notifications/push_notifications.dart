@@ -33,11 +33,12 @@ import 'package:flutter/widgets.dart' show WidgetsFlutterBinding;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
+import '../../api/calls_api.dart';
 import '../../api/messages_api.dart';
 import '../../api/push_api.dart';
 import '../../app/providers.dart' show realtimeClientProvider, currentOpenConversationIdProvider;
 import '../calls/call_controller.dart' show callControllerProvider;
-import '../calls/call_kit.dart' show showIncomingCall;
+import '../calls/call_kit.dart' show showIncomingCall, endCallKit;
 import '../calls/call_state.dart' show CallPhase;
 import 'local_notifications.dart';
 
@@ -76,6 +77,20 @@ Future<void> _showFromData(Map<String, dynamic> data) async {
       conversationId: conversationId,
       callerName: data['fromDisplayName'] as String? ?? 'Someone',
     );
+    // Tells the caller's side to move from "Calling…" to "Ringing…" — needed
+    // here specifically because showIncomingCall above may have just run from
+    // a background isolate with no live CallController/WS to have sent this
+    // over otherwise (see CallsApi.ringing's own docstring).
+    unawaited(_ackRinging(conversationId, callId));
+  } else if (type == 'call-end') {
+    // The caller cancelled/hung up (or the call was answered/declined on
+    // another of this user's devices) before this device answered — dismiss
+    // whatever CallKit UI showIncomingCall above may have posted. See
+    // handleCallStopRinging (apps/worker/src/realtime/push-dispatch.ts) for
+    // why this needs its own push rather than relying on the live WS
+    // `call.ended`/`call.rejected` event alone.
+    final callId = data['callId'] as String?;
+    if (callId != null) unawaited(endCallKit(callId));
   } else if (type == 'message') {
     final conversationId = data['conversationId'] as String?;
     if (conversationId == null) return;
@@ -114,6 +129,18 @@ Future<void> _ackDelivered(String messageId) async {
     // Best-effort — a missed ack here just means the tick catches up the next time
     // this device opens a screen with a live WS listener, same as before this existed.
   }
+}
+
+/// Best-effort — see CallsApi.ringing's own docstring for why this needs to
+/// fire from here at all. A missed ack just means the caller's UI stays on
+/// "Calling…" a little longer, not a broken call — `CallController`'s own
+/// live-WS path (or `checkPendingCall`'s catch-up, once this app is actually
+/// opened) still sends the WS version the moment either one runs.
+Future<void> _ackRinging(String conversationId, String callId) async {
+  try {
+    final client = await ApiClient.initialize();
+    await CallsApi(client).ringing(conversationId, callId);
+  } catch (_) {}
 }
 
 /// Firebase init + the background handler registration + the foreground listener —

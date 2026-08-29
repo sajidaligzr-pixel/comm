@@ -536,6 +536,26 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
   }
 
+  /// Fire-and-forget persistence for a `_status` update — see
+  /// `CachedMessage.delivered`/`.read`'s own docstring for why this needs to
+  /// happen at all, alongside (never instead of) the in-memory `setState`
+  /// every caller already does. A missed write here just means the next
+  /// fresh mount's cache-seed is one update behind, self-correcting the
+  /// instant its own `_load()` reseeds from a fresh REST fetch anyway.
+  void _persistStatus(String messageId, {required bool delivered, required bool read}) {
+    final kek = getCurrentKek();
+    if (kek == null) return;
+    unawaited(
+      updateCachedMessageStatus(
+        kek,
+        widget.conversationId,
+        messageId,
+        delivered: delivered,
+        read: read,
+      ),
+    );
+  }
+
   /// See `_statusPollTimer`'s own docstring for why this exists at all. Skips the
   /// network round trip entirely once there's nothing left to wait on (every own
   /// message already showing read), so an idle-but-open thread doesn't poll
@@ -553,10 +573,10 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       setState(() {
         for (final dto in page.items) {
           if (dto.senderUserId != _myUserId) continue;
-          _status[dto.id] = (
-            delivered: dto.deliveredAt != null,
-            read: dto.readAt != null,
-          );
+          final delivered = dto.deliveredAt != null;
+          final read = dto.readAt != null;
+          _status[dto.id] = (delivered: delivered, read: read);
+          _persistStatus(dto.id, delivered: delivered, read: read);
         }
       });
     } catch (_) {
@@ -604,12 +624,9 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final messageId = payload['messageId'] as String?;
     if (messageId == null) return;
     if (!mounted) return;
-    setState(
-      () => _status[messageId] = (
-        delivered: true,
-        read: _status[messageId]?.read ?? false,
-      ),
-    );
+    final read = _status[messageId]?.read ?? false;
+    setState(() => _status[messageId] = (delivered: true, read: read));
+    _persistStatus(messageId, delivered: true, read: read);
   }
 
   void _onRealtimeRead(Map<String, dynamic> payload) {
@@ -638,6 +655,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         for (final m in _messages) {
           if (m.isOwn && m.sentAt.compareTo(upToMessage.sentAt) <= 0) {
             _status[m.id] = (delivered: true, read: true);
+            _persistStatus(m.id, delivered: true, read: true);
           }
         }
       } else {
@@ -645,6 +663,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         // arrived on a different device) — fall back to the old exact-id update,
         // still strictly better than doing nothing with it.
         _status[upToMessageId] = (delivered: true, read: true);
+        _persistStatus(upToMessageId, delivered: true, read: true);
       }
     });
   }
@@ -717,6 +736,15 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           _messages
             ..clear()
             ..addAll(cached);
+          // Seeds `_status` from the cache's own last-known delivered/read
+          // fields, not left empty until the REST fetch below resolves — see
+          // CachedMessage.delivered/.read's own docstring for the regression
+          // this closes (a fresh mount otherwise rendered every own message as
+          // a single tick for the length of that reload, even ones already
+          // long confirmed delivered/read).
+          for (final m in cached) {
+            if (m.isOwn) _status[m.id] = (delivered: m.delivered, read: m.read);
+          }
         });
       }
       _restartDisappearingPruneTimer(conversation.disappearingTimer);
@@ -766,6 +794,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           if (_status[dto.id] != next) {
             _status[dto.id] = next;
             statusChanged = true;
+            _persistStatus(dto.id, delivered: next.delivered, read: next.read);
           }
         }
         if (cachedIds.contains(dto.id)) continue;
@@ -1074,6 +1103,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         replyToMessageId: dto.replyToMessageId,
         attachment: attachment,
         mediaBase64: mediaBase64,
+        delivered: isOwn && dto.deliveredAt != null,
+        read: isOwn && dto.readAt != null,
       );
     } else {
       final viaHistory = await tryDecryptViaHistory(dto.historyCiphertext);

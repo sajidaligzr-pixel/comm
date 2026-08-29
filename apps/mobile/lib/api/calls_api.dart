@@ -188,6 +188,23 @@ class CallsApi {
         },
       );
 
+  /// REST counterpart to the in-app path's WS `call.ringing` send — used
+  /// specifically when the native incoming-call UI is shown from a background
+  /// isolate (push_notifications.dart's `_showFromData`, called from
+  /// `firebaseMessagingBackgroundHandler`), which never spins up
+  /// `CallController`/its live WS at all. Without this, the caller's status
+  /// stayed on "Calling…" for the whole timeout even though this device was
+  /// genuinely ringing. Safe to call even when the in-app path also sends the
+  /// WS version of this — a duplicate "Ringing…" is a harmless no-op.
+  Future<void> ringing(String conversationId, String callId) =>
+      _client.requestVoid(
+        '/api/calls/ringing',
+        body: {
+          'conversationId': conversationId,
+          'callId': callId,
+        },
+      );
+
   /// `null` is the normal case (no missed call waiting) — see PendingCallResponse's
   /// docstring (packages/types/src/calls.ts). Falls back to `null` on any error too,
   /// same reasoning as `turnCredentials` above: this is a best-effort catch-up check

@@ -70,6 +70,22 @@ class CachedMessage {
   final bool deleted;
   final String? deletedReason;
 
+  /// Last-known delivered/read state for THIS device's own sent message —
+  /// persisted here (unlike thread_screen.dart's own `_status` map, which is
+  /// deliberately ephemeral/re-seeded-from-the-server-on-load, same design as
+  /// apps/web's message-thread.tsx) specifically so a fresh screen mount can
+  /// render the correct tick INSTANTLY from the cache, before the REST re-fetch
+  /// that reseeds `_status` has even resolved. Found live as the reported bug:
+  /// navigating away and back showed a message regress from a double tick back
+  /// to a single one for the length of that reload, self-correcting only once
+  /// the REST fetch caught up (or never, if that fetch's result was read before
+  /// this device's own write of it landed) — meaningless for anyone who didn't
+  /// wait around, but a real, confusing regression for anyone who did. Meaning
+  /// only for a message `isOwn` — never set for anyone else's, same reasoning
+  /// `_status` itself only ever tracks this device's own sends.
+  final bool delivered;
+  final bool read;
+
   const CachedMessage({
     required this.id,
     required this.conversationId,
@@ -84,6 +100,8 @@ class CachedMessage {
     this.mediaDurationSec,
     this.deleted = false,
     this.deletedReason,
+    this.delivered = false,
+    this.read = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -100,6 +118,8 @@ class CachedMessage {
     if (mediaDurationSec != null) 'mediaDurationSec': mediaDurationSec,
     if (deleted) 'deleted': deleted,
     if (deletedReason != null) 'deletedReason': deletedReason,
+    if (delivered) 'delivered': delivered,
+    if (read) 'read': read,
   };
 
   static CachedMessage fromJson(Map<String, dynamic> json) => CachedMessage(
@@ -120,6 +140,8 @@ class CachedMessage {
     deletedReason: json['deletedReason'] as String?,
     mediaBase64: json['mediaBase64'] as String?,
     mediaDurationSec: json['mediaDurationSec'] as int?,
+    delivered: json['delivered'] as bool? ?? false,
+    read: json['read'] as bool? ?? false,
   );
 }
 
@@ -269,6 +291,57 @@ Future<List<CachedMessage>> markCachedMessageDeleted(
     await wrapBytes(kek, utf8ToBytes(json)),
   );
   return updated;
+}
+
+/// Persists a delivered/read update for one of THIS device's own cached
+/// messages — see `CachedMessage.delivered`/`.read`'s own docstring for why
+/// this exists at all. Called alongside every place thread_screen.dart's
+/// in-memory `_status` map changes, so the cache never falls behind what's
+/// already been shown on screen. A no-op if the message isn't cached (nothing
+/// to update) or if the new value is identical to what's already stored (skips
+/// the read-modify-write for the common case: a live WS event repeating
+/// something the last full `_load()` already reseeded). Same
+/// read-modify-write-the-whole-blob shape as the rest of this file — see
+/// `markCachedMessageDeleted`'s own docstring on the accepted race this
+/// doesn't solve.
+Future<void> updateCachedMessageStatus(
+  Uint8List kek,
+  String conversationId,
+  String messageId, {
+  required bool delivered,
+  required bool read,
+}) async {
+  final existing = await loadCachedMessages(kek, conversationId);
+  var changed = false;
+  final updated = existing.map((m) {
+    if (m.id != messageId || (m.delivered == delivered && m.read == read)) {
+      return m;
+    }
+    changed = true;
+    return CachedMessage(
+      id: m.id,
+      conversationId: m.conversationId,
+      senderUserId: m.senderUserId,
+      isOwn: m.isOwn,
+      contentTypeHint: m.contentTypeHint,
+      text: m.text,
+      sentAt: m.sentAt,
+      replyToMessageId: m.replyToMessageId,
+      attachment: m.attachment,
+      mediaBase64: m.mediaBase64,
+      mediaDurationSec: m.mediaDurationSec,
+      deleted: m.deleted,
+      deletedReason: m.deletedReason,
+      delivered: delivered,
+      read: read,
+    );
+  }).toList();
+  if (!changed) return;
+  final json = jsonEncode(updated.map((m) => m.toJson()).toList());
+  await putBlob(
+    _cacheKey(conversationId),
+    await wrapBytes(kek, utf8ToBytes(json)),
+  );
 }
 
 /// "Delete chat" (chats_list_screen.dart's long-press menu) — wipes this device's

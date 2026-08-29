@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 23,
+  "buildNumber": 24,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-23.apk",
-  "releaseNotes": "Calls now ring more reliably when the app is closed or the phone is asleep. Added voice-note playback speed (1.5x/2x), muted chat notifications while that chat is already open, and asked for a battery-optimization exemption so calls keep arriving in the background."
+  "apkUrl": "/downloads/comm-24.apk",
+  "releaseNotes": "Calls now stop ringing on the other end the instant you cancel or hang up before they answer, and the caller sees \"Ringing…\" correctly even when the other phone was fully closed. Message ticks no longer flicker back to a single tick when you leave and reopen a chat. Fixed a stale-notification bug that could re-open an old conversation every time the app launched."
 }

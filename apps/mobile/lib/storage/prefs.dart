@@ -85,3 +85,24 @@ Future<int> getPermissionsOnboardingVersionSeen() async {
   if (raw == 'true') return 1;
   return int.tryParse(raw) ?? 0;
 }
+
+/// De-dupes `flutter_local_notifications`' own `getNotificationAppLaunchDetails()`
+/// against a real, documented Android quirk (see local_notifications.dart's
+/// `initLocalNotifications`): `didNotificationLaunchApp` can keep reporting `true`
+/// — with the exact same stale payload — across LATER cold starts that were not
+/// actually triggered by tapping a notification at all (just reopening the app
+/// after it was killed), because Android can hand the Activity back its
+/// last-used launch Intent instead of a fresh one. Found live as the reported
+/// bug: the app kept auto-navigating into a conversation on every subsequent
+/// launch as though its notification had just been tapped, with nothing actually
+/// new waiting there. NOT scoped by username, same reasoning as the
+/// permissions-onboarding key above — this dedupes one specific OS-level Intent
+/// replay, not per-account state, and needs to be readable before any account is
+/// known (this runs from main(), before sign-in resolves).
+const _lastConsumedLaunchNotificationKey = 'comm_last_consumed_launch_notification';
+
+Future<void> setLastConsumedLaunchNotification(String payload) =>
+    _storage.write(key: _lastConsumedLaunchNotificationKey, value: payload);
+
+Future<String?> getLastConsumedLaunchNotification() =>
+    _storage.read(key: _lastConsumedLaunchNotificationKey);

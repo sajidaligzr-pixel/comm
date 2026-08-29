@@ -14,6 +14,7 @@ library;
 import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import '../../storage/prefs.dart';
 
 final FlutterLocalNotificationsPlugin _plugin =
     FlutterLocalNotificationsPlugin();
@@ -83,10 +84,25 @@ Future<void> initLocalNotifications({
   // the other half: checked once, right here, after `initialize()` has resolved
   // (this function is called from main.dart before the first frame, same timing
   // guarantee `getNotificationAppLaunchDetails` needs to be reliable).
+  //
+  // De-duped against `getLastConsumedLaunchNotification`'s own stored payload —
+  // see that function's docstring for the real Android quirk this guards
+  // against: `didNotificationLaunchApp` can keep returning `true` with this EXACT
+  // payload on later cold starts that were never actually a notification tap at
+  // all, which without this guard re-fired `onTap` (auto-navigating into that
+  // conversation) every single time the app was reopened. The payload's `n`
+  // field (see `showNewMessageNotification`) is what makes two DIFFERENT
+  // notifications for the same conversation distinguishable despite sharing a
+  // `conversationId` — a raw string compare here is enough.
   final launchDetails = await _plugin.getNotificationAppLaunchDetails();
-  if (launchDetails?.didNotificationLaunchApp ?? false) {
-    final tap = _decodeTapPayload(launchDetails?.notificationResponse?.payload);
-    if (tap != null) onTap(tap);
+  final launchPayload = launchDetails?.notificationResponse?.payload;
+  if ((launchDetails?.didNotificationLaunchApp ?? false) && launchPayload != null) {
+    final alreadyConsumed = await getLastConsumedLaunchNotification();
+    if (alreadyConsumed != launchPayload) {
+      final tap = _decodeTapPayload(launchPayload);
+      if (tap != null) onTap(tap);
+      await setLastConsumedLaunchNotification(launchPayload);
+    }
   }
 
   final androidImpl = _plugin
@@ -130,7 +146,18 @@ Future<void> showNewMessageNotification({
     title,
     body,
     const NotificationDetails(android: androidDetails, iOS: iosDetails),
-    payload: jsonEncode({'type': 'message', 'conversationId': conversationId}),
+    // `n`: a per-post nonce, not read by `_decodeTapPayload` — its only job is
+    // making two distinct notifications for the same conversation distinguishable
+    // by their raw payload string, which is what
+    // `getLastConsumedLaunchNotification`'s dedup check (initLocalNotifications)
+    // compares against. Without it, a genuinely fresh tap on a NEW message for a
+    // conversation whose PREVIOUS notification was already consumed would look
+    // byte-identical to that already-consumed one and get silently skipped.
+    payload: jsonEncode({
+      'type': 'message',
+      'conversationId': conversationId,
+      'n': DateTime.now().microsecondsSinceEpoch,
+    }),
   );
 }
 

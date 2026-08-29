@@ -33,7 +33,7 @@ import { isEitherBlocked } from '../modules/blocking/service';
 import { createGroupKeyShare } from '../modules/groups/key-share-service';
 import { setPendingCall, clearPendingCall } from '../modules/calls/pending';
 import { recordCallInvited, recordCallAnswered, recordCallEnded } from '../modules/calls/history';
-import { declineCall } from '../modules/calls/service';
+import { declineCall, ackCallRinging } from '../modules/calls/service';
 import { startGroupCall, joinGroupCall, leaveGroupCall, assertValidGroupCallTarget } from '../modules/calls/group-service';
 import {
   publishNewMessage,
@@ -41,7 +41,6 @@ import {
   publishRead,
   publishTyping,
   publishCallRing,
-  publishCallRinging,
   publishCallAnswered,
   publishCallIceCandidate,
   publishCallRejected,
@@ -228,10 +227,9 @@ export async function handleInboundWsMessage(ctx: AuthContext, raw: string): Pro
       case 'call.ringing': {
         await enforceRateLimit(RATE_LIMIT_RULES.callSignal, ctx.userId);
         const body = CallRingingEnvelope.parse(parsed);
-        const targets = await getAllOtherMembersActiveDeviceIds(body.conversationId, ctx.userId);
-        for (const target of targets) {
-          await publishCallRinging(target.deviceId, body.conversationId, body.callId);
-        }
+        // Extracted into ackCallRinging (calls/service.ts) — see that function's own
+        // docstring for why POST /api/calls/ringing needs the exact same logic.
+        await ackCallRinging(ctx.userId, body.conversationId, body.callId);
         return null;
       }
 
