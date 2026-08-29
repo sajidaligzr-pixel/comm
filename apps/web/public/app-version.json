@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 17,
+  "buildNumber": 20,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-17.apk",
-  "releaseNotes": "You can now see your full chat history when you log in anywhere, not just new messages. Group chats now reach every device you're signed into. New sign-ins on an unfamiliar device now need approval from one of your other devices first. This update is required."
+  "apkUrl": "/downloads/comm-20.apk",
+  "releaseNotes": "Signing in on a new device works right away again — no more waiting for approval from another device. Fixed a bug where denying microphone/location access during setup or a call showed no feedback at all. Admins can now permanently delete an account."
 }
