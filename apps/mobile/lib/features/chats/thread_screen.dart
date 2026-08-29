@@ -1053,6 +1053,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         final decoded = _decodeContent(dto.contentTypeHint, plaintext);
         text = decoded.text;
         attachment = decoded.attachment;
+        mediaBase64 = decoded.mediaBase64;
         decryptedLive = true;
       } catch (e) {
         // Falls through to the history-key fallback below.
