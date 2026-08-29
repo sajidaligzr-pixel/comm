@@ -104,6 +104,13 @@ async function dispatchTo(deviceId: string, payload: { messagePayload?: unknown;
     if (subRow.provider === PushProvider.fcm) {
       if (!fcmConfigured || !payload.fcmData) return;
       await sendFcm((subscription as FcmPushSubscriptionRequest).token, payload.fcmData);
+      // Success-path visibility for calls specifically (rare/high-stakes events,
+      // unlike the per-message push below) — until now this whole function was
+      // silent on success, so a report of "the phone never rang" had nothing
+      // server-side to confirm or rule out FCM actually accepted the send.
+      if (payload.fcmData.type === 'call') {
+        console.log(`[worker] call FCM push accepted for device ${deviceId}`);
+      }
     } else {
       if (!vapidConfigured || !payload.messagePayload) return;
       await sendWebPush(subscription as PushSubscriptionRequest, payload.messagePayload);
@@ -264,6 +271,7 @@ function decryptVoipToken(ciphertext: Buffer): string {
  * it) and an iOS device that hasn't registered one yet both fall through to the
  * existing FCM path unchanged. */
 async function handleCallRing(event: Extract<CallEvent, { type: 'call.ring' }>): Promise<void> {
+  console.log(`[worker] call.ring received for device ${event.targetDeviceId}, call ${event.callId}`);
   if (apnsVoipConfigured) {
     const voipRow = await prisma.voipPushToken.findUnique({ where: { deviceId: event.targetDeviceId } });
     if (voipRow) {
