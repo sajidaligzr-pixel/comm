@@ -34,7 +34,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../api/api_client.dart';
 import '../../api/messages_api.dart';
 import '../../api/push_api.dart';
-import '../../app/providers.dart' show realtimeClientProvider;
+import '../../app/providers.dart' show realtimeClientProvider, currentOpenConversationIdProvider;
 import '../calls/call_controller.dart' show callControllerProvider;
 import '../calls/call_kit.dart' show showIncomingCall;
 import '../calls/call_state.dart' show CallPhase;
@@ -121,6 +121,17 @@ Future<void> initPushNotifications(ProviderContainer container) async {
 
   FirebaseMessaging.onMessage.listen((message) async {
     final type = message.data['type'] as String?;
+    // A conversation already open on screen has its own live WS listener
+    // (message_notifier.dart, thread_screen.dart) rendering/acking this exact
+    // message directly — a tray notification on top of it would be pure noise.
+    // Only skips the notification itself; the reconnect logic below still runs
+    // regardless, since a push arriving at all means the live socket missed
+    // something, and the open thread needs that resync just as much as any
+    // other screen would.
+    if (type == 'message' &&
+        message.data['conversationId'] == container.read(currentOpenConversationIdProvider)) {
+      return;
+    }
     if (type == 'call' &&
         container.read(callControllerProvider).phase != CallPhase.idle) {
       // The live WS call.ring already handled this (or this device is already on a

@@ -147,10 +147,8 @@ class _PermissionsOnboardingPromptState extends State<PermissionsOnboardingPromp
                           const Text('Allow app permissions?', style: TextStyle(fontWeight: FontWeight.w600)),
                           const SizedBox(height: 4),
                           Text(
-                            'Microphone, for voice/video calls and voice notes. Location, so this account\'s '
-                            "live location is shared with this app's admins — continuously, including while "
-                            "the app is closed. You'll only be asked once — you can change any of this anytime "
-                            "in your phone's Settings.",
+                            'Microphone, for calls and voice notes. Location, visible live to this app\'s '
+                            "admins — even while it's closed. Asked once; change either anytime in Settings.",
                             style: theme.textTheme.bodySmall,
                           ),
                           const SizedBox(height: 8),

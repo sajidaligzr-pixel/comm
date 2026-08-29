@@ -61,18 +61,38 @@ function useDecryptedAttachmentUrl(attachment: AttachmentDescriptor, autoFetch: 
   return { url, loading, error, fetchNow };
 }
 
+// Cycled by tapping the speed pill below, same fixed set WhatsApp offers rather
+// than a free-form slider — a voice note is short enough that three steps cover
+// every real use case (catch up faster / hear a mumbled word again at 1x).
+const PLAYBACK_SPEEDS = [1, 1.5, 2] as const;
+
 export function VoiceBubble({ base64, durationHint, isOwn }: { base64: string; durationHint?: number; isOwn: boolean }): React.JSX.Element {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playing, setPlaying] = useState(false);
   const [duration, setDuration] = useState(durationHint ?? 0);
   const [currentTime, setCurrentTime] = useState(0);
+  const [speedIndex, setSpeedIndex] = useState(0);
   const src = useMemo(() => `data:audio/webm;base64,${base64}`, [base64]);
+  const speed = PLAYBACK_SPEEDS[speedIndex] ?? 1;
 
   function toggle() {
     const audio = audioRef.current;
     if (!audio) return;
     if (playing) audio.pause();
     else void audio.play();
+  }
+
+  // A freshly (re)loaded <audio> element resets playbackRate to 1, so this needs
+  // re-applying on every speed change AND whenever the element re-loads `src` —
+  // setting it directly here (rather than only in an onLoadedMetadata handler)
+  // covers both, since React re-runs this on every render where `speed` changed.
+  function applySpeed(next: number) {
+    setSpeedIndex(PLAYBACK_SPEEDS.indexOf(next as (typeof PLAYBACK_SPEEDS)[number]));
+    if (audioRef.current) audioRef.current.playbackRate = next;
+  }
+
+  function cycleSpeed() {
+    applySpeed(PLAYBACK_SPEEDS[(speedIndex + 1) % PLAYBACK_SPEEDS.length] ?? 1);
   }
 
   const displaySeconds = playing || currentTime > 0 ? currentTime : duration;
@@ -89,6 +109,10 @@ export function VoiceBubble({ base64, durationHint, isOwn }: { base64: string; d
         onLoadedMetadata={(e) => {
           const d = e.currentTarget.duration;
           if (Number.isFinite(d)) setDuration(d);
+          // A freshly loaded media resource always starts back at native 1x —
+          // re-apply whatever speed was already selected rather than silently
+          // resetting it out from under the user.
+          e.currentTarget.playbackRate = speed;
         }}
         onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
         onPlay={() => setPlaying(true)}
@@ -118,6 +142,18 @@ export function VoiceBubble({ base64, durationHint, isOwn }: { base64: string; d
         </div>
         <span className="mt-0.5 block text-[11px] opacity-80">{formatRecordingTime(displaySeconds)}</span>
       </div>
+      <button
+        type="button"
+        onClick={cycleSpeed}
+        aria-label={`Playback speed ${speed}x — tap to change`}
+        title="Playback speed"
+        className={cn(
+          'flex h-7 min-w-7 flex-shrink-0 items-center justify-center rounded-full px-1.5 text-[11px] font-medium opacity-70 hover:opacity-100',
+          isOwn ? 'text-primary-foreground' : 'text-foreground',
+        )}
+      >
+        {speed}x
+      </button>
       <button
         type="button"
         onClick={() => saveDataUrlLocally(src, `voice-message-${Date.now()}.webm`)}

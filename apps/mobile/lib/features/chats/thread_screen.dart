@@ -3431,6 +3431,11 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
   Duration _position = Duration.zero;
   Duration? _duration;
   String? _tempPath;
+  // Same fixed set WhatsApp offers, cycled by tapping the speed pill — a voice
+  // note is short enough that three steps cover every real use case.
+  static const _speeds = [1.0, 1.5, 2.0];
+  int _speedIndex = 0;
+  double get _speed => _speeds[_speedIndex];
   late final StreamSubscription<Duration> _positionSub;
   late final StreamSubscription<Duration> _durationSub;
   late final StreamSubscription<PlayerState> _stateSub;
@@ -3492,7 +3497,18 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
     }
     final path = _tempPath ??= await _materialize();
     await _player.play(DeviceFileSource(path));
+    // A freshly started source resets the player back to 1x — re-apply
+    // whatever speed was already selected rather than silently losing it.
+    await _player.setPlaybackRate(_speed);
   }
+
+  Future<void> _cycleSpeed() async {
+    setState(() => _speedIndex = (_speedIndex + 1) % _speeds.length);
+    await _player.setPlaybackRate(_speed);
+  }
+
+  String get _speedLabel =>
+      _speed == _speed.roundToDouble() ? '${_speed.toInt()}x' : '${_speed}x';
 
   @override
   Widget build(BuildContext context) {
@@ -3503,7 +3519,7 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
         : 0.0;
 
     return SizedBox(
-      width: 180,
+      width: 216,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -3550,6 +3566,22 @@ class _VoiceMessagePlayerState extends State<_VoiceMessagePlayer> {
                   ),
                 ),
               ],
+            ),
+          ),
+          const SizedBox(width: 4),
+          InkWell(
+            onTap: _cycleSpeed,
+            customBorder: const StadiumBorder(),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+              child: Text(
+                _speedLabel,
+                style: TextStyle(
+                  color: widget.fgColor.withValues(alpha: 0.7),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
           ),
         ],
