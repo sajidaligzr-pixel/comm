@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 24,
+  "buildNumber": 25,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-24.apk",
-  "releaseNotes": "Calls now stop ringing on the other end the instant you cancel or hang up before they answer, and the caller sees \"Ringing…\" correctly even when the other phone was fully closed. Message ticks no longer flicker back to a single tick when you leave and reopen a chat. Fixed a stale-notification bug that could re-open an old conversation every time the app launched."
+  "apkUrl": "/downloads/comm-25.apk",
+  "releaseNotes": "Fixed the phone's screen staying lit for a while after a call ended or was cancelled — it was being held on by the calling library itself and never released early."
 }

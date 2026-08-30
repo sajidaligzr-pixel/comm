@@ -1,7 +1,7 @@
 name: comm_mobile
 description: "Comm — native Flutter client for the existing Comm backend (apps/web, apps/worker). See apps/mobile/README.md for architecture and how this maps to the TypeScript client it replaces."
 publish_to: 'none'
-version: 1.0.0+24
+version: 1.0.0+25
 
 environment:
   sdk: ^3.10.7
@@ -166,3 +166,20 @@ flutter_launcher_icons:
   adaptive_icon_background: "#4F46E5"
   adaptive_icon_foreground: assets/icon/foreground.png
   remove_alpha_ios: true
+
+# Vendored fork of flutter_callkit_incoming 3.1.5 (third_party/flutter_callkit_incoming,
+# copied from the pub.dev release, LICENSE preserved) — patches a real upstream bug
+# with no Dart-level workaround: CallkitIncomingActivity.kt's own screen-wake
+# PowerManager.WakeLock is acquired with a fixed timeout equal to the ring duration
+# and is NEVER released early, so the device's screen stayed lit for however much of
+# that duration was left even after a call was answered/declined/remotely ended —
+# found live testing exactly the "cancel a call, the other phone's screen stays on"
+# report. The patch (CallkitIncomingActivity.kt) stores the lock and releases it in
+# onDestroy(), which every real exit path already funnels through. See that file's
+# own doc comments for the exact diff — kept intentionally minimal (this one class
+# only) to stay easy to re-apply against a future upstream version rather than
+# diverging further. Re-derive this override (or drop it if upstream ships the fix
+# itself) whenever flutter_callkit_incoming is next upgraded.
+dependency_overrides:
+  flutter_callkit_incoming:
+    path: third_party/flutter_callkit_incoming

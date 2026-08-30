@@ -385,10 +385,9 @@ packages:
   flutter_callkit_incoming:
     dependency: "direct main"
     description:
-      name: flutter_callkit_incoming
-      sha256: a7ca78008056e2e5031f728ad9707eb6c691c5058c3fa2d8488cbcaa93a96341
-      url: "https://pub.dev"
-    source: hosted
+      path: "third_party/flutter_callkit_incoming"
+      relative: true
+    source: path
     version: "3.1.5"
   flutter_launcher_icons:
     dependency: "direct dev"
