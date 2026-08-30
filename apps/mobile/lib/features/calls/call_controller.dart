@@ -25,7 +25,8 @@ import '../../app/providers.dart';
 import '../../realtime/ws_client.dart';
 import 'call_coordination.dart';
 import 'call_foreground_service.dart';
-import 'call_kit.dart' show endCallKit, setCallKitConnected;
+import 'call_kit.dart'
+    show endCallKit, setCallKitConnected, wasAcceptedNatively;
 import 'call_state.dart';
 
 const _uuid = Uuid();
@@ -334,6 +335,15 @@ class CallController extends StateNotifier<CallUiState> {
     if (call == null || state.phase != CallPhase.incoming || offer == null) {
       return;
     }
+    // Re-entry guard: `state.phase` stays `incoming` throughout this whole
+    // function (it only moves to `connected` later, from `onConnectionState`),
+    // so a second call while the first is still awaiting mic permission/ICE
+    // setup — a double-tap on Accept, or `checkPendingCall`'s own internal
+    // auto-accept (see its docstring) racing `acceptPendingCall`'s follow-up
+    // call — would otherwise sail past the guard above and stand up a second
+    // RTCPeerConnection/answer on top of the first. `_pc` is only ever
+    // non-null once this function has actually started building one.
+    if (_pc != null) return;
     // Stops the moment the user taps Accept, not once the (async, multi-step)
     // connection setup below finishes — a ring continuing through "Connecting…"
     // would read as a second call coming in.
@@ -496,7 +506,18 @@ class CallController extends StateNotifier<CallUiState> {
     if (state.phase != CallPhase.idle) {
       return; // re-check: a live event may have landed while awaiting above
     }
-    _onRing(pending.toRingPayload(), startRingtone: ring);
+    // See `wasAcceptedNatively`'s own docstring for the full story: this covers
+    // the case where the user already tapped Accept on the system call
+    // notification before this app's own Dart-side event listener could
+    // possibly have been running to hear it (a fully-killed cold start) — a
+    // real, live-reported bug, not a hypothetical one. Skip the ring/incoming
+    // screen entirely and go straight to answering, same as `acceptPendingCall`
+    // does for the case where that event DID arrive in time.
+    final alreadyAccepted = await wasAcceptedNatively(pending.callId);
+    _onRing(pending.toRingPayload(), startRingtone: ring && !alreadyAccepted);
+    if (alreadyAccepted && state.phase == CallPhase.incoming) {
+      await acceptCall();
+    }
   }
 
   /// Used by the call notification's "Accept" action button

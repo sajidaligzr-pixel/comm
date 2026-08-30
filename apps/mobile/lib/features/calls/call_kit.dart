@@ -242,6 +242,57 @@ Future<void> showIncomingCall({
   );
 }
 
+/// Native ground truth for "did the user already tap Accept on the system
+/// call-notification UI," independent of whether this device's Dart-side
+/// `CallEventActionCallAccept` listener (above) was actually running to hear
+/// it. Found live: tapping Accept on a fully-killed app opened straight into
+/// the OS fingerprint/unlock prompt, then — once unlocked — showed the plain
+/// "Incoming call" ring screen again, demanding a SECOND manual Accept tap.
+///
+/// Root cause: on Android, the notification's Accept action is handled by
+/// `CallkitIncomingBroadcastReceiver.onReceive` — plain native Kotlin code that
+/// runs the instant the button is tapped, with no dependency on a Flutter
+/// engine existing yet. It forwards the event to Dart via
+/// `FlutterCallkitIncomingPlugin.send`, but that function only delivers to an
+/// already-`hasListener()` EventChannel — on a fully-killed app, nothing has
+/// attached that listener yet (Flutter isn't running), so the event is simply
+/// dropped, not queued. By the time Flutter's engine finally attaches
+/// (MainActivity launching in response to the same tap) and this app's own
+/// `checkPendingCall`/auth-gated startup flow runs, `acceptPendingCall` is
+/// never called at all — only the ordinary catch-up `checkPendingCall()`
+/// (chats_list_screen.dart's initState), which just shows the same ring
+/// screen a live/never-answered call would.
+///
+/// What the broadcast receiver does NOT drop, because it never depended on
+/// Flutter at all: `addCall(context, data, isAccepted = true)`
+/// (CallkitIncomingBroadcastReceiver.kt), which persists this call's entry —
+/// `isAccepted: true` — straight to Android SharedPreferences, synchronously,
+/// in the same receiver invocation. That's exactly what `activeCalls()`
+/// (below) reads back. So this is the same "durable native/REST state is the
+/// real catch-up, the event is just the fast path when it happens to arrive
+/// in time" shape `checkPendingCall`'s own docstring already documents for the
+/// WS side — just extended one layer further back to cover this native race
+/// too. Genuinely cross-platform, not just "harmless to ask" on iOS — the
+/// plugin's iOS side (SwiftFlutterCallkitIncomingPlugin's own
+/// `provider(_:perform: CXAnswerCallAction)`) sets the exact same `isAccepted`
+/// field, on the exact same in-memory `Call`/`Data` object `activeCalls()`
+/// reads from, at the moment `CXAnswerCallAction` fires — before this app's own
+/// Dart-side `CallEventActionCallAccept` listener even necessarily exists yet.
+/// iOS's PushKit/CallKit design (see `initCallKit`'s own docstring) makes that
+/// listener far MORE likely to already be attached by the time the user can
+/// physically tap Accept than Android's plain-BroadcastReceiver path, but nothing
+/// about `CXProviderDelegate` actually guarantees it — this closes that gap the
+/// same way for both platforms, from the same call site, rather than leaning on
+/// a timing assumption for one of them.
+Future<bool> wasAcceptedNatively(String callId) async {
+  try {
+    final calls = await FlutterCallkitIncoming.activeCalls();
+    return calls.any((c) => c.id == callId && c.isAccepted);
+  } catch (_) {
+    return false;
+  }
+}
+
 /// Called once a call is resolved through any path (answered, declined, ended,
 /// timed out) — same "one choke point clears it regardless of how the call ended"
 /// reasoning `CallController._teardown`'s own docstring already states for the
