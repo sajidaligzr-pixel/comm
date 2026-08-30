@@ -25,6 +25,16 @@ class CallUiState {
   final int durationSec;
   final String statusText;
   final String? micError;
+  // Presentation-only, like everything else here — CallOverlay's full-screen
+  // dark UI vs. a small floating "return to call" pill over whatever screen
+  // is actually underneath (chat list, a thread — any of them, matching
+  // WhatsApp's own minimized-call bar). Never touches the actual call/media
+  // state: `CallController`'s WebRTC connection, mute/speaker state, and
+  // duration timer all keep running identically either way — this only
+  // changes how much of the screen CallOverlay covers. Always reset to false
+  // on a new call (see `_onRing`/`startCall`) so a fresh incoming/outgoing
+  // call never silently inherits a previous call's minimized state.
+  final bool minimized;
 
   const CallUiState({
     this.phase = CallPhase.idle,
@@ -34,6 +44,7 @@ class CallUiState {
     this.durationSec = 0,
     this.statusText = '',
     this.micError,
+    this.minimized = false,
   });
 
   CallUiState copyWith({
@@ -46,6 +57,7 @@ class CallUiState {
     String? statusText,
     String? micError,
     bool clearMicError = false,
+    bool? minimized,
   }) {
     return CallUiState(
       phase: phase ?? this.phase,
@@ -55,6 +67,7 @@ class CallUiState {
       durationSec: durationSec ?? this.durationSec,
       statusText: statusText ?? this.statusText,
       micError: clearMicError ? null : (micError ?? this.micError),
+      minimized: minimized ?? this.minimized,
     );
   }
 }

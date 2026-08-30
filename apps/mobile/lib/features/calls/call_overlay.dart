@@ -45,88 +45,134 @@ class CallOverlay extends ConsumerWidget {
     final ringing =
         callState.phase == CallPhase.outgoing ||
         callState.phase == CallPhase.incoming;
+    // Only these two phases are ever minimizable — see minimizeCall's own
+    // docstring for why an undecided incoming call isn't.
+    final canMinimize =
+        callState.phase == CallPhase.connected ||
+        callState.phase == CallPhase.outgoing;
 
-    return Material(
-      color: Colors.transparent,
-      child: DecoratedBox(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [_CallColors.backgroundTop, _CallColors.backgroundBottom],
-          ),
+    if (callState.minimized && canMinimize) {
+      return Align(
+        alignment: Alignment.topCenter,
+        // Deliberately NOT full-screen (unlike the branch below) — this is the
+        // one place in this widget that must NOT swallow touches meant for
+        // whatever screen is actually showing underneath (chat list, any
+        // thread). Align/its child only occupy their own natural (small)
+        // size even though the parent Positioned.fill gives this whole
+        // subtree tight full-screen constraints — see app/app.dart's own
+        // Stack for why CallOverlay is mounted that way at all.
+        child: _MinimizedCallBar(
+          call: call,
+          statusLine: _statusLine(callState),
+          onTap: controller.restoreCall,
+          onEndCall: controller.hangUp,
         ),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
-            child: Column(
-              children: [
-                Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      CircleAvatar(
-                        radius: 56,
-                        backgroundColor: Colors.white.withValues(alpha: 0.15),
-                        child: Text(
-                          call.otherDisplayName.isNotEmpty
-                              ? call.otherDisplayName[0].toUpperCase()
-                              : '?',
+      );
+    }
+
+    return PopScope(
+      // Only while the full-screen UI is actually showing — a minimized call
+      // (branch above) never builds this at all, so the system back button
+      // behaves completely normally for the screen underneath in that case.
+      canPop: !canMinimize,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && canMinimize) controller.minimizeCall();
+      },
+      child: Material(
+        color: Colors.transparent,
+        child: DecoratedBox(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [_CallColors.backgroundTop, _CallColors.backgroundBottom],
+            ),
+          ),
+          child: SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
+              child: Column(
+                children: [
+                  if (canMinimize)
+                    Align(
+                      alignment: Alignment.topLeft,
+                      child: IconButton(
+                        onPressed: controller.minimizeCall,
+                        icon: const Icon(
+                          Icons.keyboard_arrow_down,
+                          color: Colors.white,
+                          size: 28,
+                        ),
+                        tooltip: 'Minimize',
+                      ),
+                    ),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        CircleAvatar(
+                          radius: 56,
+                          backgroundColor: Colors.white.withValues(alpha: 0.15),
+                          child: Text(
+                            call.otherDisplayName.isNotEmpty
+                                ? call.otherDisplayName[0].toUpperCase()
+                                : '?',
+                            style: const TextStyle(
+                              fontSize: 42,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        Text(
+                          call.otherDisplayName,
                           style: const TextStyle(
-                            fontSize: 42,
+                            fontSize: 24,
                             color: Colors.white,
                             fontWeight: FontWeight.w500,
                           ),
                         ),
-                      ),
-                      const SizedBox(height: 20),
-                      Text(
-                        call.otherDisplayName,
-                        style: const TextStyle(
-                          fontSize: 24,
-                          color: Colors.white,
-                          fontWeight: FontWeight.w500,
+                        const SizedBox(height: 8),
+                        Text(
+                          _statusLine(callState),
+                          style: const TextStyle(
+                            fontSize: 15,
+                            color: _CallColors.subtleText,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _statusLine(callState),
-                        style: const TextStyle(
-                          fontSize: 15,
-                          color: _CallColors.subtleText,
-                        ),
-                      ),
-                      if (ringing) ...[
-                        const SizedBox(height: 6),
-                        const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.call,
-                              size: 14,
-                              color: _CallColors.faintText,
-                            ),
-                            SizedBox(width: 6),
-                            Text(
-                              'Voice call',
-                              style: TextStyle(
-                                fontSize: 12,
+                        if (ringing) ...[
+                          const SizedBox(height: 6),
+                          const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                Icons.call,
+                                size: 14,
                                 color: _CallColors.faintText,
                               ),
-                            ),
-                          ],
-                        ),
+                              SizedBox(width: 6),
+                              Text(
+                                'Voice call',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: _CallColors.faintText,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
-                ),
-                if (callState.micError != null)
-                  _MicErrorBanner(
-                    message: callState.micError!,
-                    onDismiss: controller.dismissMicError,
-                  ),
-                _buildControls(callState, controller),
-              ],
+                  if (callState.micError != null)
+                    _MicErrorBanner(
+                      message: callState.micError!,
+                      onDismiss: controller.dismissMicError,
+                    ),
+                  _buildControls(callState, controller),
+                ],
+              ),
             ),
           ),
         ),
@@ -223,6 +269,68 @@ class CallOverlay extends ConsumerWidget {
       case CallPhase.idle:
         return const SizedBox(height: 88);
     }
+  }
+}
+
+/// WhatsApp's own "tap to return to call" bar, same idea — full-width, sits
+/// right below the status bar (SafeArea), and is deliberately the ONLY thing
+/// in this file that gets built as a small, non-full-screen widget rather
+/// than a `Positioned.fill`-sized one — see `CallOverlay.build`'s own comment
+/// on why that's what actually lets touches reach the real screen underneath.
+class _MinimizedCallBar extends StatelessWidget {
+  const _MinimizedCallBar({
+    required this.call,
+    required this.statusLine,
+    required this.onTap,
+    required this.onEndCall,
+  });
+
+  final ActiveCall call;
+  final String statusLine;
+  final VoidCallback onTap;
+  final VoidCallback onEndCall;
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      bottom: false,
+      child: Material(
+        color: _CallColors.accept,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Row(
+              children: [
+                const Icon(Icons.call, color: Colors.white, size: 18),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    '${call.otherDisplayName} · $statusLine',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w500,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+                // Lets the user hang up without reopening the full screen
+                // first — matches WhatsApp's own minimized bar, which offers
+                // the same shortcut.
+                InkWell(
+                  onTap: onEndCall,
+                  child: const Padding(
+                    padding: EdgeInsets.all(4),
+                    child: Icon(Icons.call_end, color: Colors.white, size: 20),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

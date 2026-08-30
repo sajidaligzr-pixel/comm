@@ -226,6 +226,7 @@ class CallController extends StateNotifier<CallUiState> {
       durationSec: 0,
       muted: false,
       speakerOn: false,
+      minimized: false,
     );
     unawaited(Helper.setSpeakerphoneOn(false));
 
@@ -263,6 +264,7 @@ class CallController extends StateNotifier<CallUiState> {
       call: call,
       statusText: 'Calling…',
       clearMicError: true,
+      minimized: false,
     );
 
     if (!await _ensureMicPermission()) {
@@ -449,6 +451,29 @@ class CallController extends StateNotifier<CallUiState> {
 
   void dismissMicError() => state = state.copyWith(clearMicError: true);
 
+  /// Lets the user back out of CallOverlay's full-screen UI to use the rest of
+  /// the app — chat list, any thread, including a DIFFERENT conversation than
+  /// the one this call is with — while the call itself keeps running exactly
+  /// as before (matches WhatsApp's own minimized-call bar). Purely a
+  /// presentation toggle — see `CallUiState.minimized`'s own docstring; there
+  /// is nothing else for this to do, since the actual WebRTC connection,
+  /// audio, and duration timer all live on this controller already, entirely
+  /// independent of whether CallOverlay happens to be full-screen or a small
+  /// pill right now. Only meaningful once a call is actually connected or
+  /// still dialing out — an incoming, undecided call stays full-screen forcing
+  /// an actual answer/decline, same as a real phone call would.
+  void minimizeCall() {
+    if (state.phase != CallPhase.connected &&
+        state.phase != CallPhase.outgoing) {
+      return;
+    }
+    state = state.copyWith(minimized: true);
+  }
+
+  /// Tapping the minimized pill (or reopening the call from wherever it's
+  /// surfaced) to bring CallOverlay back to full-screen.
+  void restoreCall() => state = state.copyWith(minimized: false);
+
   void _onReconnect(Map<String, dynamic> _) => checkPendingCall();
 
   /// The catch-up half of push-notification calling (see calls_api.dart's
@@ -462,7 +487,7 @@ class CallController extends StateNotifier<CallUiState> {
   /// event vs. after a reconnect). Feeds straight into `_onRing`, the exact same
   /// handler a live `call.ring` WS event uses, so there's exactly one "start
   /// ringing" code path regardless of which route delivered it.
-  Future<void> checkPendingCall() async {
+  Future<void> checkPendingCall({bool ring = true}) async {
     if (state.phase != CallPhase.idle) {
       return; // already mid-call — nothing to catch up to
     }
@@ -471,26 +496,37 @@ class CallController extends StateNotifier<CallUiState> {
     if (state.phase != CallPhase.idle) {
       return; // re-check: a live event may have landed while awaiting above
     }
-    _onRing(pending.toRingPayload());
+    _onRing(pending.toRingPayload(), startRingtone: ring);
   }
 
   /// Used by the call notification's "Accept" action button
   /// (local_notifications.dart, `showsUserInterface: true` — opens the app straight
-  /// into this via main.dart's `onTap`) — `checkPendingCall`'s normal job is only
-  /// ever surfacing the incoming-call screen for the user to choose from; this goes
-  /// one step further and answers it immediately, matching what tapping "Accept" on
-  /// a real phone call notification does. Safe to call even if a live 'call.ring'
-  /// WS event already got here first: `checkPendingCall` no-ops once `phase` isn't
-  /// idle, and this device is already `incoming` either way, which is all
-  /// `acceptCall` itself needs.
+  /// into this via main.dart's `onTap`) AND by CallEventActionCallAccept
+  /// (call_kit.dart) — the native incoming-call UI's own Accept button, answered
+  /// there before Flutter is even running again on a cold start. `checkPendingCall`'s
+  /// normal job is only ever surfacing the incoming-call screen for the user to
+  /// choose from; this goes one step further and answers it immediately, matching
+  /// what tapping "Accept" on a real phone call notification does. Safe to call
+  /// even if a live 'call.ring' WS event already got here first: `checkPendingCall`
+  /// no-ops once `phase` isn't idle, and this device is already `incoming` either
+  /// way, which is all `acceptCall` itself needs.
+  ///
+  /// `ring: false` — found live: a cold start via CallEventActionCallAccept still
+  /// ran `_onRing`'s normal ringtone playback for the split second before this
+  /// function's own immediate follow-up `acceptCall()` call stopped it again,
+  /// producing an audible glitch and a `PlatformException(AndroidAudioError,
+  /// MEDIA_ERROR_UNKNOWN)` from AudioPlayers being told to stop a player that
+  /// hadn't finished starting — never harmless, and never the right thing to be
+  /// doing at all here: the user already chose Accept before this even ran, so
+  /// there is no "incoming, undecided" moment for a ringtone to represent.
   Future<void> acceptPendingCall() async {
-    await checkPendingCall();
+    await checkPendingCall(ring: false);
     if (state.phase == CallPhase.incoming) {
       await acceptCall();
     }
   }
 
-  void _onRing(Map<String, dynamic> payload) {
+  void _onRing(Map<String, dynamic> payload, {bool startRingtone = true}) {
     // Busy if already on (or wrapping up) a 1:1 call, OR mid a group call — the
     // group-call side has no per-invitee "busy" signal to send back the way 1:1
     // does (see call_coordination.dart's own docstring), so this is the one
@@ -522,10 +558,11 @@ class CallController extends StateNotifier<CallUiState> {
     state = state.copyWith(
       phase: CallPhase.incoming,
       call: call,
-      statusText: 'Incoming call…',
+      statusText: startRingtone ? 'Incoming call…' : 'Connecting…',
       clearMicError: true,
+      minimized: false,
     );
-    unawaited(_startRinging());
+    if (startRingtone) unawaited(_startRinging());
     // Tells the caller's side to move from "Calling…" to "Ringing…" — see
     // CallRingingRequest's own docstring (packages/types/src/calls.ts). Fired here
     // rather than only from a live 'call.ring' arrival specifically because `_onRing`
