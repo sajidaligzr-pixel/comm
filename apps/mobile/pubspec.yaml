@@ -1,7 +1,7 @@
 name: comm_mobile
 description: "Comm — native Flutter client for the existing Comm backend (apps/web, apps/worker). See apps/mobile/README.md for architecture and how this maps to the TypeScript client it replaces."
 publish_to: 'none'
-version: 1.0.0+28
+version: 1.0.0+29
 
 environment:
   sdk: ^3.10.7
@@ -163,7 +163,7 @@ flutter_launcher_icons:
   android: true
   ios: true
   image_path: assets/icon/icon-512.png
-  adaptive_icon_background: "#4F46E5"
+  adaptive_icon_background: "#25D366"
   adaptive_icon_foreground: assets/icon/foreground.png
   remove_alpha_ios: true
 

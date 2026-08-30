@@ -15,12 +15,12 @@ export function Logo({ className, wordmark = true }: { className?: string; wordm
       aria-label="Comm"
       className={className}
     >
-      <rect width="32" height="32" rx="9" fill="#4F46E5" />
+      <rect width="32" height="32" rx="9" fill="#25D366" />
       <path
         d="M7 12.5C7 9.46 9.46 7 12.5 7h7C22.54 7 25 9.46 25 12.5v4c0 3.04-2.46 5.5-5.5 5.5h-6.06L9 25v-4.35A5.5 5.5 0 0 1 7 16.5v-4Z"
         fill="#FFFFFF"
       />
-      <path d="M17.6 12.3a1.6 1.6 0 1 0-2.6 1.25v1.55a1 1 0 0 0 2 0v-1.55c.37-.29.6-.74.6-1.25Z" fill="#4F46E5" />
+      <path d="M17.6 12.3a1.6 1.6 0 1 0-2.6 1.25v1.55a1 1 0 0 0 2 0v-1.55c.37-.29.6-.74.6-1.25Z" fill="#25D366" />
       {wordmark && (
         <text
           x="42"

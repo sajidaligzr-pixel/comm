@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 28,
+  "buildNumber": 29,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-28.apk",
-  "releaseNotes": "Fixed a photo/view-once image flicker (\"blinking\") that happened whenever the chat screen refreshed in the background. Also optimized photos: smaller memory footprint when rendering, and smaller file size when sending."
+  "apkUrl": "/downloads/comm-29.apk",
+  "releaseNotes": "Rebranded the app and website to WhatsApp's signature green (matching the color already used inside the app for buttons/badges) — new app icon, website logo, and site accent color."
 }

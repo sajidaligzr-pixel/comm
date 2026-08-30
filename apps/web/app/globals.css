@@ -8,7 +8,14 @@
   --muted: 244 244 246;
   --muted-foreground: 113 113 122;
   --border: 228 228 231;
-  --primary: 79 70 229;
+  /* WhatsApp's brand green (#25D366) — matches WhatsAppColors.green in
+     apps/mobile/lib/app/app.dart exactly, so both clients (and the logo,
+     see public/logo.svg's own comment) share one brand color. White
+     foreground on it (not a darker readable-contrast text color) is a
+     deliberate match to how the mobile app itself already pairs this
+     green with white icons/text everywhere (FAB, unread badge, send
+     button) — same tradeoff WhatsApp's own UI makes. */
+  --primary: 37 211 102;
   --primary-foreground: 255 255 255;
   --danger: 220 38 38;
 }
@@ -19,8 +26,8 @@
   --muted: 24 24 27;
   --muted-foreground: 161 161 170;
   --border: 39 39 42;
-  --primary: 129 140 248;
-  --primary-foreground: 15 15 20;
+  --primary: 37 211 102;
+  --primary-foreground: 255 255 255;
   --danger: 248 113 113;
 }
 
