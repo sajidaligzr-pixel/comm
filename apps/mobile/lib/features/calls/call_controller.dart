@@ -24,6 +24,7 @@ import '../../api/calls_api.dart';
 import '../../app/providers.dart';
 import '../../realtime/ws_client.dart';
 import 'call_coordination.dart';
+import 'call_foreground_service.dart';
 import 'call_kit.dart' show endCallKit, setCallKitConnected;
 import 'call_state.dart';
 
@@ -199,6 +200,11 @@ class CallController extends StateNotifier<CallUiState> {
     final callId = state.call?.callId;
     if (callId != null) unawaited(endCallKit(callId));
     unawaited(_stopRinging());
+    // Covers every exit path this call could have started the foreground
+    // service from (accepted, or the remote side answering our own outgoing
+    // call) — a harmless no-op if it was never started (e.g. the call never
+    // got past ringing). See call_foreground_service.dart's own docstring.
+    unawaited(CallForegroundService.stop());
 
     _ringTimer?.cancel();
     _ringTimer = null;
@@ -365,6 +371,10 @@ class CallController extends StateNotifier<CallUiState> {
     // Same active earpiece-forcing fix as startCall above — see that call site's
     // comment for why this can't be left to an assumed default.
     unawaited(Helper.setSpeakerphoneOn(false));
+    // This call is genuinely proceeding now (mic granted, about to build the
+    // peer connection) — see call_foreground_service.dart's own docstring for
+    // why an active call needs this at all.
+    unawaited(CallForegroundService.start());
 
     final iceServers = await _callsApi.turnCredentials();
     final pc = await _createPeerConnection(iceServers);
@@ -554,6 +564,10 @@ class CallController extends StateNotifier<CallUiState> {
       }
       _pendingCandidates.clear();
       state = state.copyWith(statusText: 'Connecting…');
+      // The remote side just answered our own outgoing call — genuinely
+      // active now, same as acceptCall()'s own call site. See
+      // call_foreground_service.dart's own docstring.
+      unawaited(CallForegroundService.start());
     }();
   }
 

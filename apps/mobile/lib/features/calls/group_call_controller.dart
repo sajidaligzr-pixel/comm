@@ -25,6 +25,7 @@ import '../../api/calls_api.dart';
 import '../../app/providers.dart';
 import '../../realtime/ws_client.dart';
 import 'call_coordination.dart';
+import 'call_foreground_service.dart';
 import 'group_call_state.dart';
 
 const _uuid = Uuid();
@@ -115,6 +116,10 @@ class GroupCallController extends StateNotifier<GroupCallUiState> {
     _localStream = null;
     _durationTimer?.cancel();
     _durationTimer = null;
+    // Covers every way a group call can end — see call_controller.dart's
+    // _teardown for the identical reasoning; harmless no-op if _enterCall
+    // never got far enough to start it (e.g. mic permission denied).
+    unawaited(CallForegroundService.stop());
 
     if (!mounted) return;
     state = state.copyWith(
@@ -264,6 +269,11 @@ class GroupCallController extends StateNotifier<GroupCallUiState> {
     // every real device (found live on 1:1 calling; a group call sets up its own
     // WebRTC audio session the identical way, so it has the identical gap).
     unawaited(Helper.setSpeakerphoneOn(false));
+    // Same fix as call_controller.dart's acceptCall/_onAnswered — a group call
+    // runs the identical flutter_webrtc audio engine in this same process, so
+    // it has the identical "voice stops when the screen locks/app backgrounds"
+    // gap without this. See call_foreground_service.dart's own docstring.
+    unawaited(CallForegroundService.start());
     return true;
   }
 

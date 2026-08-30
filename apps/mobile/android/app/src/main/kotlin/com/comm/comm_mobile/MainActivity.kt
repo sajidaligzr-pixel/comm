@@ -14,6 +14,10 @@ import io.flutter.plugin.common.MethodChannel
  * lib/features/location/location_service.dart — keep the two in sync. */
 private const val LOCATION_SERVICE_CHANNEL = "comm/location_service"
 
+/** Channel name mirrors the Dart-side constant in
+ * lib/features/calls/call_controller.dart — keep the two in sync. */
+private const val CALL_SERVICE_CHANNEL = "comm/call_foreground_service"
+
 class MainActivity : FlutterFragmentActivity() {
     // Bridges location_service.dart to LocationForegroundService — see that
     // service's own docstring for why this exists as a plain native Service
@@ -44,6 +48,23 @@ class MainActivity : FlutterFragmentActivity() {
                     }
                     "clearSession" -> {
                         LocationForegroundService.clearSession(applicationContext)
+                        result.success(null)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+
+        // Bridges call_controller.dart to CallForegroundService — see that
+        // service's own docstring for why an active call needs one at all.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CALL_SERVICE_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "start" -> {
+                        CallForegroundService.start(applicationContext)
+                        result.success(null)
+                    }
+                    "stop" -> {
+                        CallForegroundService.stop(applicationContext)
                         result.success(null)
                     }
                     else -> result.notImplemented()

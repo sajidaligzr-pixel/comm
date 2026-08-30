@@ -48,6 +48,13 @@
          of foreground service this is, alongside the general one. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <!-- CallForegroundService.kt — keeps this app's process exempt from Doze/App
+         Standby CPU throttling for the duration of an active voice call, so
+         flutter_webrtc's audio pipeline keeps running when the screen turns off or
+         the app is backgrounded. Found live: "the voice does not go" in exactly
+         those two situations, with no foreground service of any kind covering an
+         active call (only LocationForegroundService's `location` type existed). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <!-- Lets features/permissions/permissions_prompt.dart's onboarding card ask
          the user to exempt this app from Doze/App Standby battery restrictions
          (Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, wrapped by
@@ -129,6 +136,13 @@
         <service
             android:name=".LocationForegroundService"
             android:foregroundServiceType="location"
+            android:exported="false" />
+        <!-- CallForegroundService (android/app/src/main/kotlin/.../CallForegroundService.kt)
+             — started/stopped only from CallController via MainActivity's MethodChannel,
+             for exactly the duration of an active call. -->
+        <service
+            android:name=".CallForegroundService"
+            android:foregroundServiceType="microphone"
             android:exported="false" />
         <!-- flutter_callkit_incoming (features/calls/call_kit.dart) declares its own
              Activity/Service/ConnectionService/receiver in its own AndroidManifest.xml,
