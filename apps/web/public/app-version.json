@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 27,
+  "buildNumber": 28,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-27.apk",
-  "releaseNotes": "The real fix for calls not ending properly: the signal that tells the ringing screen to close when a call is cancelled or ends was being sent in a way Android silently never delivered. Confirmed on a real device — the screen now turns back off within a few seconds of a call ending, instead of staying lit for the rest of the original ring window."
+  "apkUrl": "/downloads/comm-28.apk",
+  "releaseNotes": "Fixed a photo/view-once image flicker (\"blinking\") that happened whenever the chat screen refreshed in the background. Also optimized photos: smaller memory footprint when rendering, and smaller file size when sending."
 }

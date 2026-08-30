@@ -1802,6 +1802,15 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final picked = await ImagePicker().pickImage(
       source: ImageSource.gallery,
       imageQuality: 90,
+      // A modern phone photo is easily 4000x3000+; nothing in this app's UI
+      // ever displays one wider than the screen, and this pipeline still
+      // has to encrypt, upload, and later download+decrypt every byte of it.
+      // Capping the longest side at 1600 (well above what any bubble or the
+      // fullscreen viewer needs on a real device) keeps quality genuinely
+      // indistinguishable on-screen while cutting typical payload size
+      // dramatically on top of `imageQuality`'s own re-encode.
+      maxWidth: 1600,
+      maxHeight: 1600,
     );
     if (picked == null) return;
     final bytes = await picked.readAsBytes();
@@ -1826,6 +1835,13 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final picked = await ImagePicker().pickImage(
       source: ImageSource.gallery,
       imageQuality: 70,
+      // Same reasoning as `_pickAndSendPhoto`'s own `maxWidth`/`maxHeight`,
+      // more important here: this path's whole point is staying under
+      // `_maxViewOnceBytes`, and downscaling resolution buys far more of
+      // that budget than `imageQuality` alone ever could for a full-res
+      // source photo.
+      maxWidth: 1600,
+      maxHeight: 1600,
     );
     if (picked == null) return;
     final bytes = await picked.readAsBytes();
@@ -3049,18 +3065,67 @@ String _formatPlaybackDuration(Duration d) {
 /// bubbles.tsx). Tap to expand full-screen; no download button (mobile's
 /// generic file bubble above already covers "save this," and an inline photo
 /// here is view-only by design, same scope apps/web ships for this pass).
-class _InlineImageBubble extends StatelessWidget {
+///
+/// A `StatefulWidget` that decodes once in `initState` (not a plain
+/// `StatelessWidget` decoding inline in `build`), because this bubble sits in
+/// a `ListView.builder` row that rebuilds on every unrelated `setState` in the
+/// screen (`_pollDeliveryStatus`'s 8s timer, a realtime `read`/`delivered`
+/// event, starring a message, ...) — decoding fresh `base64Decode` bytes on
+/// every one of those rebuilds handed `Image.memory` a brand-new `Uint8List`
+/// each time, and since `Uint8List` doesn't override `==`, `MemoryImage`'s
+/// identity-based equality never matched the previous frame: Flutter treated
+/// it as a genuinely new image, clearing the old frame while it decoded the
+/// "new" one — the visible blink reported live. Decoding once and reusing the
+/// same `Uint8List` (invalidated only if `base64` itself actually changes,
+/// via `didUpdateWidget` — belt-and-suspenders for a message list that can
+/// still shift slot indices after a deletion) makes every rebuild reuse the
+/// exact same `MemoryImage`, so Flutter recognizes it as already-resolved and
+/// never swaps frames at all. `gaplessPlayback`/`cacheWidth` are additional,
+/// independent hardening: `gaplessPlayback` means even a genuine image change
+/// fades rather than blanks, and `cacheWidth` (sized to the actual on-screen
+/// box, not the source photo's full resolution) avoids decoding a multi-
+/// megapixel camera photo into memory just to paint it into a 220x220
+/// thumbnail — real memory/CPU savings on every open of a chat with photos.
+class _InlineImageBubble extends StatefulWidget {
   const _InlineImageBubble({required this.base64});
   final String base64;
 
   @override
+  State<_InlineImageBubble> createState() => _InlineImageBubbleState();
+}
+
+class _InlineImageBubbleState extends State<_InlineImageBubble> {
+  late Uint8List _bytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _bytes = base64Decode(widget.base64);
+  }
+
+  @override
+  void didUpdateWidget(covariant _InlineImageBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.base64 != widget.base64) {
+      _bytes = base64Decode(widget.base64);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final bytes = base64Decode(base64);
+    final cacheWidth = (220 * MediaQuery.of(context).devicePixelRatio).round();
     return GestureDetector(
-      onTap: () => _showFullscreenImage(context, bytes),
+      onTap: () => _showFullscreenImage(context, _bytes),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.memory(bytes, width: 220, height: 220, fit: BoxFit.cover),
+        child: Image.memory(
+          _bytes,
+          width: 220,
+          height: 220,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          cacheWidth: cacheWidth,
+        ),
       ),
     );
   }
@@ -3180,6 +3245,21 @@ class _MediaImageBubbleState extends State<_MediaImageBubble> {
     _future = widget.ensureDecrypted(widget.attachment);
   }
 
+  // Defensive, mirrors `_InlineImageBubble`'s own reasoning: this row's
+  // `ListView.builder` slot can end up reused for a *different* message (a
+  // deletion above it shifts every later index down by one) — without this,
+  // `_future` would keep resolving to the previous slot's already-decrypted
+  // bytes forever, silently showing the wrong photo. `objectKey` is this
+  // attachment's stable identity (AttachmentDescriptor), so this only
+  // refetches when the underlying photo actually changed.
+  @override
+  void didUpdateWidget(covariant _MediaImageBubble oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.attachment.objectKey != widget.attachment.objectKey) {
+      _future = widget.ensureDecrypted(widget.attachment);
+    }
+  }
+
   void _retry() {
     setState(() => _future = widget.ensureDecrypted(widget.attachment));
   }
@@ -3218,11 +3298,19 @@ class _MediaImageBubbleState extends State<_MediaImageBubble> {
           );
         }
         final bytes = snapshot.data!;
+        final cacheWidth = (220 * MediaQuery.of(context).devicePixelRatio).round();
         return GestureDetector(
           onTap: () => _showFullscreenImage(context, bytes),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: Image.memory(bytes, width: 220, height: 220, fit: BoxFit.cover),
+            child: Image.memory(
+              bytes,
+              width: 220,
+              height: 220,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              cacheWidth: cacheWidth,
+            ),
           ),
         );
       },
