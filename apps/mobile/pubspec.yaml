@@ -1,7 +1,7 @@
 name: comm_mobile
 description: "Comm — native Flutter client for the existing Comm backend (apps/web, apps/worker). See apps/mobile/README.md for architecture and how this maps to the TypeScript client it replaces."
 publish_to: 'none'
-version: 1.0.0+33
+version: 1.0.0+38
 
 environment:
   sdk: ^3.10.7
@@ -34,17 +34,35 @@ dependencies:
   cryptography_flutter: ^2.3.4
 
   # --- Local storage (mirrors apps/web/lib/crypto/db.ts + message-cache.ts) --
-  # flutter_secure_storage: every blob this app stores locally (identity bundle,
-  # KEK salt, biometric wrap, cached decrypted messages) — the direct analog of
-  # db.ts's IndexedDB "wrapped-blobs" store, backed by Keychain/Keystore. A
-  # structured on-device database (drift/sqlite3_flutter_libs — the original
-  # scaffold's plan) was never actually wired to anything: message_cache.dart ended
-  # up small enough to live directly on flutter_secure_storage like everything
-  # else, so drift/sqlite3_flutter_libs were dropped — sqlite3_flutter_libs alone
-  # was shipping a full native SQLite binary per ABI (~4.5MB combined) for a
-  # dependency nothing imported.
+  # flutter_secure_storage: every blob this app stores locally EXCEPT cached
+  # message history (identity bundle, KEK salt, biometric wrap, session state)
+  # — the direct analog of db.ts's IndexedDB "wrapped-blobs" store, backed by
+  # Keychain/Keystore.
   path_provider: ^2.1.5
   flutter_secure_storage: ^9.2.4
+  # Cached DECRYPTED message history (lib/storage/message_db.dart,
+  # lib/crypto/message_cache.dart) specifically — reintroduced (see this
+  # comment's own history below) once flutter_secure_storage's one-blob-per-
+  # conversation design was confirmed live to be the real cause of "opening a
+  # big chat takes a while, shows a spinner": every open had to pull the WHOLE
+  # conversation's ciphertext blob out of Keystore/Keychain (real per-call
+  # overhead beyond plain file I/O) and JSON-decode all of it at once, with no
+  # way to ask for just the newest slice — exactly the gap a real indexed
+  # database (SQLite here, matching WhatsApp's own approach) closes: query
+  # only the rows actually needed, ORDER BY/LIMIT done by the database, not by
+  # loading everything into Dart first. Each row's own content still goes
+  # through the exact same per-message AEAD wrap/unwrap this app already uses
+  # everywhere else (crypto/storage/wrap.dart) — only `id`/`conversationId`/
+  # `sentAt` are plaintext SQL columns, mirroring the server's own Message
+  # table's already-accepted metadata-visible/content-encrypted split
+  # (docs/02-database-schema.md), not a new exposure. `sqlite3` (raw FFI
+  # bindings, not `drift`) keeps this app's established no-codegen convention
+  # (api/dtos.dart's own docstring) — hand-written SQL, no build_runner step.
+  # A scaffold-era attempt at this same idea was dropped early on (this
+  # comment used to explain why) when message_cache.dart still fit comfortably
+  # in one blob per conversation; it doesn't any more.
+  sqlite3: ^2.7.6
+  sqlite3_flutter_libs: ^0.5.28
 
   # --- Calling (mirrors components/call/call-provider.tsx's signaling) -------
   flutter_webrtc: ^0.14.1

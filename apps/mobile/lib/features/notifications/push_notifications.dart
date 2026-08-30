@@ -26,6 +26,7 @@ library;
 
 import 'dart:async' show unawaited;
 import 'dart:developer' as developer;
+import 'dart:io' show Platform;
 
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
@@ -60,13 +61,31 @@ Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
     WidgetsFlutterBinding.ensureInitialized();
     await Firebase.initializeApp();
     await ensurePluginInitializedForBackgroundIsolate();
-    await _showFromData(message.data);
+    // iOS only, from here: a `message` push now carries a real native `aps.alert`
+    // (push-dispatch.ts's `sendFcm` docstring), which the OS displays directly the
+    // instant it arrives — background or fully force-quit, no app code required at
+    // all. Rendering this device's OWN local notification on top of that would
+    // double the banner, so it's skipped here specifically. Android gets no such
+    // native alert (still data-only, same as it's always been, since it already
+    // reliably wakes this handler on its own) — `renderMessageBanner` stays true
+    // there, unchanged. Only ever matters for `type == 'message'`; calls render
+    // through `showIncomingCall`/CallKit regardless of platform, untouched.
+    await _showFromData(message.data, renderMessageBanner: !Platform.isIOS);
   } catch (e, st) {
     developer.log('firebaseMessagingBackgroundHandler threw', name: 'Comm', error: e, stackTrace: st);
   }
 }
 
-Future<void> _showFromData(Map<String, dynamic> data) async {
+/// [renderMessageBanner] exists for exactly one caller
+/// (`firebaseMessagingBackgroundHandler`'s own docstring on why) — the foreground
+/// listener below always leaves it at the default `true`, since `FirebaseMessaging.
+/// onMessage` only ever fires while this app is genuinely foregrounded, where no
+/// native banner is shown on any platform regardless of `alert`'s presence — this
+/// device's own local notification remains the only thing that ever renders one.
+Future<void> _showFromData(
+  Map<String, dynamic> data, {
+  bool renderMessageBanner = true,
+}) async {
   final type = data['type'] as String?;
   if (type == 'call') {
     final callId = data['callId'] as String?;
@@ -94,11 +113,13 @@ Future<void> _showFromData(Map<String, dynamic> data) async {
   } else if (type == 'message') {
     final conversationId = data['conversationId'] as String?;
     if (conversationId == null) return;
-    await showNewMessageNotification(
-      conversationId: conversationId,
-      title: data['title'] as String? ?? 'Comm',
-      body: data['body'] as String? ?? 'New message',
-    );
+    if (renderMessageBanner) {
+      await showNewMessageNotification(
+        conversationId: conversationId,
+        title: data['title'] as String? ?? 'Comm',
+        body: data['body'] as String? ?? 'New message',
+      );
+    }
     final messageId = data['messageId'] as String?;
     if (messageId != null) unawaited(_ackDelivered(messageId));
   }

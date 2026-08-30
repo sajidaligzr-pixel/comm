@@ -65,22 +65,48 @@ async function sendWebPush(subscription: PushSubscriptionRequest, payload: unkno
 }
 
 /**
- * Data-only (no top-level `notification` key), deliberately — an FCM message that
- * includes one is auto-displayed by the OS while this app is backgrounded and never
- * reaches Dart at all, which is exactly wrong for the call case (needs code to run,
- * not just a tray icon) and only accidentally right for messages. Sending both
- * message and call pushes as data-only keeps one code path
- * (firebaseMessagingBackgroundHandler / the foreground listener,
- * push_notifications.dart) responsible for turning either into an actual system
- * notification via flutter_local_notifications, matching how the message
- * notification already looks whether it came live over WS or cold via push.
+ * Data-only by default, deliberately — an FCM message that includes a top-level
+ * `notification` is auto-displayed by the OS while this app is backgrounded and
+ * never reaches Dart at all, which is exactly wrong for the call case (needs code
+ * to run, not just a tray icon). Calls (and Android messages) keep exactly that
+ * shape: `firebaseMessagingBackgroundHandler`/the foreground listener
+ * (push_notifications.dart) turn the data into an actual system notification via
+ * flutter_local_notifications, matching how it already looks whether it came live
+ * over WS or cold via push.
+ *
+ * `alert` is the one deliberate exception — passed only for a `message` push
+ * (`handleNewMessage` below), and only affects the `apns` block (Android's own
+ * `android.priority` config, and the FCM tokens it targets, are untouched by it
+ * either way). Found live: "notification not instant, and mostly doesn't come at
+ * all once the app is closed" — reported on iOS specifically, never Android, and
+ * for good reason. A pure `content-available` push like the one this function
+ * used to always send for messages too is exactly what Apple calls a *silent*
+ * push: delivery is explicitly best-effort, throttled by the app's background
+ * budget, and outright suspended once the user has force-quit the app — none of
+ * which ever applied to Android's own FCM data-message delivery, which is why "it
+ * works fine on Android" was true the whole time. A real `alert` (+ `sound`) is a
+ * VISIBLE push instead: Apple's own notification center displays it directly,
+ * promptly, and regardless of the app's own process/background-budget state —
+ * the same guarantee Android's data-only path already had by a different route.
+ * `data` (this device's own conversationId/messageId for the delivered-ack) still
+ * rides alongside it unchanged; push_notifications.dart's own `_showFromData`
+ * skips re-rendering its OWN local notification on top of this native one for
+ * exactly this case (see that file's own docstring) rather than double-banner-ing.
  */
-async function sendFcm(token: string, data: Record<string, string>): Promise<void> {
+async function sendFcm(token: string, data: Record<string, string>, alert?: { title: string; body: string }): Promise<void> {
   await getMessaging().send({
     token,
     data,
     android: { priority: 'high' },
-    apns: { headers: { 'apns-priority': '10' }, payload: { aps: { contentAvailable: true } } },
+    apns: {
+      headers: { 'apns-priority': '10' },
+      payload: {
+        aps: {
+          contentAvailable: true,
+          ...(alert ? { alert: { title: alert.title, body: alert.body }, sound: 'default' } : {}),
+        },
+      },
+    },
   });
 }
 
@@ -95,7 +121,10 @@ async function isGoneError(err: unknown): Promise<boolean> {
   return code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token';
 }
 
-async function dispatchTo(deviceId: string, payload: { messagePayload?: unknown; fcmData?: Record<string, string> }): Promise<void> {
+async function dispatchTo(
+  deviceId: string,
+  payload: { messagePayload?: unknown; fcmData?: Record<string, string>; iosAlert?: { title: string; body: string } },
+): Promise<void> {
   const subRow = await prisma.pushSubscription.findUnique({ where: { deviceId } });
   if (!subRow) return; // most devices won't have push enabled at all — normal, not an error
 
@@ -103,7 +132,7 @@ async function dispatchTo(deviceId: string, payload: { messagePayload?: unknown;
   try {
     if (subRow.provider === PushProvider.fcm) {
       if (!fcmConfigured || !payload.fcmData) return;
-      await sendFcm((subscription as FcmPushSubscriptionRequest).token, payload.fcmData);
+      await sendFcm((subscription as FcmPushSubscriptionRequest).token, payload.fcmData, payload.iosAlert);
       // Success-path visibility for calls specifically (rare/high-stakes events,
       // unlike the per-message push below) — until now this whole function was
       // silent on success, so a report of "the phone never rang" had nothing
@@ -155,6 +184,10 @@ async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): 
     // No web_push equivalent needed: `messagePayload` already goes through
     // chats-shell.tsx's live 'new' handler, which acks delivery itself once decrypted.
     fcmData: { type: 'message', conversationId: event.message.conversationId, messageId: event.message.id, title: 'Comm', body },
+    // See sendFcm's own docstring — the one push type that gets a real native
+    // alert instead of staying silent-only, specifically to fix iOS's
+    // notification-reliability gap.
+    iosAlert: { title: 'Comm', body },
   });
 }
 
@@ -309,23 +342,52 @@ async function handleCallRing(event: Extract<CallEvent, { type: 'call.ring' }>):
  * `call.ring` push woke it from a fully-closed state — see `handleCallRing`
  * above) to dismiss it: the caller cancelled/hung up before this device
  * answered, or the call was answered/declined on another of this user's
- * devices. Without this, a device woken purely by FCM into a background
- * isolate (no live WS — call_controller.dart's `CallController` never runs
- * there at all) keeps ringing until its own local ~45s no-answer timeout even
- * though the call is already over — found live testing exactly this
- * scenario: cancelling a call from apps/web while apps/mobile's callee was
- * still in a fully-terminated state.
+ * devices. Without this, a device that was woken purely by a push (no live
+ * WS — call_controller.dart's `CallController` never runs at all until the
+ * app is genuinely reachable) keeps ringing until its own local ~45s
+ * no-answer timeout even though the call is already over.
  *
- * Android/FCM only for now, deliberately: iOS's own ring is native
- * PushKit -> CallKit, and the VoIP push that wakes it spins up the full
- * Flutter engine (not just an isolate the way FCM's background handler
- * does), which reaches `CallController`'s live WS far more reliably in
- * practice. A real gap worth the same treatment later if it's ever actually
- * reported there too, not chased blind today.
+ * iOS gets its own APNs VoIP push here (mirrors `handleCallRing` above),
+ * checked first exactly like that function — NOT left to fall through to the
+ * WS-reconnect assumption this used to rely on there ("the VoIP push spins up
+ * the full Flutter engine, which reaches CallController's live WS far more
+ * reliably than Android's background isolate does"). That assumption doesn't
+ * hold up in practice: reported live as the exact same "cancel a call, it
+ * keeps ringing" bug this dispatch already fixed for Android, just for a
+ * different reason (a genuine push-delivery gap — establishing the WS
+ * connection and resyncing state still takes real wall-clock time a
+ * freshly-woken cold launch doesn't reliably have, not a wake-lock left
+ * held). AppDelegate.swift's own `didReceiveIncomingPushWith` distinguishes
+ * this from a real incoming call via the `type: 'end'` field below, calling
+ * the plugin's `endCall` rather than `showCallkitIncoming` — Apple still
+ * requires every VoIP push report SOMETHING to CallKit, and reporting the
+ * already-shown call ended satisfies that exactly as well as ringing a new
+ * one would.
+ *
+ * Android (no VoipPushToken row ever exists for it) and an iOS device that
+ * hasn't registered a VoIP token yet both fall through to the existing FCM
+ * path unchanged.
  */
 async function handleCallStopRinging(
   event: Extract<CallEvent, { type: 'call.ended' | 'call.rejected' }>,
 ): Promise<void> {
+  if (apnsVoipConfigured) {
+    const voipRow = await prisma.voipPushToken.findUnique({ where: { deviceId: event.targetDeviceId } });
+    if (voipRow) {
+      const token = decryptVoipToken(voipRow.tokenCiphertext);
+      try {
+        await sendApnsVoip(token, { id: event.callId, type: 'end' });
+      } catch (err) {
+        if ((err as { apnsGone?: boolean }).apnsGone) {
+          await prisma.voipPushToken.deleteMany({ where: { deviceId: event.targetDeviceId } });
+        } else {
+          console.error('[worker] APNs VoIP end-call push failed', err);
+        }
+      }
+      return;
+    }
+  }
+
   await dispatchTo(event.targetDeviceId, {
     fcmData: { type: 'call-end', callId: event.callId },
   });

@@ -67,6 +67,25 @@ import flutter_callkit_incoming
       return
     }
     let id = payload.dictionaryPayload["id"] as? String ?? UUID().uuidString
+
+    // The caller cancelled/hung up (or another of this account's devices
+    // answered/declined first) before this device answered —
+    // handleCallStopRinging (push-dispatch.ts) sends this as its own VoIP push
+    // now rather than leaving it to CallController's live WS to catch up in
+    // time, after that was found live not to hold up (this same "cancel a
+    // call, it keeps ringing" bug Android already had once, just caused here
+    // by a push-delivery gap instead of a wake-lock left held — see that
+    // function's own docstring). Apple still requires every VoIP push report
+    // something to CallKit; reporting the already-shown call ended (via the
+    // plugin's own endCall, the same native call Dart's normal hang-up path
+    // already uses) satisfies that exactly as well as ringing a new call would.
+    if payload.dictionaryPayload["type"] as? String == "end" {
+      let endData = flutter_callkit_incoming.Data(id: id, nameCaller: "", handle: "", type: 0)
+      SwiftFlutterCallkitIncomingPlugin.sharedInstance?.endCall(endData)
+      completion()
+      return
+    }
+
     let nameCaller = payload.dictionaryPayload["nameCaller"] as? String ?? "Unknown"
     let handle = payload.dictionaryPayload["handle"] as? String ?? ""
     let data = flutter_callkit_incoming.Data(id: id, nameCaller: nameCaller, handle: handle, type: 0)
