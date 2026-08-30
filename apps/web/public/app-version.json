@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 26,
+  "buildNumber": 27,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-26.apk",
-  "releaseNotes": "Found the real cause of calls not ending properly when cancelled: a crash inside the calling library itself on every single incoming call, which silently broke its ability to track that a call was active at all. Cancelling/ending a call now reliably stops the ring, clears the notification, and turns the screen back off right away."
+  "apkUrl": "/downloads/comm-27.apk",
+  "releaseNotes": "The real fix for calls not ending properly: the signal that tells the ringing screen to close when a call is cancelled or ends was being sent in a way Android silently never delivered. Confirmed on a real device — the screen now turns back off within a few seconds of a call ending, instead of staying lit for the rest of the original ring window."
 }

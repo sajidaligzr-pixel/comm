@@ -58,10 +58,22 @@ class CallkitIncomingActivity : Activity() {
             val intent = Intent("${context.packageName}.${ACTION_ENDED_CALL_INCOMING}")
             intent.putExtra("ACCEPTED", isAccepted)
             intent.setPackage(context.packageName)
-            intent.setClassName(
-                context.packageName,
-                "com.hiennv.flutter_callkit_incoming.CallkitIncomingActivity"
-            )
+            // Comm patch: removed setClassName(..., "CallkitIncomingActivity") — this
+            // made the broadcast an EXPLICIT-component intent, but
+            // endedCallkitIncomingBroadcastReceiver (this Activity's own onCreate)
+            // registers dynamically via Context.registerReceiver()/IntentFilter, and
+            // Android never delivers an explicit-component broadcast to a
+            // context-registered receiver (only to a manifest-declared <receiver> —
+            // which CallkitIncomingActivity, being an <activity>, isn't). Confirmed
+            // live: clearIncomingNotification's sendBroadcast() call always
+            // "succeeded" with no exception, but the Activity's own onReceive never
+            // once fired — this specific "close the already-showing incoming-call
+            // screen" signal had no working delivery path at all, so the screen (and
+            // its screen-wake lock) only ever closed via its own internal ~45s
+            // finishTimeout(), regardless of accept/decline/remote-end. setPackage()
+            // above is enough scoping for this same-app broadcast; matching now
+            // happens purely by action, same as any other dynamically-registered
+            // receiver.
             return intent
         }
     }
