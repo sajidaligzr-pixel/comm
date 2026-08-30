@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 29,
+  "buildNumber": 30,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-29.apk",
-  "releaseNotes": "Rebranded the app and website to WhatsApp's signature green (matching the color already used inside the app for buttons/badges) — new app icon, website logo, and site accent color."
+  "apkUrl": "/downloads/comm-30.apk",
+  "releaseNotes": "Fixed a real gap in multi-device history sync: a new device could fail to decrypt old messages because no existing device had ever contributed them to the shared history archive. Existing devices now backfill their message history automatically (once per chat) so it becomes available to any device added later."
 }

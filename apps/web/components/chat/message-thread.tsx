@@ -8,7 +8,7 @@ import { formatBubbleTime, formatDateSeparator, formatRecordingTime, isSameCalen
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { encryptForDevice, decryptFromDeviceOnce } from '@/lib/crypto/conversation-crypto';
 import { getCurrentKek } from '@/lib/crypto/kek-holder';
-import { syncHistoryEntry, tryDecryptViaHistory } from '@/lib/crypto/history-sync';
+import { maybeBackfillHistoryEntries, syncHistoryEntry, tryDecryptViaHistory } from '@/lib/crypto/history-sync';
 import {
   loadCachedMessages,
   appendCachedMessage,
@@ -352,6 +352,7 @@ export function MessageThread({
 
       const cached = await loadCachedMessages(kek, conversationId);
       if (!cancelled) setMessages(cached);
+      void maybeBackfillHistoryEntries(conversationId, cached);
 
       const [otherMemberDevices, ownDevices] = await Promise.all([
         apiFetch<Array<{ userId: string; deviceId: string }>>(`/api/conversations/${conversationId}/recipient-devices`),

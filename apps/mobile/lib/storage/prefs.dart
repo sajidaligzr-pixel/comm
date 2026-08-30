@@ -106,3 +106,33 @@ Future<void> setLastConsumedLaunchNotification(String payload) =>
 
 Future<String?> getLastConsumedLaunchNotification() =>
     _storage.read(key: _lastConsumedLaunchNotificationKey);
+
+/// Marks that THIS device has, at least once, walked a conversation's full
+/// local cache through `syncHistoryEntry` (history_sync.dart) — closes the gap
+/// where `thread_screen.dart`'s catch-up loop only ever calls `syncHistoryEntry`
+/// for a message it *newly* decrypts (`if (cachedIds.contains(dto.id)) continue`
+/// skips straight past anything already cached), so a message this device
+/// already had before this backfill existed — or from before multi-device
+/// history sync shipped at all — never got a `message_history_entries` row
+/// written for it by anyone, ever. A brand-new device added later then
+/// correctly, but unhelpfully, can't decrypt it: no device had ever contributed
+/// it to the account's shared history archive. Reported live exactly this way:
+/// a new device's "old message can't be decrypted." NOT scoped by username —
+/// a conversationId is already globally unique to the specific accounts in it,
+/// so there's no cross-account collision risk from leaving it unscoped, and
+/// unscoped is simpler.
+///
+/// Deliberately a durable per-conversation marker, not "always resync on every
+/// open": `writeMessageHistoryEntry` (server/modules/history/service.ts) is a
+/// real `upsert` (a write every call, not a cheap existence check), so
+/// resyncing an already-backfilled conversation's full history on every single
+/// open would be pure waste at any real conversation size. One full pass per
+/// device per conversation is enough — after that, the normal live/catch-up
+/// path already keeps new messages covered.
+String _historyBackfillDoneKey(String conversationId) => 'comm_history_backfill_done__$conversationId';
+
+Future<void> setHistoryBackfillDone(String conversationId) =>
+    _storage.write(key: _historyBackfillDoneKey(conversationId), value: '1');
+
+Future<bool> getHistoryBackfillDone(String conversationId) async =>
+    (await _storage.read(key: _historyBackfillDoneKey(conversationId))) != null;

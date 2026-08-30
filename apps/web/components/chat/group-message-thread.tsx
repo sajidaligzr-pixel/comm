@@ -23,7 +23,7 @@ import { cn } from '@/lib/cn';
 import { formatBubbleTime, formatDateSeparator, isSameCalendarDay } from '@/lib/format';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { getCurrentKek } from '@/lib/crypto/kek-holder';
-import { syncHistoryEntry, tryDecryptViaHistory } from '@/lib/crypto/history-sync';
+import { maybeBackfillHistoryEntries, syncHistoryEntry, tryDecryptViaHistory } from '@/lib/crypto/history-sync';
 import {
   loadCachedMessages,
   appendCachedMessage,
@@ -279,6 +279,7 @@ export function GroupMessageThread({
 
       const cached = await loadCachedMessages(kek, conversationId);
       if (!cancelled) setMessages(cached);
+      void maybeBackfillHistoryEntries(conversationId, cached);
 
       const page = await apiFetch<{ items: MessageDto[]; nextCursor: string | null }>(
         `/api/conversations/${conversationId}/messages?limit=50`,

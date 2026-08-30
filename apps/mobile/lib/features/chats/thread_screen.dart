@@ -40,6 +40,7 @@ import '../../crypto/kek_holder.dart';
 import '../../crypto/message_cache.dart';
 import '../../crypto/session/session.dart' show MessageEnvelope;
 import '../../shared/widgets/error_state.dart';
+import '../../storage/prefs.dart' show getHistoryBackfillDone, setHistoryBackfillDone;
 import '../auth/auth_controller.dart';
 import '../auth/auth_state.dart';
 import '../calls/call_controller.dart';
@@ -748,6 +749,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
         });
       }
       _restartDisappearingPruneTimer(conversation.disappearingTimer);
+      unawaited(_maybeBackfillHistoryEntries(cached));
 
       if (conversation.type == 'group' && conversation.groupId != null) {
         final groupController = ref.read(groupSessionControllerProvider);
@@ -850,6 +852,33 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       _loading = true;
     });
     _load();
+  }
+
+  /// One-time-per-conversation-per-device backfill closing a real gap in
+  /// multi-device history sync (docs/07-auth-architecture.md, history_sync.dart):
+  /// the catch-up loop below (`if (cachedIds.contains(dto.id)) continue`) only
+  /// ever calls `syncHistoryEntry` for a message THIS device *newly* decrypts —
+  /// anything already sitting in this device's cache (from before this feature
+  /// existed, or just from ordinary earlier use) never gets a
+  /// `message_history_entries` row written by anyone, so a brand-new device
+  /// added later genuinely has no path to recover it — not a bug in the new
+  /// device, a gap in every existing device ever contributing that backlog.
+  /// Reported live exactly this way: a new device's "old message can't be
+  /// decrypted." Walks this conversation's already-loaded cache once
+  /// (`getHistoryBackfillDone`/`setHistoryBackfillDone`, prefs.dart) — run
+  /// sequentially, not fired all at once, to stay well under
+  /// `historyEntryWrite`'s rate limit (packages/security/src/rate-limit.ts) on
+  /// a long conversation's first pass; run in the background rather than
+  /// awaited by `_load()` so opening a long conversation for the first time
+  /// after this ships isn't held up by it.
+  Future<void> _maybeBackfillHistoryEntries(List<CachedMessage> cachedMsgs) async {
+    if (cachedMsgs.isEmpty) return;
+    if (await getHistoryBackfillDone(widget.conversationId)) return;
+    final historyApi = ref.read(historyApiProvider);
+    for (final m in cachedMsgs) {
+      await syncHistoryEntry(historyApi, m);
+    }
+    await setHistoryBackfillDone(widget.conversationId);
   }
 
   /// (Re)starts the periodic local-pruning timer for the conversation's current

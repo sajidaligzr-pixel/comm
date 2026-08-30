@@ -31,6 +31,50 @@ export async function syncHistoryEntry(message: CachedMessage): Promise<void> {
   }
 }
 
+const BACKFILL_DONE_KEY_PREFIX = 'comm-history-backfill-done__';
+
+/**
+ * One-time-per-conversation-per-device backfill closing a real gap in this
+ * feature: `message-thread.tsx`/`group-message-thread.tsx`'s own catch-up loop
+ * (`if (cachedIds.has(item.id)) continue`) only ever calls `syncHistoryEntry`
+ * for a message THIS device *newly* decrypts — anything already sitting in
+ * this device's local cache (from before this feature shipped, or just from
+ * ordinary earlier use) never gets a `message_history_entries` row written by
+ * anyone, so a brand-new device added later genuinely has no path to recover
+ * it — not a bug in the new device, a gap in every existing device ever
+ * contributing that backlog. Reported live exactly this way: a new device's
+ * "old message can't be decrypted."
+ *
+ * Walks the conversation's already-loaded cache once, guarded by a
+ * `localStorage` marker (same direct-localStorage convention every other
+ * dismissed/seen flag in this app already uses, e.g. install-prompt.tsx's
+ * `DISMISSED_KEY`) so it never re-runs for the same conversation on this
+ * device again. Sequential, not fired all at once — `writeMessageHistoryEntry`
+ * (server/modules/history/service.ts) is a real `upsert` (a write every call,
+ * not a cheap existence check), so this stays well under
+ * `historyEntryWrite`'s rate limit (packages/security/src/rate-limit.ts) on a
+ * long conversation's first pass. Callers fire this with `void`, same as every
+ * individual `syncHistoryEntry` call already is — it's meant to run in the
+ * background, not hold up rendering a long conversation's first open after
+ * this ships.
+ */
+export async function maybeBackfillHistoryEntries(conversationId: string, cached: CachedMessage[]): Promise<void> {
+  if (cached.length === 0) return;
+  try {
+    if (localStorage.getItem(BACKFILL_DONE_KEY_PREFIX + conversationId) !== null) return;
+  } catch {
+    return; // no localStorage — never mind, same as any other dismissed-flag check in this app
+  }
+  for (const message of cached) {
+    await syncHistoryEntry(message);
+  }
+  try {
+    localStorage.setItem(BACKFILL_DONE_KEY_PREFIX + conversationId, '1');
+  } catch {
+    // best-effort, same as every other localStorage write in this app
+  }
+}
+
 /**
  * The stored history ciphertext already IS a full serialized `CachedMessage` (not
  * just raw plaintext bytes) — see `syncHistoryEntry` above — so recovering it is
