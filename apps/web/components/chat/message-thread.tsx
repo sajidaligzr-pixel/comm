@@ -617,6 +617,23 @@ export function MessageThread({
     /** Only for `contentTypeHint: 'media'` — links this send to an
      * already-uploaded object (docs/13-roadmap.md's media pass). */
     attachment?: { objectKey: string; encryptedSizeBytes: number };
+    /** `contentTypeHint: 'media'` images only — the real plaintext bytes the
+     * caller (handleFileSelected) already has in hand, LOCAL-ONLY (never sent to
+     * the server, never part of the actual E2E envelope — the server still only
+     * ever sees the small descriptor `plaintext` above carries). Without this,
+     * `decodeMessagePlaintext('media', ...)` has nothing to derive `mediaBase64`
+     * from (that plaintext IS just the descriptor, correctly — the recipient
+     * doesn't have the bytes yet either), so the SENDER's own bubble fell
+     * through to MediaImageBubble's fetch-from-object-storage path same as any
+     * recipient's — found live: that fetch can race the message-send POST below
+     * (this optimistic render happens before it, by design, for instant
+     * feedback) and 404 fetching an object not yet linked to a real message,
+     * permanently stuck on a broken-image icon with only a non-obvious manual
+     * retry, for a message THIS device already fully has. Same fix `image`/
+     * `view_once` content types already get, just wired through explicitly here
+     * since `media`'s own plaintext can't carry it.
+     */
+    localMediaBase64?: string;
   }) {
     setError(undefined);
     const kek = getCurrentKek();
@@ -658,7 +675,7 @@ export function MessageThread({
         isOwn: true,
         contentTypeHint: opts.contentTypeHint,
         text: opts.draftText ?? decoded.text,
-        mediaBase64: decoded.mediaBase64,
+        mediaBase64: opts.localMediaBase64 ?? decoded.mediaBase64,
         attachment: decoded.attachment,
         mediaDurationSec: opts.mediaDurationSec,
         sentAt,
@@ -818,6 +835,11 @@ export function MessageThread({
         contentTypeHint: 'media',
         plaintext: utf8ToBytes(JSON.stringify(descriptor)),
         attachment: { objectKey, encryptedSizeBytes },
+        // See sendEncrypted's own docstring on `localMediaBase64` — only for an
+        // image (matches MediaImageBubble's own "only images get the
+        // inline-thumbnail treatment" scoping); a generic file has no inline
+        // bubble to seed this into at all.
+        localMediaBase64: descriptor.mimeType.startsWith('image/') ? bytesToBase64(bytes) : undefined,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send that file.');
@@ -1104,6 +1126,11 @@ export function MessageThread({
                       ) : (
                         <ViewOnceImageBubble base64={m.mediaBase64} onOpen={() => void handleViewOnceOpened(m.id)} />
                       )
+                    ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('image/') && m.mediaBase64 ? (
+                      // This device's own just-sent photo — see sendEncrypted's own
+                      // `localMediaBase64` docstring for why this has to be checked
+                      // before the fetch-based case below, not just left to it.
+                      <ImageBubble base64={m.mediaBase64} />
                     ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('image/') ? (
                       <MediaImageBubble attachment={m.attachment} isOwn={m.isOwn} />
                     ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('video/') ? (

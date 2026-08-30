@@ -1686,6 +1686,23 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           objectKey: uploaded.objectKey,
           encryptedSizeBytes: uploaded.encryptedSizeBytes,
         ),
+        // This device's own bytes, already in hand — LOCAL cache only, never
+        // sent to the server (the envelope above still only ever carries the
+        // small descriptor, same as before). Without this, `_MediaImageBubble`
+        // (thread_screen.dart's own dispatch, keyed on `attachment.mimeType`)
+        // had no way to know this device already has the real bytes, so even
+        // the SENDER's own just-sent photo went through the same
+        // fetch-from-object-storage path a recipient needs — found live to
+        // race the message-send POST above (this message already renders
+        // optimistically, before that POST resolves — see this function's own
+        // "renders instantly" docstring) and 404 on an object not yet linked to
+        // a real message, stuck on a broken thumbnail with only a
+        // non-obvious manual retry. Only for an image — matches
+        // `_MediaImageBubble`'s own "only images get inline treatment" scoping;
+        // a generic file has no inline bubble to seed this into.
+        cacheMediaBase64: mimeType.startsWith('image/')
+            ? bytesToBase64(bytes)
+            : null,
       );
     } on ApiException catch (e) {
       if (mounted) {
@@ -2863,6 +2880,14 @@ class _MessageBubble extends StatelessWidget {
                                   onOpen: () =>
                                       onViewOnceOpen?.call(message.id),
                                 ))
+                        : attachment != null &&
+                              attachment.mimeType.startsWith('image/') &&
+                              message.mediaBase64 != null
+                        // This device's own just-sent photo — see _sendFile's own
+                        // `cacheMediaBase64` docstring for why this has to be
+                        // checked before the fetch-based case below, not just
+                        // left to it.
+                        ? _InlineImageBubble(base64: message.mediaBase64!)
                         : attachment != null && attachment.mimeType.startsWith('image/')
                         ? _MediaImageBubble(
                             attachment: attachment,

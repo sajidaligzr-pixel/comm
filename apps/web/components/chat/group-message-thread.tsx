@@ -454,6 +454,9 @@ export function GroupMessageThread({
     draftText?: string;
     mediaDurationSec?: number;
     attachment?: { objectKey: string; encryptedSizeBytes: number };
+    /** See message-thread.tsx's identical `sendEncrypted` for the full
+     * docstring — same fix, same reasoning, just the group-conversation path. */
+    localMediaBase64?: string;
   }) {
     setError(undefined);
     const kek = getCurrentKek();
@@ -475,7 +478,7 @@ export function GroupMessageThread({
         isOwn: true,
         contentTypeHint: opts.contentTypeHint,
         text: opts.draftText ?? decoded.text,
-        mediaBase64: decoded.mediaBase64,
+        mediaBase64: opts.localMediaBase64 ?? decoded.mediaBase64,
         attachment: decoded.attachment,
         mediaDurationSec: opts.mediaDurationSec,
         sentAt,
@@ -605,6 +608,7 @@ export function GroupMessageThread({
         contentTypeHint: 'media',
         plaintext: utf8ToBytes(JSON.stringify(descriptor)),
         attachment: { objectKey, encryptedSizeBytes },
+        localMediaBase64: descriptor.mimeType.startsWith('image/') ? bytesToBase64(bytes) : undefined,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not send that file.');
@@ -836,6 +840,10 @@ export function GroupMessageThread({
                       // as view-once but got forwarded into a group just renders as a
                       // normal photo here, an honest simplification rather than a
                       // broken/blank bubble.
+                      <ImageBubble base64={m.mediaBase64} />
+                    ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('image/') && m.mediaBase64 ? (
+                      // This device's own just-sent photo — see message-thread.tsx's
+                      // identical case for the full reasoning.
                       <ImageBubble base64={m.mediaBase64} />
                     ) : m.contentTypeHint === 'media' && m.attachment?.mimeType.startsWith('image/') ? (
                       <MediaImageBubble attachment={m.attachment} isOwn={m.isOwn} />
