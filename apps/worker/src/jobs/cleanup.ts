@@ -62,8 +62,19 @@ export async function runCleanup(): Promise<void> {
   const expiredMedia = await runCategory('expired-media', () => sweepExpiredMedia(now));
   const orphanedObjects = await runCategory('orphaned-media-objects', () => sweepOrphanedMediaObjects(now));
 
+  // Unredeemed iOS push-delivery tokens (realtime/push-dispatch.ts's
+  // `createPushDeliveryToken`, MessagePushDeliveryToken's own schema doc comment) —
+  // the push was never actually delivered (device offline, app uninstalled,
+  // notifications disabled) or the extension's own ~30s budget ran out before it
+  // got to redeem it. Same short-lived-token retention shape as invites above,
+  // just minutes instead of days.
+  const expiredPushDeliveryTokens = await runCategory('expired-push-delivery-tokens', async () => {
+    const result = await prisma.messagePushDeliveryToken.deleteMany({ where: { expiresAt: { lt: now } } });
+    return result.count;
+  });
+
   console.log(
-    `[cleanup] removed ${expiredInvites} expired invite(s), ${expiredSessions} expired session(s), ${expiredMessages} disappeared message(s), ${expiredMedia} expired media message(s), ${orphanedObjects} orphaned media object(s)`,
+    `[cleanup] removed ${expiredInvites} expired invite(s), ${expiredSessions} expired session(s), ${expiredMessages} disappeared message(s), ${expiredMedia} expired media message(s), ${orphanedObjects} orphaned media object(s), ${expiredPushDeliveryTokens} expired push-delivery token(s)`,
   );
 }
 

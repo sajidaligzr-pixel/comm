@@ -304,3 +304,18 @@ export const MessageReceiptDto = z.object({
   readAt: z.string().datetime().nullable(),
 });
 export type MessageReceiptDto = z.infer<typeof MessageReceiptDto>;
+
+/**
+ * `POST /api/messages/:id/delivered-via-push` — see `MessagePushDeliveryToken`'s
+ * own schema doc comment (packages/database/prisma/schema.prisma) for the full
+ * why: this is the ONE authenticated-user route in this app with no session
+ * cookie at all, called only by apps/mobile's iOS Notification Service
+ * Extension, which has no access to the main app's cookie jar (a separate
+ * sandboxed process). `token` is the sole authorization — a 256-bit CSPRNG
+ * value, single-use, short-lived — not a bearer credential tied to an account
+ * the way every other request in this app is.
+ */
+export const RedeemPushDeliveryTokenRequest = z.object({
+  token: z.string().min(1).max(512),
+});
+export type RedeemPushDeliveryTokenRequest = z.infer<typeof RedeemPushDeliveryTokenRequest>;

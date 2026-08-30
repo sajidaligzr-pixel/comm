@@ -26,7 +26,7 @@ import webpush from 'web-push';
 import { cert, getApps, initializeApp } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
 import { prisma, PushProvider } from '@comm/database';
-import { createRedisSubscriber, decryptAtRest } from '@comm/security';
+import { createRedisSubscriber, decryptAtRest, generateSecureToken, hashToken } from '@comm/security';
 import {
   MESSAGE_EVENTS_CHANNEL,
   CALL_EVENTS_CHANNEL,
@@ -92,6 +92,17 @@ async function sendWebPush(subscription: PushSubscriptionRequest, payload: unkno
  * rides alongside it unchanged; push_notifications.dart's own `_showFromData`
  * skips re-rendering its OWN local notification on top of this native one for
  * exactly this case (see that file's own docstring) rather than double-banner-ing.
+ *
+ * `mutableContent: true` rides alongside `alert` for the same reason, one level
+ * deeper: it's what makes iOS invoke apps/mobile's NotificationServiceExtension
+ * (a separate, sandboxed process Apple wakes briefly for every such push, even
+ * while the main app is fully force-quit) before displaying the banner — the
+ * extension is what actually redeems `data.deliveryToken` (see
+ * `createPushDeliveryToken` below) to ack delivery in that state, since the main
+ * app's OWN background handler is never invoked at all while force-quit,
+ * regardless of what the payload looks like otherwise (found live as the
+ * remaining half of the exact same "notification not instant" report this
+ * function's `alert` addition already fixed the visible half of).
  */
 async function sendFcm(token: string, data: Record<string, string>, alert?: { title: string; body: string }): Promise<void> {
   await getMessaging().send({
@@ -103,7 +114,7 @@ async function sendFcm(token: string, data: Record<string, string>, alert?: { ti
       payload: {
         aps: {
           contentAvailable: true,
-          ...(alert ? { alert: { title: alert.title, body: alert.body }, sound: 'default' } : {}),
+          ...(alert ? { alert: { title: alert.title, body: alert.body }, sound: 'default', mutableContent: true } : {}),
         },
       },
     },
@@ -155,6 +166,36 @@ async function dispatchTo(
   }
 }
 
+// Only ever needs to survive from "push sent" to the iOS Notification Service
+// Extension's own execution budget from Apple (~30 seconds) — see
+// MessagePushDeliveryToken's own schema doc comment. Minutes, not the days/hours
+// every OTHER token in this app gets, deliberately: this is single-use and
+// scoped to one message+device already, a short TTL just bounds how long an
+// unredeemed row (a push that was never actually delivered — device offline,
+// app uninstalled) sits in the table before jobs/cleanup.ts sweeps it.
+const PUSH_DELIVERY_TOKEN_TTL_MS = 15 * 60 * 1000;
+
+/** See MessagePushDeliveryToken's own schema doc comment for the full why, and
+ * `redeemPushDeliveryToken` (apps/web/server/modules/messages/service.ts) for the
+ * redeem side. Called for every message push regardless of platform — harmless
+ * on Android (nothing ever redeems it there; jobs/cleanup.ts sweeps it unused,
+ * same as any other push a device never actually receives) rather than adding a
+ * platform check this function has no reliable way to make anyway (a device's
+ * `deviceType` here is `web`/`android`/`desktop` — iOS is only ever distinguished
+ * downstream, by whether a `VoipPushToken` row exists, see handleCallRing). */
+async function createPushDeliveryToken(messageId: string, deviceId: string): Promise<string> {
+  const rawToken = generateSecureToken(32);
+  await prisma.messagePushDeliveryToken.create({
+    data: {
+      messageId,
+      deviceId,
+      tokenHash: hashToken(rawToken),
+      expiresAt: new Date(Date.now() + PUSH_DELIVERY_TOKEN_TTL_MS),
+    },
+  });
+  return rawToken;
+}
+
 async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): Promise<void> {
   const device = await prisma.device.findUnique({ where: { id: event.targetDeviceId }, select: { userId: true } });
   if (!device) return; // device was revoked/deleted between the message being sent and this running
@@ -173,6 +214,7 @@ async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): 
   });
   const senderName = sender?.displayName ?? 'someone';
   const body = bodyFor(event.message.contentTypeHint, senderName);
+  const deliveryToken = await createPushDeliveryToken(event.message.id, event.targetDeviceId);
 
   await dispatchTo(event.targetDeviceId, {
     messagePayload: { title: 'Comm', body, conversationId: event.message.conversationId },
@@ -183,7 +225,16 @@ async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): 
     // the sender's tick stuck on "sent" until the recipient happened to open the app.
     // No web_push equivalent needed: `messagePayload` already goes through
     // chats-shell.tsx's live 'new' handler, which acks delivery itself once decrypted.
-    fcmData: { type: 'message', conversationId: event.message.conversationId, messageId: event.message.id, title: 'Comm', body },
+    // `deliveryToken`: see createPushDeliveryToken's own docstring — redeemed by
+    // apps/mobile's NotificationServiceExtension specifically, not the main app.
+    fcmData: {
+      type: 'message',
+      conversationId: event.message.conversationId,
+      messageId: event.message.id,
+      title: 'Comm',
+      body,
+      deliveryToken,
+    },
     // See sendFcm's own docstring — the one push type that gets a real native
     // alert instead of staying silent-only, specifically to fix iOS's
     // notification-reliability gap.

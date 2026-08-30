@@ -132,7 +132,7 @@ model Device {
   revokedAt     DateTime?      @map("revoked_at")
   revokedReason RevokedReason? @map("revoked_reason")
 
-  user                   User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user                   User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
   identityKey            IdentityKey?
   signedPreKeys          SignedPreKey[]
   oneTimePreKeys         OneTimePreKey[]
@@ -142,9 +142,10 @@ model Device {
   messageRecipient       MessageRecipient[]
   pushSubscription       PushSubscription?
   voipPushToken          VoipPushToken?
-  groupKeySharesSent     GroupKeyShare[]    @relation("GroupKeyShareFrom")
-  groupKeySharesReceived GroupKeyShare[]    @relation("GroupKeyShareTo")
+  groupKeySharesSent     GroupKeyShare[]            @relation("GroupKeyShareFrom")
+  groupKeySharesReceived GroupKeyShare[]            @relation("GroupKeyShareTo")
   reportedLocation       UserLocation?
+  pushDeliveryTokens     MessagePushDeliveryToken[]
 
   @@index([userId])
   @@map("devices")
@@ -464,6 +465,38 @@ model VoipPushToken {
   @@map("voip_push_tokens")
 }
 
+// One-time token letting apps/mobile's iOS Notification Service Extension
+// (NotificationServiceExtension/NotificationService.swift) mark a message
+// delivered without the main app's own session cookie — the extension is a
+// separate, sandboxed process Apple wakes briefly for every push carrying
+// `mutable-content: 1`, even while the main app is fully force-quit (a real gap
+// found live: the main app's own background handler is NEVER invoked in that
+// state, no matter what the push payload looks like, so `delivered` stayed
+// stuck on iOS specifically until the user actually reopened the app). It has
+// no access to the main app's cookie jar (a different sandboxed container), so
+// this token — not the normal `requireAuth`/CSRF session — is what authorizes
+// `POST /api/messages/:id/delivered-via-push`. Mirrors `invites.token_hash`
+// exactly: only a hash is stored, the raw token rides in the push payload
+// (apps/worker/src/realtime/push-dispatch.ts's `handleNewMessage`) once and is
+// deleted the instant it's redeemed — see `redeemPushDeliveryToken`
+// (messages/service.ts). `expiresAt` is short (minutes, not days): the
+// extension's own execution budget from Apple is itself only ~30 seconds, so
+// this only ever needs to survive brief queuing/clock-skew, not real time —
+// jobs/cleanup.ts sweeps anything left unredeemed.
+model MessagePushDeliveryToken {
+  id        String   @id @default(uuid()) @db.Uuid
+  messageId String   @map("message_id") @db.Uuid
+  deviceId  String   @map("device_id") @db.Uuid
+  tokenHash String   @unique @map("token_hash")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  device  Device  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@map("message_push_delivery_tokens")
+}
+
 // ── Conversations & messages (direct: Phase 3; group: docs/13-roadmap.md's group
 // chat pass, ahead of the original Phase 5 slot) ─────────────────────────────────
 
@@ -559,14 +592,15 @@ model Message {
   // retention pass).
   deletionReason   MessageDeletionReason? @map("deletion_reason")
 
-  conversation   Conversation          @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  sender         User                  @relation(fields: [senderUserId], references: [id], onDelete: Restrict)
-  senderDevice   Device                @relation(fields: [senderDeviceId], references: [id], onDelete: Restrict)
-  recipients     MessageRecipient[]
-  reactions      MessageReaction[]
-  starredBy      StarredMessage[]
-  attachment     MessageAttachment?
-  historyEntries MessageHistoryEntry[]
+  conversation       Conversation               @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender             User                       @relation(fields: [senderUserId], references: [id], onDelete: Restrict)
+  senderDevice       Device                     @relation(fields: [senderDeviceId], references: [id], onDelete: Restrict)
+  recipients         MessageRecipient[]
+  reactions          MessageReaction[]
+  starredBy          StarredMessage[]
+  attachment         MessageAttachment?
+  historyEntries     MessageHistoryEntry[]
+  pushDeliveryTokens MessagePushDeliveryToken[]
 
   @@index([conversationId, serverReceivedAt])
   @@index([senderUserId])

@@ -121,6 +121,12 @@ export const RATE_LIMIT_RULES = {
   callTurnCredentials: { namespace: 'calls:turn-credentials', windowSeconds: 60, max: 20 } satisfies RateLimitRule,
   pushSubscribe: { namespace: 'push:subscribe', windowSeconds: 60, max: 10 } satisfies RateLimitRule,
   voipPushTokenSubscribe: { namespace: 'push:voip-token', windowSeconds: 60, max: 10 } satisfies RateLimitRule,
+  // Unauthenticated (the iOS Notification Service Extension has no session cookie —
+  // see MessagePushDeliveryToken's own schema doc comment), by IP rather than by
+  // account for that reason. A guessed 256-bit token is already computationally
+  // infeasible regardless of this limit; this is just the same defense-in-depth
+  // against basic flooding every other unauthenticated route here already gets.
+  pushDeliveredViaPush: { namespace: 'push:delivered-via-push', windowSeconds: 60, max: 30 } satisfies RateLimitRule,
   // Sized-tier per docs/03-api-design.md's Uploads route class — a legitimate client
   // sends a handful of files a minute at most; this bounds storage-churn/abuse, not
   // normal use.

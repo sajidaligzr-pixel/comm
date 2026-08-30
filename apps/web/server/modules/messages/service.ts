@@ -1,4 +1,5 @@
 import { prisma, Prisma, type MessageDeletionReason } from '@comm/database';
+import { hashToken } from '@comm/security';
 import { AppError, type SendMessageRequest, type MessageDto, type StarredMessageDto, type MessageReceiptDto } from '@comm/types';
 import { requireConversationMembership, getAllOtherMembersActiveDeviceIds } from '../conversations/service';
 import { claimPendingUpload } from '../media/service';
@@ -330,6 +331,31 @@ export async function acknowledgeDelivered(recipientDeviceId: string, messageId:
     where: { messageId, recipientDeviceId, deliveredAt: null },
     data: { deliveredAt: new Date() },
   });
+}
+
+/**
+ * Redeems the one-time token apps/worker's `createPushDeliveryToken`
+ * (push-dispatch.ts) embeds in an iOS message push — see `MessagePushDeliveryToken`'s
+ * own schema doc comment for the full why. Deletes the token row the instant it's
+ * found (race-safe via the `deleteMany` count check, same shape `redeemInvite`
+ * already uses for its own one-time token) BEFORE returning anything, so a
+ * retried/duplicated extension invocation — or a race with `jobs/cleanup.ts`'s
+ * expiry sweep — can't double-fire. Returns the device whose token this was so the
+ * caller (the route) can ack delivery and publish the live update, or `null` on
+ * anything short of a valid, unexpired, not-already-redeemed token for this exact
+ * message — same "never distinguish invalid from expired" reasoning
+ * `getInviteInfo` already documents; this route has no user-facing error surface
+ * to leak that distinction through anyway.
+ */
+export async function redeemPushDeliveryToken(messageId: string, rawToken: string): Promise<string | null> {
+  const tokenHash = hashToken(rawToken);
+  const row = await prisma.messagePushDeliveryToken.findUnique({ where: { tokenHash } });
+  if (!row || row.messageId !== messageId || row.expiresAt.getTime() < Date.now()) return null;
+
+  const deleted = await prisma.messagePushDeliveryToken.deleteMany({ where: { id: row.id } });
+  if (deleted.count === 0) return null; // lost the race — some other call already redeemed/swept this row
+
+  return row.deviceId;
 }
 
 /** Who to notify when a message's delivery/read state changes — the realtime layer
