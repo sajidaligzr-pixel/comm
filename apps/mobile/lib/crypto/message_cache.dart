@@ -11,17 +11,29 @@
 /// sent messages, which could never be re-decrypted from stored ciphertext at all (a
 /// sending chain is one-directional — the sender doesn't keep the keys either).
 ///
-/// Wrapped under the same local KEK as identity/session data — plaintext message
-/// content is exactly the kind of sensitive local data that must not sit around
-/// unencrypted.
+/// Backed by `message_db.dart`'s SQLite store (see that file's own docstring for
+/// why — this used to be one `flutter_secure_storage` blob per conversation,
+/// found live to be the real cause of "opening a big chat takes a while"), one
+/// row per message. Each row's `ciphertext` column is this same message's full
+/// JSON, wrapped under the same local KEK as identity/session data — plaintext
+/// message content is exactly the kind of sensitive local data that must not sit
+/// around unencrypted. Only `id`/`conversationId`/`sentAt` are plaintext SQL
+/// columns (needed to query/order/index at all), mirroring the server's own
+/// Message table's already-accepted metadata-visible/content-encrypted split
+/// (docs/02-database-schema.md) — not a new exposure.
 library;
 
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:sqlite3/sqlite3.dart';
 import '../api/dtos.dart' show AttachmentDescriptor;
 import 'encoding.dart';
 import 'storage/wrap.dart';
-import '../storage/blob_store.dart' show deleteBlob, getBlob, putBlob;
+import '../storage/blob_store.dart'
+    show getBlob, putBlob, deleteBlob, readAllBlobsWithPrefix;
+import '../storage/message_db.dart'
+    show messageDb, insertMessageSql, loadMessagesSql, trimMessagesSql;
 
 class CachedMessage {
   final String id;
@@ -152,54 +164,82 @@ class CachedMessage {
 /// forward-secrecy design accepts.
 const _maxCachedPerConversation = 500;
 
-String _cacheKey(String conversationId) => 'msgcache:$conversationId';
+Future<CachedMessage> _decodeRow(Uint8List kek, Uint8List ciphertext) async {
+  final plaintext = await unwrapBytes(kek, ciphertext);
+  return CachedMessage.fromJson(
+    jsonDecode(bytesToUtf8(plaintext)) as Map<String, dynamic>,
+  );
+}
+
+Future<Uint8List> _encodeMessage(Uint8List kek, CachedMessage message) =>
+    wrapBytes(kek, utf8ToBytes(jsonEncode(message.toJson())));
+
+/// Deletes the oldest rows for [conversationId] beyond [_maxCachedPerConversation]
+/// — a single indexed statement, not a read-modify-write of anything.
+void _trim(Database db, String conversationId) {
+  db.execute(
+    trimMessagesSql,
+    [conversationId, _maxCachedPerConversation],
+  );
+}
 
 Future<List<CachedMessage>> loadCachedMessages(
   Uint8List kek,
   String conversationId,
 ) async {
-  final wrapped = await getBlob(_cacheKey(conversationId));
-  if (wrapped == null) return [];
-  try {
-    final plaintext = await unwrapBytes(kek, wrapped);
-    final list = jsonDecode(bytesToUtf8(plaintext)) as List;
-    return list
-        .map((e) => CachedMessage.fromJson(e as Map<String, dynamic>))
-        .toList();
-  } catch (_) {
-    // A KEK mismatch (password changed elsewhere) is not a reason to crash the chat
-    // UI — same reasoning as sessions.dart#loadSession. The cache is just empty
-    // until new messages repopulate it.
-    return [];
+  // TEMPORARY diagnostic — see message_db.dart's own note on why. Breaks the
+  // total down into "open db" (already timed separately in messageDb()),
+  // "run the query," and "decrypt every row," so a real profiling run can
+  // show exactly which part actually dominates.
+  final total = Stopwatch()..start();
+  final db = await messageDb();
+  final queryTimer = Stopwatch()..start();
+  final rows = db.select(loadMessagesSql, [conversationId]);
+  final queryMs = queryTimer.elapsedMilliseconds;
+  final decodeTimer = Stopwatch()..start();
+  final out = <CachedMessage>[];
+  for (final row in rows) {
+    try {
+      out.add(await _decodeRow(kek, row['ciphertext'] as Uint8List));
+    } catch (_) {
+      // A KEK mismatch (password changed elsewhere) or a corrupt single row is
+      // not a reason to lose the rest of the conversation — same "fail this
+      // one message, not the whole cache" reasoning the old blob-based version
+      // could only apply at the whole-list level.
+    }
   }
+  // dart:developer's log() is silently dropped with no debugger/DevTools
+  // attached — confirmed live: a whole release-build logcat session had zero
+  // "CommPerf" lines despite thousands of ordinary flutter ones. debugPrint
+  // goes through the same stdout path Flutter's own framework logging
+  // already uses (visible as plain I/flutter lines even in release), so it's
+  // what actually survives to logcat on a real device.
+  debugPrint(
+    'CommPerf: loadCachedMessages($conversationId): ${rows.length} rows, '
+    'query=${queryMs}ms, decode=${decodeTimer.elapsedMilliseconds}ms, '
+    'total=${total.elapsedMilliseconds}ms',
+  );
+  return out;
 }
 
 Future<void> appendCachedMessage(Uint8List kek, CachedMessage message) async {
-  final existing = await loadCachedMessages(kek, message.conversationId);
-  if (existing.any((m) => m.id == message.id)) {
-    return; // idempotent — a duplicate WS/REST delivery is a no-op
-  }
-  final updated = [...existing, message];
-  final trimmed = updated.length > _maxCachedPerConversation
-      ? updated.sublist(updated.length - _maxCachedPerConversation)
-      : updated;
-  final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
-  await putBlob(
-    _cacheKey(message.conversationId),
-    await wrapBytes(kek, utf8ToBytes(json)),
+  final db = await messageDb();
+  db.execute(
+    insertMessageSql,
+    [
+      message.id,
+      message.conversationId,
+      message.sentAt,
+      await _encodeMessage(kek, message),
+    ],
   );
+  _trim(db, message.conversationId);
 }
 
-/// Bulk variant of [appendCachedMessage] — reads the existing cache ONCE, appends
-/// every not-already-present message in [messages], and writes back ONCE.
-/// thread_screen.dart's `_load()` uses this for its history catch-up instead of
-/// calling [appendCachedMessage] once per message: that per-message version reads
-/// + decrypts + JSON-decodes the WHOLE cached list, then re-encodes + re-encrypts
-/// + rewrites the WHOLE thing, on every single call — O(n) work repeated n times
-/// (O(n²) total) for a conversation with n messages to catch up on. Found live as
-/// a real, measurable contributor to "opening a chat takes a while" — every
-/// message secure-storage read/write pays real Keystore/Keychain overhead, not
-/// just plain file I/O. A single live incoming message (features/chats/
+/// Bulk variant of [appendCachedMessage] — inserts every not-already-present
+/// message in [messages] inside one transaction and trims once at the end,
+/// instead of once per message. thread_screen.dart's `_load()` uses this for
+/// its history catch-up. A single live incoming message (features/chats/
 /// thread_screen.dart's `_onRealtimeNew`) still goes through the one-at-a-time
 /// [appendCachedMessage] — there's nothing to batch when there's only one.
 Future<void> appendCachedMessages(
@@ -208,18 +248,26 @@ Future<void> appendCachedMessages(
   List<CachedMessage> messages,
 ) async {
   if (messages.isEmpty) return;
-  final existing = await loadCachedMessages(kek, conversationId);
-  final existingIds = existing.map((m) => m.id).toSet();
-  final additions = messages.where((m) => !existingIds.contains(m.id));
-  final updated = [...existing, ...additions];
-  final trimmed = updated.length > _maxCachedPerConversation
-      ? updated.sublist(updated.length - _maxCachedPerConversation)
-      : updated;
-  final json = jsonEncode(trimmed.map((m) => m.toJson()).toList());
-  await putBlob(
-    _cacheKey(conversationId),
-    await wrapBytes(kek, utf8ToBytes(json)),
-  );
+  final db = await messageDb();
+  db.execute('BEGIN');
+  try {
+    for (final message in messages) {
+      db.execute(
+        insertMessageSql,
+        [
+          message.id,
+          message.conversationId,
+          message.sentAt,
+          await _encodeMessage(kek, message),
+        ],
+      );
+    }
+    db.execute('COMMIT');
+  } catch (_) {
+    db.execute('ROLLBACK');
+    rethrow;
+  }
+  _trim(db, conversationId);
 }
 
 /// Rolls back an optimistically-rendered outgoing message (thread_screen.dart's
@@ -227,20 +275,15 @@ Future<void> appendCachedMessages(
 /// apps/web/lib/crypto/message-cache.ts's `removeCachedMessage` exactly, same
 /// reasoning: the message was appended to the local cache the instant it was
 /// encrypted, before the network round trip even started, so a failure needs an
-/// explicit way to take it back out again.
+/// explicit way to take it back out again. A single indexed DELETE now, not a
+/// read-decrypt-filter-re-encrypt-write of the whole conversation.
 Future<void> removeCachedMessage(
   Uint8List kek,
   String conversationId,
   String messageId,
 ) async {
-  final existing = await loadCachedMessages(kek, conversationId);
-  final updated = existing.where((m) => m.id != messageId).toList();
-  if (updated.length == existing.length) return; // nothing to remove
-  final json = jsonEncode(updated.map((m) => m.toJson()).toList());
-  await putBlob(
-    _cacheKey(conversationId),
-    await wrapBytes(kek, utf8ToBytes(json)),
-  );
+  final db = await messageDb();
+  db.execute('DELETE FROM messages WHERE id = ?', [messageId]);
 }
 
 /// Tombstones a message locally — mirrors apps/web's own `markCachedMessageDeleted`
@@ -251,46 +294,39 @@ Future<void> removeCachedMessage(
 /// still resolve it and show the tombstone text) intact. A no-op, returning the
 /// list unchanged, if the message isn't cached on this device at all (e.g. it was
 /// deleted before this device ever decrypted it). Returns the whole updated list
-/// so the caller can `setState` directly with it, same shape web returns.
-///
-/// Same read-modify-write-the-whole-blob shape every function in this file uses —
-/// no per-conversation lock exists here (unlike web's `withConversationLock`), so
-/// a delete racing a live incoming message for the exact same conversation at the
-/// exact same instant could in principle clobber one or the other. Not solved in
-/// this pass; flagged rather than silently accepted, matching every other function
-/// in this file's own scope.
+/// so the caller can `setState` directly with it, same shape web returns — this
+/// now costs one indexed UPDATE plus one query, not a read-decrypt-modify-
+/// re-encrypt-write of the entire conversation.
 Future<List<CachedMessage>> markCachedMessageDeleted(
   Uint8List kek,
   String conversationId,
   String messageId,
   String reason,
 ) async {
-  final existing = await loadCachedMessages(kek, conversationId);
-  if (!existing.any((m) => m.id == messageId)) return existing;
-  final updated = existing
-      .map(
-        (m) => m.id == messageId
-            ? CachedMessage(
-                id: m.id,
-                conversationId: m.conversationId,
-                senderUserId: m.senderUserId,
-                isOwn: m.isOwn,
-                contentTypeHint: m.contentTypeHint,
-                text: '',
-                sentAt: m.sentAt,
-                replyToMessageId: m.replyToMessageId,
-                deleted: true,
-                deletedReason: reason,
-              )
-            : m,
-      )
-      .toList();
-  final json = jsonEncode(updated.map((m) => m.toJson()).toList());
-  await putBlob(
-    _cacheKey(conversationId),
-    await wrapBytes(kek, utf8ToBytes(json)),
+  final db = await messageDb();
+  final rows = db.select(
+    'SELECT ciphertext FROM messages WHERE id = ?',
+    [messageId],
   );
-  return updated;
+  if (rows.isEmpty) return loadCachedMessages(kek, conversationId);
+  final existing = await _decodeRow(kek, rows.first['ciphertext'] as Uint8List);
+  final updated = CachedMessage(
+    id: existing.id,
+    conversationId: existing.conversationId,
+    senderUserId: existing.senderUserId,
+    isOwn: existing.isOwn,
+    contentTypeHint: existing.contentTypeHint,
+    text: '',
+    sentAt: existing.sentAt,
+    replyToMessageId: existing.replyToMessageId,
+    deleted: true,
+    deletedReason: reason,
+  );
+  db.execute(
+    'UPDATE messages SET ciphertext = ? WHERE id = ?',
+    [await _encodeMessage(kek, updated), messageId],
+  );
+  return loadCachedMessages(kek, conversationId);
 }
 
 /// Persists a delivered/read update for one of THIS device's own cached
@@ -298,12 +334,8 @@ Future<List<CachedMessage>> markCachedMessageDeleted(
 /// this exists at all. Called alongside every place thread_screen.dart's
 /// in-memory `_status` map changes, so the cache never falls behind what's
 /// already been shown on screen. A no-op if the message isn't cached (nothing
-/// to update) or if the new value is identical to what's already stored (skips
-/// the read-modify-write for the common case: a live WS event repeating
-/// something the last full `_load()` already reseeded). Same
-/// read-modify-write-the-whole-blob shape as the rest of this file — see
-/// `markCachedMessageDeleted`'s own docstring on the accepted race this
-/// doesn't solve.
+/// to update) or if the new value is identical to what's already stored. One
+/// indexed row read + write now, not the whole conversation.
 Future<void> updateCachedMessageStatus(
   Uint8List kek,
   String conversationId,
@@ -311,37 +343,41 @@ Future<void> updateCachedMessageStatus(
   required bool delivered,
   required bool read,
 }) async {
-  final existing = await loadCachedMessages(kek, conversationId);
-  var changed = false;
-  final updated = existing.map((m) {
-    if (m.id != messageId || (m.delivered == delivered && m.read == read)) {
-      return m;
-    }
-    changed = true;
-    return CachedMessage(
-      id: m.id,
-      conversationId: m.conversationId,
-      senderUserId: m.senderUserId,
-      isOwn: m.isOwn,
-      contentTypeHint: m.contentTypeHint,
-      text: m.text,
-      sentAt: m.sentAt,
-      replyToMessageId: m.replyToMessageId,
-      attachment: m.attachment,
-      mediaBase64: m.mediaBase64,
-      mediaDurationSec: m.mediaDurationSec,
-      deleted: m.deleted,
-      deletedReason: m.deletedReason,
-      delivered: delivered,
-      read: read,
-    );
-  }).toList();
-  if (!changed) return;
-  final json = jsonEncode(updated.map((m) => m.toJson()).toList());
-  await putBlob(
-    _cacheKey(conversationId),
-    await wrapBytes(kek, utf8ToBytes(json)),
+  // TEMPORARY diagnostic — see message_db.dart's own note on why.
+  final sw = Stopwatch()..start();
+  final db = await messageDb();
+  final rows = db.select(
+    'SELECT ciphertext FROM messages WHERE id = ?',
+    [messageId],
   );
+  if (rows.isEmpty) return;
+  final existing = await _decodeRow(kek, rows.first['ciphertext'] as Uint8List);
+  if (existing.delivered == delivered && existing.read == read) {
+    debugPrint('CommPerf: updateCachedMessageStatus($messageId): unchanged, ${sw.elapsedMilliseconds}ms');
+    return;
+  }
+  final updated = CachedMessage(
+    id: existing.id,
+    conversationId: existing.conversationId,
+    senderUserId: existing.senderUserId,
+    isOwn: existing.isOwn,
+    contentTypeHint: existing.contentTypeHint,
+    text: existing.text,
+    sentAt: existing.sentAt,
+    replyToMessageId: existing.replyToMessageId,
+    attachment: existing.attachment,
+    mediaBase64: existing.mediaBase64,
+    mediaDurationSec: existing.mediaDurationSec,
+    deleted: existing.deleted,
+    deletedReason: existing.deletedReason,
+    delivered: delivered,
+    read: read,
+  );
+  db.execute(
+    'UPDATE messages SET ciphertext = ? WHERE id = ?',
+    [await _encodeMessage(kek, updated), messageId],
+  );
+  debugPrint('CommPerf: updateCachedMessageStatus($messageId): wrote, ${sw.elapsedMilliseconds}ms');
 }
 
 /// "Delete chat" (chats_list_screen.dart's long-press menu) — wipes this device's
@@ -358,8 +394,10 @@ Future<void> updateCachedMessageStatus(
 /// see that function's docstring for why reusing the archive flag for this was
 /// wrong (it visibly landed a "deleted" chat inside the Archived section instead
 /// of actually making it disappear).
-Future<void> clearCachedMessages(String conversationId) =>
-    deleteBlob(_cacheKey(conversationId));
+Future<void> clearCachedMessages(String conversationId) async {
+  final db = await messageDb();
+  db.execute('DELETE FROM messages WHERE conversation_id = ?', [conversationId]);
+}
 
 const _locallyDeletedKey = 'locally-deleted-conversations';
 
@@ -417,3 +455,35 @@ Future<bool> isConversationLocallyDeleted(String conversationId) async =>
 /// entire freshly-fetched list against this once per load rather than one blob
 /// read per row.
 Future<Set<String>> locallyDeletedConversationIds() => _readLocallyDeleted();
+
+/// One-time-per-account migration off the old one-blob-per-conversation cache
+/// (`flutter_secure_storage`, key `msgcache:<conversationId>`) into this file's
+/// new SQLite-backed store — called once at app startup (see app.dart's own
+/// init sequence) after `getCurrentKek()` resolves, since decrypting the old
+/// blobs needs it. Safe to call on every startup: a conversation whose old blob
+/// was already migrated (and deleted) simply isn't found by
+/// `readAllBlobsWithPrefix` any more, so a re-run after a successful migration
+/// is a fast no-op, not a re-import. Never throws — a single conversation's old
+/// blob failing to decrypt (e.g. a KEK that's changed since) just means that
+/// conversation's local history is gone, exactly as it already would have been
+/// under the old cache in the same situation (loadCachedMessages's own
+/// catch-and-return-empty), not a reason to fail startup.
+Future<void> migrateLegacyMessageCache(Uint8List kek) async {
+  final legacyBlobs = await readAllBlobsWithPrefix('msgcache:');
+  if (legacyBlobs.isEmpty) return;
+  for (final entry in legacyBlobs.entries) {
+    final conversationId = entry.key.substring('msgcache:'.length);
+    try {
+      final plaintext = await unwrapBytes(kek, entry.value);
+      final list = jsonDecode(bytesToUtf8(plaintext)) as List;
+      final messages = list
+          .map((e) => CachedMessage.fromJson(e as Map<String, dynamic>))
+          .toList();
+      await appendCachedMessages(kek, conversationId, messages);
+    } catch (_) {
+      // See this function's own docstring — one conversation's corrupt/
+      // undecryptable legacy blob doesn't block migrating the rest.
+    }
+    await deleteBlob(entry.key);
+  }
+}

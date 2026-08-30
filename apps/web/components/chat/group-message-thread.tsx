@@ -274,71 +274,91 @@ export function GroupMessageThread({
         return;
       }
 
-      await registerGroupMembership(groupId);
-      await ensureGroupKeysUpToDate(groupId);
-
       const cached = await loadCachedMessages(kek, conversationId);
-      if (!cancelled) setMessages(cached);
-      void maybeBackfillHistoryEntries(conversationId, cached);
-
-      const page = await apiFetch<{ items: MessageDto[]; nextCursor: string | null }>(
-        `/api/conversations/${conversationId}/messages?limit=50`,
-      );
-      const cachedIds = new Set(cached.map((m) => m.id));
-      let latest = cached;
-      for (const item of page.items) {
-        if (cachedIds.has(item.id)) continue;
-        // Attempted regardless of sender, including this account's OWN messages
-        // sent from a DIFFERENT device — every group member's device shares one
-        // Megolm-style session per sender, so as long as THIS device was ever
-        // key-shared for that sender's session, it can decrypt an own-message
-        // from another of this account's devices exactly like anyone else's.
-        let resolved: CachedMessage | null = null;
-        try {
-          const plaintext = await decryptWithRetry(item.id, item.senderUserId, item.envelope);
-          resolved = {
-            id: item.id,
-            conversationId,
-            senderUserId: item.senderUserId,
-            isOwn: item.senderUserId === currentUserId,
-            contentTypeHint: item.contentTypeHint,
-            ...decodeMessagePlaintext(item.contentTypeHint, plaintext),
-            sentAt: item.sentAt,
-            replyToMessageId: item.replyToMessageId,
-          };
-        } catch {
-          // Genuinely undecryptable live (e.g. sent before this device joined/was
-          // key-shared, or the key-share hasn't arrived even after a sync
-          // attempt) — falls through to the history-key fallback below.
-        }
-        if (!resolved) {
-          // Multi-device message history sync (docs/07-auth-architecture.md) —
-          // this account's own copy, if any of this account's devices has
-          // already decrypted/sent this message.
-          resolved = tryDecryptViaHistory(item.history?.ciphertext);
-        }
-        if (resolved) {
-          latest = await appendCachedMessage(kek, resolved);
-          void syncHistoryEntry(resolved);
-        }
-      }
       if (!cancelled) {
-        setMessages(latest);
-        setNextCursor(page.nextCursor);
+        setMessages(cached);
+        // Same fix as message-thread.tsx's 1:1 thread (see that file's own
+        // docstring on this exact change — found live, "still takes a while
+        // to load, worse the bigger the chat"). `ready` used to only flip
+        // after group-membership registration, a key-freshness check, AND the
+        // full REST catch-up page all finished — worse here than the 1:1
+        // case, since those two group-specific awaits used to run BEFORE the
+        // cache was even loaded, gating the very first cache read too. Every
+        // one of these cached messages is already decrypted right here,
+        // above; flipping `ready` now lets it render instantly.
         setReady(true);
       }
+      void maybeBackfillHistoryEntries(conversationId, cached);
 
-      // Same fix as the 1:1 thread's catch-up loop (message-thread.tsx) — record
-      // delivery/read for whatever's newest even though no UI surfaces "seen by" for
-      // groups yet (docs/05-crypto-architecture.md's "what shipped doesn't cover
-      // yet"). Without this, the underlying per-recipient rows a future receipt-list
-      // UI would read from stay permanently unset for anyone who opens a group
-      // thread after being offline rather than while a message arrives live.
-      if (page.items.length > 0) {
-        apiFetch(`/api/conversations/${conversationId}/read`, {
-          method: 'POST',
-          body: { upToMessageId: page.items[0]!.id },
-        }).catch(() => undefined);
+      // Everything from here down is a background refresh layered on top of
+      // what's already rendered above — its own try/catch, not left to
+      // propagate, so a failure here (group-key refresh, catch-up fetch)
+      // never disturbs an already-correct cached view. There's nothing left
+      // to show that isn't already showing; just let the next open retry.
+      try {
+        await registerGroupMembership(groupId);
+        await ensureGroupKeysUpToDate(groupId);
+
+        const page = await apiFetch<{ items: MessageDto[]; nextCursor: string | null }>(
+          `/api/conversations/${conversationId}/messages?limit=50`,
+        );
+        const cachedIds = new Set(cached.map((m) => m.id));
+        let latest = cached;
+        for (const item of page.items) {
+          if (cachedIds.has(item.id)) continue;
+          // Attempted regardless of sender, including this account's OWN messages
+          // sent from a DIFFERENT device — every group member's device shares one
+          // Megolm-style session per sender, so as long as THIS device was ever
+          // key-shared for that sender's session, it can decrypt an own-message
+          // from another of this account's devices exactly like anyone else's.
+          let resolved: CachedMessage | null = null;
+          try {
+            const plaintext = await decryptWithRetry(item.id, item.senderUserId, item.envelope);
+            resolved = {
+              id: item.id,
+              conversationId,
+              senderUserId: item.senderUserId,
+              isOwn: item.senderUserId === currentUserId,
+              contentTypeHint: item.contentTypeHint,
+              ...decodeMessagePlaintext(item.contentTypeHint, plaintext),
+              sentAt: item.sentAt,
+              replyToMessageId: item.replyToMessageId,
+            };
+          } catch {
+            // Genuinely undecryptable live (e.g. sent before this device joined/was
+            // key-shared, or the key-share hasn't arrived even after a sync
+            // attempt) — falls through to the history-key fallback below.
+          }
+          if (!resolved) {
+            // Multi-device message history sync (docs/07-auth-architecture.md) —
+            // this account's own copy, if any of this account's devices has
+            // already decrypted/sent this message.
+            resolved = tryDecryptViaHistory(item.history?.ciphertext);
+          }
+          if (resolved) {
+            latest = await appendCachedMessage(kek, resolved);
+            void syncHistoryEntry(resolved);
+          }
+        }
+        if (!cancelled) {
+          setMessages(latest);
+          setNextCursor(page.nextCursor);
+        }
+
+        // Same fix as the 1:1 thread's catch-up loop (message-thread.tsx) — record
+        // delivery/read for whatever's newest even though no UI surfaces "seen by" for
+        // groups yet (docs/05-crypto-architecture.md's "what shipped doesn't cover
+        // yet"). Without this, the underlying per-recipient rows a future receipt-list
+        // UI would read from stay permanently unset for anyone who opens a group
+        // thread after being offline rather than while a message arrives live.
+        if (page.items.length > 0) {
+          apiFetch(`/api/conversations/${conversationId}/read`, {
+            method: 'POST',
+            body: { upToMessageId: page.items[0]!.id },
+          }).catch(() => undefined);
+        }
+      } catch {
+        // See this try's own docstring above.
       }
     }
 

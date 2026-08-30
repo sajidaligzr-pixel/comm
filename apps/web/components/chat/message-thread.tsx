@@ -359,102 +359,125 @@ export function MessageThread({
       }
 
       const cached = await loadCachedMessages(kek, conversationId);
-      if (!cancelled) setMessages(cached);
-      void maybeBackfillHistoryEntries(conversationId, cached);
-
-      const [otherMemberDevices, ownDevices] = await Promise.all([
-        apiFetch<Array<{ userId: string; deviceId: string }>>(`/api/conversations/${conversationId}/recipient-devices`),
-        apiFetch<DeviceSummary[]>('/api/devices'),
-      ]);
-      const ownOtherDevices = ownDevices
-        .filter((d) => !d.isCurrentDevice && d.status === 'active')
-        .map((d) => ({ userId: currentUserId, deviceId: d.id }));
-      targetDeviceIdsRef.current = [...otherMemberDevices, ...ownOtherDevices];
-
-      // Catch up on anything this device hasn't decrypted yet — Double Ratchet
-      // message keys are single-use, so this is a one-shot "first look" at each
-      // ciphertext, not a re-readable archive (lib/crypto/message-cache.ts).
-      const page = await apiFetch<{ items: MessageDto[]; nextCursor: string | null }>(
-        `/api/conversations/${conversationId}/messages?limit=50`,
-      );
-      const cachedIds = new Set(cached.map((m) => m.id));
-      const seededStatus: Record<string, DeliveryStatus> = {};
-      let latest = cached;
-      for (const item of page.items) {
-        if (item.senderUserId === currentUserId) {
-          // Own outgoing message (from THIS device or another of this account's
-          // own) — seed its delivered/read state either way, which otherwise
-          // wouldn't be known again until a NEW live WS event arrives.
-          seededStatus[item.id] = { delivered: !!item.deliveredAt, read: !!item.readAt };
-        }
-        if (cachedIds.has(item.id)) continue;
-
-        // Attempted regardless of sender — self-fan-out means an own message
-        // sent from a DIFFERENT one of this account's devices has a genuine
-        // per-device Double Ratchet envelope targeting THIS device too, exactly
-        // like a message from anyone else; only a message this device was never
-        // a live target for at all (sent before this device existed, or before
-        // this account's own self-fan-out fix shipped) actually needs the
-        // history-key fallback below.
-        let resolved: CachedMessage | null = null;
-        try {
-          const plaintext = await decryptFromDeviceOnce(item.id, item.senderDeviceId, item.envelope, item.x3dhInit);
-          resolved = {
-            id: item.id,
-            conversationId,
-            senderUserId: item.senderUserId,
-            isOwn: item.senderUserId === currentUserId,
-            contentTypeHint: item.contentTypeHint,
-            ...decodeMessagePlaintext(item.contentTypeHint, plaintext),
-            sentAt: item.sentAt,
-            replyToMessageId: item.replyToMessageId,
-          };
-        } catch {
-          // Undecryptable via the live per-device session — falls through to
-          // the history-key fallback below rather than being given up on here.
-        }
-        if (!resolved) {
-          // Multi-device message history sync (docs/07-auth-architecture.md) —
-          // this account's own copy of this message, if any of this account's
-          // devices has successfully decrypted/sent it before. Covers both a
-          // brand-new device's own past sends (no live session ever existed for
-          // those on THIS device) and another member's message this device
-          // simply wasn't a live target for.
-          resolved = tryDecryptViaHistory(item.history?.ciphertext);
-        }
-        if (resolved) {
-          latest = await appendCachedMessage(kek, resolved);
-          // Idempotent no-op if some other of this account's own devices already
-          // wrote this — see syncHistoryEntry's own docstring.
-          void syncHistoryEntry(resolved);
-        }
-        // else: undecryptable on this device via either path yet — an honest
-        // limitation (no device of this account has ever seen this message's
-        // plaintext), not a bug; skipped rather than shown as an error.
-      }
       if (!cancelled) {
-        setMessages(latest);
-        setStatus((prev) => ({ ...seededStatus, ...prev }));
-        setNextCursor(page.nextCursor);
+        setMessages(cached);
+        // THE actual "still takes a while to load, worse the bigger the chat"
+        // bug — found live, and it mirrors apps/mobile's identical fix in
+        // thread_screen.dart's own `_load()`. `ready` (gates the "Loading…"
+        // placeholder below) used to only flip to true at the very end of this
+        // function, after the device-list fetch, the full REST catch-up page,
+        // and decrypting anything new in it. Every one of these cached
+        // messages is already decrypted right here, above, before any of that
+        // network work even starts. Flipping it now means the cached history
+        // renders the instant it's ready; the REST catch-up below still layers
+        // in afterward via its own setMessages call, same as any live update,
+        // not gating the first paint at all.
         setReady(true);
       }
+      void maybeBackfillHistoryEntries(conversationId, cached);
 
-      // Mark read up through whatever's newest, same as the live 'new' handler does
-      // immediately for a message that arrives while this thread is already open —
-      // this catch-up path is the ONLY other place a message a device hasn't acked
-      // yet gets shown to the user (opening the app/thread after being offline when
-      // it was sent), and until this call existed here it was the one gap: a
-      // recipient could fully read a message this way and the sender's ticks would
-      // still sit at "sent" forever, since `message.ack`/`message.read` were only
-      // ever fired from the live-arrival path (found in security-review regression
-      // testing). Uses the REST route rather than a WS send for the same reason the
-      // group key-share fix does — this runs right after `connectRealtime()` is
-      // kicked off below, before the socket is necessarily open yet.
-      if (page.items.length > 0) {
-        apiFetch(`/api/conversations/${conversationId}/read`, {
-          method: 'POST',
-          body: { upToMessageId: page.items[0]!.id },
-        }).catch(() => undefined);
+      // Everything from here down is a background refresh layered on top of
+      // what's already rendered above — its own try/catch, not left to
+      // propagate, because a failure here (a network blip on the device-list
+      // or catch-up fetch) must never leave an already-correct cached view
+      // worse off. There's nothing left to show that isn't already showing;
+      // just let the next open retry.
+      try {
+        const [otherMemberDevices, ownDevices] = await Promise.all([
+          apiFetch<Array<{ userId: string; deviceId: string }>>(`/api/conversations/${conversationId}/recipient-devices`),
+          apiFetch<DeviceSummary[]>('/api/devices'),
+        ]);
+        const ownOtherDevices = ownDevices
+          .filter((d) => !d.isCurrentDevice && d.status === 'active')
+          .map((d) => ({ userId: currentUserId, deviceId: d.id }));
+        targetDeviceIdsRef.current = [...otherMemberDevices, ...ownOtherDevices];
+
+        // Catch up on anything this device hasn't decrypted yet — Double Ratchet
+        // message keys are single-use, so this is a one-shot "first look" at each
+        // ciphertext, not a re-readable archive (lib/crypto/message-cache.ts).
+        const page = await apiFetch<{ items: MessageDto[]; nextCursor: string | null }>(
+          `/api/conversations/${conversationId}/messages?limit=50`,
+        );
+        const cachedIds = new Set(cached.map((m) => m.id));
+        const seededStatus: Record<string, DeliveryStatus> = {};
+        let latest = cached;
+        for (const item of page.items) {
+          if (item.senderUserId === currentUserId) {
+            // Own outgoing message (from THIS device or another of this account's
+            // own) — seed its delivered/read state either way, which otherwise
+            // wouldn't be known again until a NEW live WS event arrives.
+            seededStatus[item.id] = { delivered: !!item.deliveredAt, read: !!item.readAt };
+          }
+          if (cachedIds.has(item.id)) continue;
+
+          // Attempted regardless of sender — self-fan-out means an own message
+          // sent from a DIFFERENT one of this account's devices has a genuine
+          // per-device Double Ratchet envelope targeting THIS device too, exactly
+          // like a message from anyone else; only a message this device was never
+          // a live target for at all (sent before this device existed, or before
+          // this account's own self-fan-out fix shipped) actually needs the
+          // history-key fallback below.
+          let resolved: CachedMessage | null = null;
+          try {
+            const plaintext = await decryptFromDeviceOnce(item.id, item.senderDeviceId, item.envelope, item.x3dhInit);
+            resolved = {
+              id: item.id,
+              conversationId,
+              senderUserId: item.senderUserId,
+              isOwn: item.senderUserId === currentUserId,
+              contentTypeHint: item.contentTypeHint,
+              ...decodeMessagePlaintext(item.contentTypeHint, plaintext),
+              sentAt: item.sentAt,
+              replyToMessageId: item.replyToMessageId,
+            };
+          } catch {
+            // Undecryptable via the live per-device session — falls through to
+            // the history-key fallback below rather than being given up on here.
+          }
+          if (!resolved) {
+            // Multi-device message history sync (docs/07-auth-architecture.md) —
+            // this account's own copy of this message, if any of this account's
+            // devices has successfully decrypted/sent it before. Covers both a
+            // brand-new device's own past sends (no live session ever existed for
+            // those on THIS device) and another member's message this device
+            // simply wasn't a live target for.
+            resolved = tryDecryptViaHistory(item.history?.ciphertext);
+          }
+          if (resolved) {
+            latest = await appendCachedMessage(kek, resolved);
+            // Idempotent no-op if some other of this account's own devices already
+            // wrote this — see syncHistoryEntry's own docstring.
+            void syncHistoryEntry(resolved);
+          }
+          // else: undecryptable on this device via either path yet — an honest
+          // limitation (no device of this account has ever seen this message's
+          // plaintext), not a bug; skipped rather than shown as an error.
+        }
+        if (!cancelled) {
+          setMessages(latest);
+          setStatus((prev) => ({ ...seededStatus, ...prev }));
+          setNextCursor(page.nextCursor);
+        }
+
+        // Mark read up through whatever's newest, same as the live 'new' handler does
+        // immediately for a message that arrives while this thread is already open —
+        // this catch-up path is the ONLY other place a message a device hasn't acked
+        // yet gets shown to the user (opening the app/thread after being offline when
+        // it was sent), and until this call existed here it was the one gap: a
+        // recipient could fully read a message this way and the sender's ticks would
+        // still sit at "sent" forever, since `message.ack`/`message.read` were only
+        // ever fired from the live-arrival path (found in security-review regression
+        // testing). Uses the REST route rather than a WS send for the same reason the
+        // group key-share fix does — this runs right after `connectRealtime()` is
+        // kicked off below, before the socket is necessarily open yet.
+        if (page.items.length > 0) {
+          apiFetch(`/api/conversations/${conversationId}/read`, {
+            method: 'POST',
+            body: { upToMessageId: page.items[0]!.id },
+          }).catch(() => undefined);
+        }
+      } catch {
+        // See this try's own docstring above.
       }
     }
 

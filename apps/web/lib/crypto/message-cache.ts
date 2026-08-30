@@ -10,13 +10,33 @@
  * be re-decrypted from the stored ciphertext at all (a Double Ratchet's sending
  * chain is one-directional — the sender doesn't keep the keys either).
  *
- * Wrapped under the same local KEK as identity/session data (docs/05-crypto-architecture.md#local-key-storage)
- * — plaintext message content is exactly the kind of sensitive local data
- * docs/32-local-data-storage.md says must not sit around unencrypted.
+ * Backed by db.ts's indexed `messages` object store (one row per message), not a
+ * single blob per conversation any more — that design (one AEAD-wrapped JSON array
+ * per conversation) had no way to fetch just the newest slice of a big
+ * conversation: every open pulled the WHOLE blob out of IndexedDB and JSON-parsed
+ * all of it at once, found live to be the real cause of "opening a big chat takes a
+ * while, shows a spinner." Each row's own `ciphertext` column is still wrapped
+ * under the same local KEK as identity/session data
+ * (docs/05-crypto-architecture.md#local-key-storage) — plaintext message content is
+ * exactly the kind of sensitive local data docs/32-local-data-storage.md says must
+ * not sit around unencrypted; only `id`/`conversationId`/`sentAt` are plaintext
+ * IndexedDB fields (needed to index/query at all), mirroring the server's own
+ * Message table's already-accepted metadata-visible/content-encrypted split.
  */
 import { wrapBytes, unwrapBytes, utf8ToBytes, bytesToUtf8 } from '@comm/crypto';
 import type { MessageDeletionReason } from '@comm/types';
-import { putBlob, getBlob, deleteBlob } from './db';
+import {
+  deleteMessageRow,
+  deleteMessageRows,
+  getAllBlobKeysWithPrefix,
+  getBlob,
+  deleteBlob,
+  getMessageRow,
+  getMessageRowsForConversation,
+  putBlob,
+  putMessageRow,
+  putMessageRows,
+} from './db';
 import type { AttachmentDescriptor } from '../message-content';
 
 export interface CachedMessage {
@@ -56,127 +76,127 @@ export interface CachedMessage {
   deletedReason?: MessageDeletionReason;
 }
 
-function cacheKey(conversationId: string): string {
-  return `messages:${conversationId}`;
+/** Bounds how much history is kept per conversation locally — this is a cache, not
+ * the durable server-side record of the *encrypted* history; older plaintext falls
+ * out of it and in practice cannot be recovered (the ratchet message key it was
+ * decrypted with is long gone by then) — same tradeoff the mobile client's own
+ * cache accepts. */
+const MAX_CACHED_PER_CONVERSATION = 500;
+
+async function encodeMessage(kek: Uint8Array, message: CachedMessage): Promise<Uint8Array> {
+  return wrapBytes(kek, utf8ToBytes(JSON.stringify(message)));
 }
 
-/**
- * Serializes every read-modify-write against one conversation's cached blob.
- * Without this, two mutations arriving close together for the same conversation —
- * two `deleted` events, a `new` and a `deleted`, etc. — each read the same
- * pre-change snapshot and independently write back a full-blob overwrite, so
- * whichever write loses the race is silently discarded rather than merged. Found
- * live-testing media retention (docs/10-privacy-data-retention.md): a single sweep
- * run tombstoning an image, a voice note, and a file in the same conversation fired
- * three `deleted` events back to back, and without this lock one of the three
- * reliably never made it into the local cache even though the server-side tombstone
- * was correct. Keyed by conversationId, not global, so unrelated conversations never
- * block each other.
- */
-const writeQueues = new Map<string, Promise<unknown>>();
+async function decodeRow(kek: Uint8Array, ciphertext: Uint8Array): Promise<CachedMessage> {
+  const plaintext = unwrapBytes(kek, ciphertext);
+  return JSON.parse(bytesToUtf8(plaintext)) as CachedMessage;
+}
 
-function withConversationLock<T>(conversationId: string, run: () => Promise<T>): Promise<T> {
-  const prior = writeQueues.get(conversationId) ?? Promise.resolve();
-  const result = prior.then(run, run); // run regardless of whether the prior queued op threw
-  // a rejection here must never wedge the queue for later callers
-  const queued = result.catch(() => undefined);
-  writeQueues.set(conversationId, queued);
-  // Evicted once settled, but only if nothing newer has queued behind it in the
-  // meantime (a real leak found auditing this for production: every conversation
-  // ever touched kept a permanent entry here for the life of the tab otherwise) —
-  // same compare-and-delete pattern conversation-crypto.ts's decrypt memo already
-  // uses, so a genuinely new operation that queued in the meantime is never
-  // evicted out from under it.
-  void queued.then(() => {
-    if (writeQueues.get(conversationId) === queued) writeQueues.delete(conversationId);
-  });
-  return result;
+/** Deletes the oldest rows for [conversationId] beyond [MAX_CACHED_PER_CONVERSATION]
+ * — IndexedDB has no "delete all but the newest N" query, so this loads this
+ * conversation's already-small row set (≤ max + however many were just added),
+ * sorts, and deletes the excess by id. Never touches any other conversation's rows. */
+async function trim(conversationId: string): Promise<void> {
+  const rows = await getMessageRowsForConversation(conversationId);
+  if (rows.length <= MAX_CACHED_PER_CONVERSATION) return;
+  const sorted = [...rows].sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
+  const excess = sorted.slice(0, sorted.length - MAX_CACHED_PER_CONVERSATION);
+  await deleteMessageRows(excess.map((r) => r.id));
 }
 
 export async function loadCachedMessages(kek: Uint8Array, conversationId: string): Promise<CachedMessage[]> {
-  const wrapped = await getBlob(cacheKey(conversationId));
-  if (!wrapped) return [];
-  try {
-    const plaintext = unwrapBytes(kek, wrapped);
-    return JSON.parse(bytesToUtf8(plaintext)) as CachedMessage[];
-  } catch {
-    // A KEK mismatch (e.g. stale cache from before a password change) is not a
-    // reason to crash the chat UI — just start from an empty local history.
-    return [];
+  const rows = await getMessageRowsForConversation(conversationId);
+  const decoded: CachedMessage[] = [];
+  for (const row of rows) {
+    try {
+      decoded.push(await decodeRow(kek, row.ciphertext));
+    } catch {
+      // A KEK mismatch (e.g. stale cache from before a password change) or a
+      // corrupt single row isn't a reason to lose the rest of the conversation
+      // — same "fail this one message, not the whole cache" reasoning the old
+      // blob-based version could only apply at the whole-list level.
+    }
   }
-}
-
-async function saveCachedMessages(kek: Uint8Array, conversationId: string, messages: CachedMessage[]): Promise<void> {
-  const wrapped = wrapBytes(kek, utf8ToBytes(JSON.stringify(messages)));
-  await putBlob(cacheKey(conversationId), wrapped);
+  return decoded.sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
 }
 
 /** Idempotent by message id — safe to call for a message that's already cached
  * (e.g. a duplicate WS delivery after reconnect, docs/04-websocket-realtime.md's
- * at-least-once delivery model). */
-export function appendCachedMessage(kek: Uint8Array, message: CachedMessage): Promise<CachedMessage[]> {
-  return withConversationLock(message.conversationId, async () => {
-    const existing = await loadCachedMessages(kek, message.conversationId);
-    if (existing.some((m) => m.id === message.id)) return existing;
-    const updated = [...existing, message].sort((a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime());
-    await saveCachedMessages(kek, message.conversationId, updated);
-    return updated;
+ * at-least-once delivery model): `putMessageRow` overwrites in place, and a
+ * duplicate delivery of the same message id is always byte-identical content
+ * anyway. Returns the conversation's full updated list, same shape every caller
+ * already expects to `setState` directly with. */
+export async function appendCachedMessage(kek: Uint8Array, message: CachedMessage): Promise<CachedMessage[]> {
+  await putMessageRow({
+    id: message.id,
+    conversationId: message.conversationId,
+    sentAt: message.sentAt,
+    ciphertext: await encodeMessage(kek, message),
   });
+  await trim(message.conversationId);
+  return loadCachedMessages(kek, message.conversationId);
 }
 
 /** Prepends a page of older messages (pagination "load earlier") — same
  * idempotent-by-id merge as `appendCachedMessage`, just for a batch arriving at the
- * front of history instead of one arriving live at the end. */
-export function prependCachedMessages(
+ * front of history instead of one arriving live at the end. One transaction for
+ * the whole page, not one per message. */
+export async function prependCachedMessages(
   kek: Uint8Array,
   conversationId: string,
   olderMessages: CachedMessage[],
 ): Promise<CachedMessage[]> {
-  return withConversationLock(conversationId, async () => {
-    const existing = await loadCachedMessages(kek, conversationId);
-    const existingIds = new Set(existing.map((m) => m.id));
-    const merged = [...olderMessages.filter((m) => !existingIds.has(m.id)), ...existing].sort(
-      (a, b) => new Date(a.sentAt).getTime() - new Date(b.sentAt).getTime(),
+  if (olderMessages.length > 0) {
+    const rows = await Promise.all(
+      olderMessages.map(async (message) => ({
+        id: message.id,
+        conversationId: message.conversationId,
+        sentAt: message.sentAt,
+        ciphertext: await encodeMessage(kek, message),
+      })),
     );
-    await saveCachedMessages(kek, conversationId, merged);
-    return merged;
-  });
+    await putMessageRows(rows);
+    await trim(conversationId);
+  }
+  return loadCachedMessages(kek, conversationId);
 }
 
 /** Rolls back an optimistically-cached outgoing message whose send failed — see
  * message-thread.tsx's optimistic-send flow. Not used for anything else: a
  * successfully-sent or received message is never silently removed, only tombstoned
- * via `markCachedMessageDeleted` (an explicit, user-visible action). */
-export function removeCachedMessage(kek: Uint8Array, conversationId: string, messageId: string): Promise<CachedMessage[]> {
-  return withConversationLock(conversationId, async () => {
-    const existing = await loadCachedMessages(kek, conversationId);
-    const updated = existing.filter((m) => m.id !== messageId);
-    await saveCachedMessages(kek, conversationId, updated);
-    return updated;
-  });
+ * via `markCachedMessageDeleted` (an explicit, user-visible action). A single
+ * indexed delete now, not a read-decrypt-filter-re-encrypt-write of the whole
+ * conversation. */
+export async function removeCachedMessage(kek: Uint8Array, conversationId: string, messageId: string): Promise<CachedMessage[]> {
+  await deleteMessageRow(messageId);
+  return loadCachedMessages(kek, conversationId);
 }
 
 /** Tombstones a message locally — mirrors the server's own delete semantics
  * (docs/02-database-schema.md's "On deletion": ciphertext genuinely nulled out, not
  * just flagged). Idempotent and a no-op if the message isn't cached on this device
- * at all (e.g. it was deleted before this device ever decrypted it). */
-export function markCachedMessageDeleted(
+ * at all (e.g. it was deleted before this device ever decrypted it). One indexed
+ * row read + write now, not the whole conversation. */
+export async function markCachedMessageDeleted(
   kek: Uint8Array,
   conversationId: string,
   messageId: string,
   reason: MessageDeletionReason = 'manual',
 ): Promise<CachedMessage[]> {
-  return withConversationLock(conversationId, async () => {
-    const existing = await loadCachedMessages(kek, conversationId);
-    if (!existing.some((m) => m.id === messageId)) return existing;
-    const updated = existing.map((m) =>
-      m.id === messageId
-        ? { ...m, text: '', mediaBase64: undefined, attachment: undefined, deleted: true, deletedReason: reason }
-        : m,
-    );
-    await saveCachedMessages(kek, conversationId, updated);
-    return updated;
-  });
+  const row = await getMessageRow(messageId);
+  if (row) {
+    const existing = await decodeRow(kek, row.ciphertext);
+    const updated: CachedMessage = {
+      ...existing,
+      text: '',
+      mediaBase64: undefined,
+      attachment: undefined,
+      deleted: true,
+      deletedReason: reason,
+    };
+    await putMessageRow({ ...row, ciphertext: await encodeMessage(kek, updated) });
+  }
+  return loadCachedMessages(kek, conversationId);
 }
 
 /**
@@ -197,8 +217,9 @@ export function markCachedMessageDeleted(
  * two-function split (matching the mobile client's own fix for the identical
  * mistake) avoids from the start.
  */
-export function clearCachedMessages(conversationId: string): Promise<void> {
-  return deleteBlob(cacheKey(conversationId));
+export async function clearCachedMessages(conversationId: string): Promise<void> {
+  const rows = await getMessageRowsForConversation(conversationId);
+  await deleteMessageRows(rows.map((r) => r.id));
 }
 
 const LOCALLY_DELETED_KEY = 'messages:locally-deleted-conversations';
@@ -253,4 +274,55 @@ export async function unmarkConversationLocallyDeleted(conversationId: string): 
  * list against this once, rather than one blob read per row. */
 export function locallyDeletedConversationIds(): Promise<Set<string>> {
   return readLocallyDeleted();
+}
+
+const LEGACY_CACHE_KEY_PREFIX = 'messages:';
+
+/**
+ * One-time-per-account migration off the old one-blob-per-conversation cache
+ * (`wrapped-blobs` store, key `messages:<conversationId>`) into this file's new
+ * indexed `messages` store — mirrors apps/mobile's `migrateLegacyMessageCache`
+ * exactly, see that function's own docstring. Called once per unlock (see
+ * `complete-unlock.ts`) after the KEK becomes available, since decrypting the
+ * old blobs needs it. Safe to call on every unlock: a conversation whose old
+ * blob was already migrated (and deleted) simply isn't found by
+ * `getAllBlobKeysWithPrefix` any more, so a re-run after a successful migration
+ * is a fast no-op, not a re-import. Never throws — one conversation's
+ * corrupt/undecryptable legacy blob just means that conversation's local
+ * history is gone, exactly as it already would be under the old cache in the
+ * same situation, not a reason to fail unlock.
+ *
+ * `LOCALLY_DELETED_KEY` above shares the same `messages:` prefix by
+ * coincidence of naming, not by the legacy per-conversation cache format —
+ * excluded explicitly so migration doesn't try to treat it as a conversation's
+ * message list.
+ */
+export async function migrateLegacyMessageCache(kek: Uint8Array): Promise<void> {
+  const legacyKeys = (await getAllBlobKeysWithPrefix(LEGACY_CACHE_KEY_PREFIX)).filter(
+    (key) => key !== LOCALLY_DELETED_KEY,
+  );
+  for (const key of legacyKeys) {
+    const conversationId = key.substring(LEGACY_CACHE_KEY_PREFIX.length);
+    try {
+      const wrapped = await getBlob(key);
+      if (wrapped) {
+        const plaintext = unwrapBytes(kek, wrapped);
+        const messages = JSON.parse(bytesToUtf8(plaintext)) as CachedMessage[];
+        const rows = await Promise.all(
+          messages.map(async (message) => ({
+            id: message.id,
+            conversationId: message.conversationId,
+            sentAt: message.sentAt,
+            ciphertext: await encodeMessage(kek, message),
+          })),
+        );
+        await putMessageRows(rows);
+        await trim(conversationId);
+      }
+    } catch {
+      // See this function's own docstring — one conversation's corrupt/
+      // undecryptable legacy blob doesn't block migrating the rest.
+    }
+    await deleteBlob(key);
+  }
 }

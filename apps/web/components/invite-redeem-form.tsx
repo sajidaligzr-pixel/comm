@@ -6,7 +6,7 @@ import { Button } from './ui/button';
 import { Input, Label, FieldError } from './ui/input';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity } from '@/lib/crypto/identity';
-import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
+import { completeUnlock } from '@/lib/crypto/complete-unlock';
 import { setActiveAccount } from '@/lib/crypto/active-account';
 import { ensureHistoryKey } from '@/lib/crypto/history-key';
 
@@ -52,7 +52,7 @@ export function InviteRedeemForm({ token, username }: { token: string; username:
         },
       });
       localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
-      setUnlockedIdentity(kek, identity);
+      completeUnlock(kek, identity);
       // This account's very first device — bootstraps its History Key too, same
       // as any other password-based login (see history-key.ts's own docstring).
       await ensureHistoryKey(kek, password);

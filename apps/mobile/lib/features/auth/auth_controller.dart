@@ -8,6 +8,7 @@ library;
 
 import 'dart:async' show unawaited;
 import 'dart:io' show Platform;
+import 'dart:typed_data' show Uint8List;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../api/api_client.dart';
@@ -18,14 +19,28 @@ import '../../api/users_api.dart';
 import '../../app/providers.dart';
 import '../../crypto/history_key.dart';
 import '../../crypto/history_key_holder.dart';
+import '../../crypto/identity/keys.dart' show IdentityKeyPair;
 import '../../crypto/kek_holder.dart';
 import '../../crypto/local_identity.dart';
+import '../../crypto/message_cache.dart' show migrateLegacyMessageCache;
 import '../location/location_service_hooks.dart';
 import '../../storage/active_account.dart';
 import '../../storage/blob_store.dart' show wipeCryptoDb;
+import '../../storage/message_db.dart' show wipeMessageDb;
 import '../../storage/prefs.dart';
 import 'auth_state.dart';
 import 'biometric_unlock.dart' as biometric;
+
+/// Every unlock path below calls this instead of `setUnlockedIdentity` directly
+/// — the KEK becoming available is also the one moment `message_cache.dart`'s
+/// one-time legacy-blob-cache migration can run (see that function's own
+/// docstring). Fire-and-forget: a slow/failed migration must never block
+/// unlocking the app itself, and it's a safe no-op to retry on the next
+/// unlock if it didn't fully finish.
+void _completeUnlock(Uint8List kek, IdentityKeyPair identity) {
+  setUnlockedIdentity(kek, identity);
+  unawaited(migrateLegacyMessageCache(kek));
+}
 
 String _guessDeviceName() {
   if (Platform.isAndroid) return 'Android device';
@@ -81,7 +96,7 @@ class AuthController extends StateNotifier<AuthState> {
         "Could not unlock this device's local keys with that password.",
       );
     }
-    setUnlockedIdentity(unlocked.kek, unlocked.identity);
+    _completeUnlock(unlocked.kek, unlocked.identity);
     await ensureHistoryKey(_historyApi, unlocked.kek, password);
     state = AuthSignedIn(current.profile, mustChangePassword: false);
   }
@@ -97,7 +112,7 @@ class AuthController extends StateNotifier<AuthState> {
     final unlocked = await biometric.unlockWithBiometrics();
     if (unlocked == null) return false;
 
-    setUnlockedIdentity(unlocked.kek, unlocked.identity);
+    _completeUnlock(unlocked.kek, unlocked.identity);
     // No password available on this path — falls back to whatever's already
     // cached locally from an earlier password unlock (see history_key.dart's
     // own docstring); never blocks getting into the app.
@@ -164,10 +179,10 @@ class AuthController extends StateNotifier<AuthState> {
           "Could not unlock this device's local keys with that password.",
         );
       }
-      setUnlockedIdentity(unlocked.kek, unlocked.identity);
+      _completeUnlock(unlocked.kek, unlocked.identity);
       await ensureHistoryKey(_historyApi, unlocked.kek, password);
     } else {
-      setUnlockedIdentity(newIdentity!.kek, newIdentity.identity);
+      _completeUnlock(newIdentity!.kek, newIdentity.identity);
       await ensureHistoryKey(_historyApi, newIdentity.kek, password);
     }
 
@@ -195,7 +210,7 @@ class AuthController extends StateNotifier<AuthState> {
 
     await setRememberedDeviceId(info.username, result.deviceId);
     await setRememberedUsername(info.username);
-    setUnlockedIdentity(newIdentity.kek, newIdentity.identity);
+    _completeUnlock(newIdentity.kek, newIdentity.identity);
     // This account's very first device — bootstraps its History Key too, same
     // as any other password-based login (see history_key.dart's own docstring).
     await ensureHistoryKey(_historyApi, newIdentity.kek, password);
@@ -272,6 +287,7 @@ class AuthController extends StateNotifier<AuthState> {
     await LocationServiceHooks.stop();
     await wipeLocalIdentity();
     await wipeCryptoDb();
+    await wipeMessageDb();
     if (username != null) await clearRememberedDeviceId(username);
     await _apiClient.clearCookies();
     clearUnlockedIdentity();
@@ -286,6 +302,7 @@ class AuthController extends StateNotifier<AuthState> {
   Future<void> forgetThisDevice(String username) async {
     await wipeLocalIdentity();
     await wipeCryptoDb();
+    await wipeMessageDb();
     await clearRememberedDeviceId(username);
   }
 }

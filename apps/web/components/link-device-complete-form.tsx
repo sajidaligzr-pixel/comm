@@ -6,7 +6,7 @@ import { Button } from './ui/button';
 import { Input, Label, FieldError } from './ui/input';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity } from '@/lib/crypto/identity';
-import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
+import { completeUnlock } from '@/lib/crypto/complete-unlock';
 import { setActiveAccount } from '@/lib/crypto/active-account';
 import { ensureHistoryKey } from '@/lib/crypto/history-key';
 
@@ -45,7 +45,7 @@ export function LinkDeviceCompleteForm({ token, username }: { token: string; use
         },
       });
       localStorage.setItem(deviceIdStorageKey(username), result.deviceId);
-      setUnlockedIdentity(kek, identity);
+      completeUnlock(kek, identity);
       // This device typed the real account password above (see this form's own
       // note on why, for local key wrapping) — same bootstrap every other
       // password-based path uses (history-key.ts's own docstring).

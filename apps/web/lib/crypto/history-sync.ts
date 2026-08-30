@@ -49,14 +49,29 @@ const BACKFILL_DONE_KEY_PREFIX = 'comm-history-backfill-done__';
  * `localStorage` marker (same direct-localStorage convention every other
  * dismissed/seen flag in this app already uses, e.g. install-prompt.tsx's
  * `DISMISSED_KEY`) so it never re-runs for the same conversation on this
- * device again. Sequential, not fired all at once — `writeMessageHistoryEntry`
+ * device again.
+ *
+ * Found live, the hard way, on a genuinely large conversation's first pass
+ * (mirrors apps/mobile's identical fix — see thread_screen.dart's own
+ * backfill helper for the full account): firing each
+ * `syncHistoryEntry` call immediately after the previous one resolved — no
+ * real delay beyond whatever each call's own network round trip happened to
+ * leave — was still enough sustained request volume to saturate a real
+ * connection and starve this app's OTHER foreground requests (the message
+ * list fetch, delivery-status polling, sending a message) that share the
+ * same connection pool, making the whole app feel slow for as long as the
+ * backfill kept running, not just this one thread. Two fixes: wait a few
+ * seconds after this fires before starting at all (letting the page's own
+ * critical-path requests go first), and a real delay between every
+ * iteration, not just whatever gap the network happened to leave — both
+ * keep this to roughly one request in flight at a time. `writeMessageHistoryEntry`
  * (server/modules/history/service.ts) is a real `upsert` (a write every call,
- * not a cheap existence check), so this stays well under
- * `historyEntryWrite`'s rate limit (packages/security/src/rate-limit.ts) on a
- * long conversation's first pass. Callers fire this with `void`, same as every
- * individual `syncHistoryEntry` call already is — it's meant to run in the
- * background, not hold up rendering a long conversation's first open after
- * this ships.
+ * not a cheap existence check) with its own rate limit
+ * (`historyEntryWrite`, packages/security/src/rate-limit.ts) besides — the
+ * delay stays comfortably under it too. Callers fire this with `void`, same
+ * as every individual `syncHistoryEntry` call already is — it's meant to run
+ * in the background, taking as long as it needs to, not hold up rendering a
+ * long conversation's first open after this ships.
  */
 export async function maybeBackfillHistoryEntries(conversationId: string, cached: CachedMessage[]): Promise<void> {
   if (cached.length === 0) return;
@@ -65,8 +80,10 @@ export async function maybeBackfillHistoryEntries(conversationId: string, cached
   } catch {
     return; // no localStorage — never mind, same as any other dismissed-flag check in this app
   }
+  await new Promise((resolve) => setTimeout(resolve, 5000));
   for (const message of cached) {
     await syncHistoryEntry(message);
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
   try {
     localStorage.setItem(BACKFILL_DONE_KEY_PREFIX + conversationId, '1');

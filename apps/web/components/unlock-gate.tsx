@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { apiFetch } from '@/lib/api-client';
-import { getCurrentKek, setUnlockedIdentity } from '@/lib/crypto/kek-holder';
+import { getCurrentKek } from '@/lib/crypto/kek-holder';
+import { completeUnlock } from '@/lib/crypto/complete-unlock';
 import { unlockLocalIdentity } from '@/lib/crypto/identity';
 import { setActiveAccount } from '@/lib/crypto/active-account';
 import { isBiometricUnlockEnabled, isPlatformAuthenticatorAvailable, unlockWithBiometrics } from '@/lib/crypto/biometric-unlock';
@@ -112,7 +113,7 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
         setError('Biometric unlock didn’t work — use your password below.');
         return;
       }
-      setUnlockedIdentity(result.kek, result.identity);
+      completeUnlock(result.kek, result.identity);
       // No password available on this path — ensureHistoryKey falls back to
       // whatever's already cached locally from an earlier password unlock (see
       // its own docstring); never blocks getting into the app.
@@ -138,7 +139,7 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
         setError('Incorrect password, or this device needs to sign in again.');
         return;
       }
-      setUnlockedIdentity(result.kek, result.identity);
+      completeUnlock(result.kek, result.identity);
       await ensureHistoryKey(result.kek, password);
       setUnlocked(true);
     } finally {

@@ -7,7 +7,7 @@ import { Button } from './ui/button';
 import { Input, Label, FieldError } from './ui/input';
 import { apiFetch, ApiError } from '@/lib/api-client';
 import { createLocalIdentity, unlockLocalIdentity, hasLocalIdentity } from '@/lib/crypto/identity';
-import { setUnlockedIdentity } from '@/lib/crypto/kek-holder';
+import { completeUnlock } from '@/lib/crypto/complete-unlock';
 import { setActiveAccount } from '@/lib/crypto/active-account';
 import { ensureHistoryKey } from '@/lib/crypto/history-key';
 
@@ -102,10 +102,10 @@ export function LoginForm(): React.JSX.Element {
           // implemented in this pass.
           throw new ApiError('AUTH_INVALID', 'Could not unlock this device’s local keys with that password.');
         }
-        setUnlockedIdentity(unlocked.kek, unlocked.identity);
+        completeUnlock(unlocked.kek, unlocked.identity);
         kek = unlocked.kek;
       } else {
-        setUnlockedIdentity(newIdentity!.kek, newIdentity!.identity);
+        completeUnlock(newIdentity!.kek, newIdentity!.identity);
         kek = newIdentity!.kek;
       }
 

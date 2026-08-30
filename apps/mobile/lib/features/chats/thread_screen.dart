@@ -745,103 +745,149 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           for (final m in cached) {
             if (m.isOwn) _status[m.id] = (delivered: m.delivered, read: m.read);
           }
+          // THE actual "still takes so much time to load, worse the bigger the
+          // chat" bug — found live, and it was neither the SQLite migration nor
+          // the history-backfill throttling (both real, both fixed, neither was
+          // this): `_buildBody()` keeps showing a bare spinner for as long as
+          // `_loading` is true, and `_loading` used to only flip in this
+          // function's own `finally`, at the very END — after the full REST
+          // page fetch below, decrypting every message in it, and (for a direct
+          // chat) fetching both sides' device lists. Every one of those cached
+          // messages is ALREADY decrypted and sitting right here, above, before
+          // any of that network work even starts. Flipping it here instead means
+          // the cached history renders the instant it's ready — exactly the
+          // "instant open" behavior asked about — and the REST refresh below
+          // (new messages since last open, fresh delivered/read ticks) layers in
+          // afterward via `_ingestIncoming`'s own per-message setState, same as
+          // any other live update, not gating the first paint at all.
+          _loading = false;
         });
+        // Regression from the fix above: the cached list now renders (and is
+        // visible) the instant it's seeded, well before the background
+        // refresh below reaches its own trailing `_scrollToBottom()` call —
+        // so without this, the list sat at whatever its default/top scroll
+        // position was for however long that background work took, only
+        // jumping to the bottom once it finally finished (or never, if it
+        // threw before getting there). Scroll to bottom right here too, the
+        // instant the cached view appears; `_scrollToBottom`'s own settle
+        // loop already re-checks `maxScrollExtent` across a few frames, so it
+        // tolerates the list still growing under it.
+        _scrollToBottom();
       }
       _restartDisappearingPruneTimer(conversation.disappearingTimer);
       unawaited(_maybeBackfillHistoryEntries(cached));
 
-      if (conversation.type == 'group' && conversation.groupId != null) {
-        final groupController = ref.read(groupSessionControllerProvider);
-        await groupController.registerGroupMembership(conversation.groupId!);
-        await groupController.ensureGroupKeysUpToDate(conversation.groupId!);
-      } else if (conversation.type == 'direct') {
-        // Resolved once here, not per-send — see _targetDevices' own docstring.
-        final otherMemberDevices = await ref
-            .read(conversationsApiProvider)
-            .recipientDevices(widget.conversationId);
-        final ownDevices = await ref.read(devicesApiProvider).list();
-        final ownOtherDevices = ownDevices
-            .where((d) => !d.isCurrentDevice && d.status == 'active')
-            .map((d) => (userId: _myUserId, deviceId: d.id));
-        _targetDevices = [...otherMemberDevices, ...ownOtherDevices];
-      }
-
-      final page = await pageFuture;
-      final cachedIds = cached.map((m) => m.id).toSet();
-      // Decrypted in order (each message still renders the instant it's ready,
-      // via _ingestIncoming's own setState), but NOT persisted to disk one at a
-      // time — persist:false defers that to a single batched write below. See
-      // appendCachedMessages's docstring for why the per-message version of this
-      // was quietly O(n²) for a conversation with real history.
-      final newlyIngested = <CachedMessage>[];
-      // Delivered/read status is per-message state that changes on the SERVER
-      // after this device already has the message cached (the other side
-      // receiving/reading it doesn't touch this device's ciphertext at all) — so
-      // it has to be refreshed from this fresh REST fetch every time, not just
-      // for messages new enough to need decrypting. Found live as the reported
-      // "ticks aren't turning blue" bug: `_ingestIncoming` (below) is the only
-      // place that seeds `_status` from `dto.deliveredAt`/`readAt`, but the
-      // `continue` above skipped it entirely for anything already cached — which
-      // is most of a real conversation's own sent messages after the first load,
-      // so their ticks only ever updated via a live WS event arriving while this
-      // screen happened to already be open and connected.
-      var statusChanged = false;
-      for (final dto in page.items) {
-        if (dto.senderUserId == _myUserId) {
-          final next = (
-            delivered: dto.deliveredAt != null,
-            read: dto.readAt != null,
-          );
-          if (_status[dto.id] != next) {
-            _status[dto.id] = next;
-            statusChanged = true;
-            _persistStatus(dto.id, delivered: next.delivered, read: next.read);
-          }
+      // Everything from here on is a background refresh layered on top of what
+      // the user is already looking at (seeded above) — its own try/catch, not
+      // the outer one, because a failure here (a network blip fetching the
+      // latest page, say) must never blank an already-correct cached view out
+      // from under the user behind a full-screen error. Nothing left to show
+      // that isn't already showing; just leave the cached view up and let the
+      // next open try again.
+      try {
+        if (conversation.type == 'group' && conversation.groupId != null) {
+          final groupController = ref.read(groupSessionControllerProvider);
+          await groupController.registerGroupMembership(conversation.groupId!);
+          await groupController.ensureGroupKeysUpToDate(conversation.groupId!);
+        } else if (conversation.type == 'direct') {
+          // Resolved once here, not per-send — see _targetDevices' own docstring.
+          final otherMemberDevices = await ref
+              .read(conversationsApiProvider)
+              .recipientDevices(widget.conversationId);
+          final ownDevices = await ref.read(devicesApiProvider).list();
+          final ownOtherDevices = ownDevices
+              .where((d) => !d.isCurrentDevice && d.status == 'active')
+              .map((d) => (userId: _myUserId, deviceId: d.id));
+          _targetDevices = [...otherMemberDevices, ...ownOtherDevices];
         }
-        if (cachedIds.contains(dto.id)) continue;
-        final result = await _ingestIncoming(dto, persist: false);
-        if (result != null) newlyIngested.add(result);
+
+        final page = await pageFuture;
+        final cachedIds = cached.map((m) => m.id).toSet();
+        // Decrypted in order (each message still renders the instant it's ready,
+        // via _ingestIncoming's own setState), but NOT persisted to disk one at a
+        // time — persist:false defers that to a single batched write below. See
+        // appendCachedMessages's docstring for why the per-message version of this
+        // was quietly O(n²) for a conversation with real history.
+        final newlyIngested = <CachedMessage>[];
+        // Delivered/read status is per-message state that changes on the SERVER
+        // after this device already has the message cached (the other side
+        // receiving/reading it doesn't touch this device's ciphertext at all) — so
+        // it has to be refreshed from this fresh REST fetch every time, not just
+        // for messages new enough to need decrypting. Found live as the reported
+        // "ticks aren't turning blue" bug: `_ingestIncoming` (below) is the only
+        // place that seeds `_status` from `dto.deliveredAt`/`readAt`, but the
+        // `continue` above skipped it entirely for anything already cached — which
+        // is most of a real conversation's own sent messages after the first load,
+        // so their ticks only ever updated via a live WS event arriving while this
+        // screen happened to already be open and connected.
+        var statusChanged = false;
+        for (final dto in page.items) {
+          if (dto.senderUserId == _myUserId) {
+            final next = (
+              delivered: dto.deliveredAt != null,
+              read: dto.readAt != null,
+            );
+            if (_status[dto.id] != next) {
+              _status[dto.id] = next;
+              statusChanged = true;
+              _persistStatus(dto.id, delivered: next.delivered, read: next.read);
+            }
+          }
+          if (cachedIds.contains(dto.id)) continue;
+          final result = await _ingestIncoming(dto, persist: false);
+          if (result != null) newlyIngested.add(result);
+        }
+        if (statusChanged && mounted) setState(() {});
+        if (newlyIngested.isNotEmpty) {
+          await appendCachedMessages(kek, widget.conversationId, newlyIngested);
+        }
+        if (page.items.isNotEmpty) {
+          // Fire-and-forget, same as every other receipt ping in this file (see
+          // _ingestIncoming's docstring on why awaiting these serializes network
+          // round trips) — and deliberately guarded on isNotEmpty: a brand-new,
+          // still-empty conversation has nothing to mark read, and sending ''
+          // as upToMessageId is not a valid message id. Found live: the server
+          // correctly rejected it, but because this call used to be awaited
+          // inside this same try, that rejection wiped out the whole loaded
+          // thread (composer included) and left this screen showing the raw
+          // validation message instead of any chat UI at all.
+          //
+          // `page.items.first`, not `.last` — messages_api.dart's `list()` (and the
+          // server's own listMessages, service.ts) returns the page newest-first
+          // (`orderBy: serverReceivedAt: 'desc'`, the natural shape for "give me the
+          // most recent page, paginate backwards for older history"). `.last` was
+          // the OLDEST message in the page, so markRead's `upToMessageId` was telling
+          // the server "mark read everything at or before the oldest message here" —
+          // server/modules/messages/service.ts's `markConversationRead` filters
+          // `serverReceivedAt: { lte: upToMessage.serverReceivedAt }`, so that
+          // consistently marked only the single oldest message (or a same-timestamp
+          // handful) as read, never the rest of the page. Found live as the reported
+          // bug: the sender's ticks would advance to delivered (a separate, per-
+          // message, unaffected path — markDelivered) but never past that to read/blue,
+          // no matter how many times the recipient opened the thread.
+          ref
+              .read(conversationsApiProvider)
+              .markRead(widget.conversationId, page.items.first.id)
+              .catchError((_) {});
+        }
+        _scrollToBottom();
+      } catch (_) {
+        // See this inner try's own docstring above.
       }
-      if (statusChanged && mounted) setState(() {});
-      if (newlyIngested.isNotEmpty) {
-        await appendCachedMessages(kek, widget.conversationId, newlyIngested);
-      }
-      if (page.items.isNotEmpty) {
-        // Fire-and-forget, same as every other receipt ping in this file (see
-        // _ingestIncoming's docstring on why awaiting these serializes network
-        // round trips) — and deliberately guarded on isNotEmpty: a brand-new,
-        // still-empty conversation has nothing to mark read, and sending ''
-        // as upToMessageId is not a valid message id. Found live: the server
-        // correctly rejected it, but because this call used to be awaited
-        // inside this same try, that rejection wiped out the whole loaded
-        // thread (composer included) and left this screen showing the raw
-        // validation message instead of any chat UI at all.
-        //
-        // `page.items.first`, not `.last` — messages_api.dart's `list()` (and the
-        // server's own listMessages, service.ts) returns the page newest-first
-        // (`orderBy: serverReceivedAt: 'desc'`, the natural shape for "give me the
-        // most recent page, paginate backwards for older history"). `.last` was
-        // the OLDEST message in the page, so markRead's `upToMessageId` was telling
-        // the server "mark read everything at or before the oldest message here" —
-        // server/modules/messages/service.ts's `markConversationRead` filters
-        // `serverReceivedAt: { lte: upToMessage.serverReceivedAt }`, so that
-        // consistently marked only the single oldest message (or a same-timestamp
-        // handful) as read, never the rest of the page. Found live as the reported
-        // bug: the sender's ticks would advance to delivered (a separate, per-
-        // message, unaffected path — markDelivered) but never past that to read/blue,
-        // no matter how many times the recipient opened the thread.
-        ref
-            .read(conversationsApiProvider)
-            .markRead(widget.conversationId, page.items.first.id)
-            .catchError((_) {});
-      }
-      _scrollToBottom();
     } on ApiException catch (e) {
-      setState(() => _error = e.message);
+      if (mounted) {
+        setState(() {
+          _error = e.message;
+          _loading = false;
+        });
+      }
     } catch (e) {
-      setState(() => _error = 'Could not load this conversation.');
-    } finally {
-      if (mounted) setState(() => _loading = false);
+      if (mounted) {
+        setState(() {
+          _error = 'Could not load this conversation.';
+          _loading = false;
+        });
+      }
     }
   }
 
@@ -864,18 +910,34 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// device, a gap in every existing device ever contributing that backlog.
   /// Reported live exactly this way: a new device's "old message can't be
   /// decrypted." Walks this conversation's already-loaded cache once
-  /// (`getHistoryBackfillDone`/`setHistoryBackfillDone`, prefs.dart) — run
-  /// sequentially, not fired all at once, to stay well under
-  /// `historyEntryWrite`'s rate limit (packages/security/src/rate-limit.ts) on
-  /// a long conversation's first pass; run in the background rather than
-  /// awaited by `_load()` so opening a long conversation for the first time
-  /// after this ships isn't held up by it.
+  /// (`getHistoryBackfillDone`/`setHistoryBackfillDone`, prefs.dart).
+  ///
+  /// Found live, the hard way, on a genuinely large conversation's first pass:
+  /// the original version fired each `syncHistoryEntry` call immediately after
+  /// the previous one resolved — no real delay, since each call's own network
+  /// round trip (confirmed server-side: ~270-400ms apart) was the only
+  /// spacing. That's still enough sustained request volume to saturate a
+  /// mobile connection and its limited concurrent-connection pool, which this
+  /// app's OTHER foreground requests (the message list fetch, delivery-status
+  /// polling, sending a message) share — so a large conversation's first open
+  /// after this shipped made literally everything else in the app feel slow
+  /// for as long as the backfill kept running, not just this screen. Two
+  /// fixes: (1) wait until well after `_load()`'s own critical-path requests
+  /// have had time to finish before even starting, (2) a real delay between
+  /// every single iteration, not just whatever gap the network happened to
+  /// leave — both keep this to roughly one request in flight at a time, with
+  /// real breathing room, at the cost of the backfill itself taking longer in
+  /// wall-clock terms, which is fine: it's a one-time background pass with no
+  /// user-visible deadline.
   Future<void> _maybeBackfillHistoryEntries(List<CachedMessage> cachedMsgs) async {
     if (cachedMsgs.isEmpty) return;
     if (await getHistoryBackfillDone(widget.conversationId)) return;
+    await Future.delayed(const Duration(seconds: 5));
+    if (!mounted) return;
     final historyApi = ref.read(historyApiProvider);
     for (final m in cachedMsgs) {
       await syncHistoryEntry(historyApi, m);
+      await Future.delayed(const Duration(milliseconds: 500));
     }
     await setHistoryBackfillDone(widget.conversationId);
   }

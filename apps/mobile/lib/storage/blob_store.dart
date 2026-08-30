@@ -1,13 +1,12 @@
 /// Opaque byte-blob storage, account-scoped — the mobile counterpart to
 /// `apps/web/lib/crypto/db.ts`'s per-account IndexedDB. Backed by
 /// `flutter_secure_storage` (iOS Keychain / Android Keystore) rather than a database
-/// file: every value this app ever stores through here is small (key material,
-/// serialized ratchet state, cached message history — nothing bulk-media-sized), so
-/// there's no reason to give up Keychain/Keystore-backed at-rest protection for
-/// SQLite's query features, which nothing here needs (lookups are always by exact
-/// key). Deliberately NOT cryptographic code itself, same as db.ts — every blob
-/// reaching this module has already been wrapped (encrypted) by crypto/storage/wrap.dart
-/// before it gets here.
+/// file: every value this app stores through here is small and looked up by exact
+/// key only (identity bundle, KEK salt, biometric wrap, session state) — real
+/// query needs (message history specifically) live in `message_db.dart`'s SQLite
+/// store instead, see that file's own docstring for why. Deliberately NOT
+/// cryptographic code itself, same as db.ts — every blob reaching this module has
+/// already been wrapped (encrypted) by crypto/storage/wrap.dart before it gets here.
 library;
 
 import 'dart:convert';
@@ -38,6 +37,27 @@ Future<Uint8List?> getBlob(String key) async {
 
 Future<void> deleteBlob(String key) async {
   await _storage.delete(key: _scopedKey(key));
+}
+
+/// Every blob currently stored for the active account whose (unscoped) key
+/// starts with [keyPrefix], keyed by that same unscoped key (i.e. what a
+/// caller would pass to `getBlob`/`putBlob`/`deleteBlob`) — `readAll()` has no
+/// native prefix-filter, so this scans everything and filters, same cost
+/// `wipeCryptoDb` already accepts for the same reason. Written for exactly one
+/// purpose so far: message_cache.dart's one-time migration off the old
+/// one-blob-per-conversation cache into the new indexed message_db.dart, but
+/// kept generic rather than migration-specific-named in case a future
+/// one-time migration needs the identical shape.
+Future<Map<String, Uint8List>> readAllBlobsWithPrefix(String keyPrefix) async {
+  final all = await _storage.readAll();
+  final scopedPrefix = _scopedKey(keyPrefix);
+  final result = <String, Uint8List>{};
+  for (final entry in all.entries) {
+    if (!entry.key.startsWith(scopedPrefix)) continue;
+    final unscopedKey = entry.key.substring('comm_blob__${getActiveAccount()}__'.length);
+    result[unscopedKey] = base64Decode(entry.value);
+  }
+  return result;
 }
 
 /// Wipes every locally-stored key/session for the CURRENTLY ACTIVE account only —
