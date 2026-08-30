@@ -111,7 +111,7 @@ class CallForegroundService : Service() {
         private const val NOTIFICATION_ID = 4300
 
         fun start(context: Context) {
-            context.startForegroundService(Intent(context, CallForegroundService::class.java))
+            ContextCompat.startForegroundService(context, Intent(context, CallForegroundService::class.java))
         }
 
         fun stop(context: Context) {
