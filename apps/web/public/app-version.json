@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 33,
+  "buildNumber": 42,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-33.apk",
-  "releaseNotes": "Sending a message no longer blocks the composer or shows a spinner — you can now send multiple messages back to back, exactly like WhatsApp, with each one showing its own small clock icon while it's on the way."
+  "apkUrl": "/downloads/comm-42.apk",
+  "releaseNotes": "Chats open instantly now, even big ones — messages are stored in a real indexed local database instead of one big encrypted blob, and opening a chat no longer waits on a background sync to finish."
 }
