@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 42,
+  "buildNumber": 45,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-42.apk",
-  "releaseNotes": "Chats open instantly now, even big ones — messages are stored in a real indexed local database instead of one big encrypted blob, and opening a chat no longer waits on a background sync to finish."
+  "apkUrl": "/downloads/comm-45.apk",
+  "releaseNotes": "Fixed: accepting a call from the notification now connects immediately, instead of sometimes asking you to accept a second time. You can also minimize an active call to keep using the app while still talking, and sent photos now show up correctly on your own side right away."
 }
