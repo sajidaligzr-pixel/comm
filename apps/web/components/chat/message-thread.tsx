@@ -143,6 +143,14 @@ export function MessageThread({
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  // Purely informational now (the picker buttons' `title` tooltip) — no longer
+  // disables the picker button itself. handleImageSelected/handleFileSelected
+  // below only ever touch locally-scoped variables (no shared mutable state
+  // across calls), and sendEncrypted already renders each message optimistically
+  // the instant its own envelope is ready, so nothing here actually requires
+  // waiting for one photo/file to finish before starting the next — matching
+  // WhatsApp's own composer, which never blocks sending more while one is
+  // still in flight (each message just shows its own pending clock tick).
   const [sendingImage, setSendingImage] = useState(false);
   const [sendingFile, setSendingFile] = useState(false);
   // Arms the NEXT picked photo to send as view-once (docs/13-roadmap.md) — reset
@@ -1307,8 +1315,7 @@ export function MessageThread({
             <button
               type="button"
               onClick={() => imageInputRef.current?.click()}
-              disabled={sendingImage}
-              title={sendingImage ? 'Sending photo…' : 'Send a photo'}
+              title={sendingImage ? 'Sending a photo…' : 'Send a photo'}
               aria-label="Attach image"
               className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
             >
@@ -1332,8 +1339,7 @@ export function MessageThread({
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={sendingFile}
-              title={sendingFile ? 'Sending file…' : 'Attach a file'}
+              title={sendingFile ? 'Sending a file…' : 'Attach a file'}
               aria-label="Attach file"
               className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent"
             >

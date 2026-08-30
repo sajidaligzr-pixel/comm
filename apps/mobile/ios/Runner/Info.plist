@@ -54,6 +54,17 @@
 	     crash-not-just-deny behavior as the photo library key above. -->
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Comm needs access to your microphone to make and receive voice calls.</string>
+	<!-- Reported by App Store Connect (ITMS-90683) after build 1.0.0(32)'s upload:
+	     "missing purpose string" — flutter_webrtc's iOS audio-routing code
+	     references Bluetooth APIs (so it can route call audio to a connected
+	     Bluetooth headset, matching Android's BLUETOOTH_CONNECT permission for
+	     the identical purpose), but nothing in this app ever explicitly requests
+	     Bluetooth access from Dart, so this key was missing entirely. Same
+	     class of requirement as every other key in this file: Apple's binary
+	     validation flags ANY reference to a sensitive API with no matching
+	     purpose string, even one pulled in transitively by a plugin. -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Comm needs Bluetooth access to route call audio to a connected Bluetooth headset.</string>
 	<!-- Required by BOTH image_picker's camera-capture option (not just its photo-
 	     library option above — thread_screen.dart's "Photo" attach action lets you
 	     take a new photo, not only pick an existing one) and flutter_webrtc's

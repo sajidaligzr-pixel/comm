@@ -391,7 +391,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   }
 
   bool _loading = true;
-  bool _sending = false;
 
   // --- Voice notes -----------------------------------------------------------
   // See _startVoiceRecording's docstring for the format/protocol choice.
@@ -1603,7 +1602,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     String fileName,
     String mimeType,
   ) async {
-    setState(() => _sending = true);
     try {
       final encrypted = await attach_crypto.encryptAttachment(bytes);
       final uploaded = await ref
@@ -1639,8 +1637,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           context,
         ).showSnackBar(SnackBar(content: Text('Could not send that file: $e')));
       }
-    } finally {
-      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -1678,7 +1674,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final replyToMessageId = _replyingTo?.id;
     if (_replyingTo != null) setState(() => _replyingTo = null);
 
-    setState(() => _sending = true);
     try {
       final SendMessageRequest req;
       if (conversation.type == 'group') {
@@ -1801,8 +1796,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           context,
         ).showSnackBar(SnackBar(content: Text('Could not send: $e')));
       }
-    } finally {
-      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -2240,7 +2233,6 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
                             PopupMenuButton<String>(
-                              enabled: !_sending,
                               icon: const Icon(
                                 Icons.attach_file,
                                 color: WhatsAppColors.tealAccent,
@@ -2321,6 +2313,18 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                             // (TextEditingController is itself a
                             // ValueListenable) rather than a whole-screen
                             // setState on every keystroke.
+                            //
+                            // Deliberately never disabled and never shows a
+                            // spinner while a send is in flight — WhatsApp
+                            // itself lets you keep firing off messages one
+                            // after another, showing each one's own progress
+                            // as the small clock tick next to that bubble
+                            // (tickStateFor's TickState.sending, above), not
+                            // by blocking the composer. _sendEnvelope/_sendFile
+                            // are already safe to have several in flight at
+                            // once (each closes over its own messageId), so
+                            // blocking the button here was only ever an
+                            // unnecessary UI restriction, not a real one.
                             ValueListenableBuilder<TextEditingValue>(
                               valueListenable: _textController,
                               builder: (context, value, _) {
@@ -2330,27 +2334,14 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
                                   shape: const CircleBorder(),
                                   child: InkWell(
                                     customBorder: const CircleBorder(),
-                                    onTap: _sending
-                                        ? null
-                                        : (hasText
-                                              ? _send
-                                              : _startVoiceRecording),
+                                    onTap: hasText ? _send : _startVoiceRecording,
                                     child: Padding(
                                       padding: const EdgeInsets.all(10),
-                                      child: _sending
-                                          ? const SizedBox(
-                                              width: 20,
-                                              height: 20,
-                                              child: CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                                color: Colors.white,
-                                              ),
-                                            )
-                                          : Icon(
-                                              hasText ? Icons.send : Icons.mic,
-                                              color: Colors.white,
-                                              size: 20,
-                                            ),
+                                      child: Icon(
+                                        hasText ? Icons.send : Icons.mic,
+                                        color: Colors.white,
+                                        size: 20,
+                                      ),
                                     ),
                                   ),
                                 );
