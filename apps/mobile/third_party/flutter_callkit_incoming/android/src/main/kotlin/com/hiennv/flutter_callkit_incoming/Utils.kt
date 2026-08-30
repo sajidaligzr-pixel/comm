@@ -3,6 +3,7 @@ package com.hiennv.flutter_callkit_incoming
 import android.content.Context
 import android.content.Intent
 import android.content.res.Resources
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.lang.ref.WeakReference
 
@@ -16,7 +17,27 @@ class Utils {
 
         fun getGsonInstance(): ObjectMapper {
             if (mapper == null) {
+                // Comm patch: this ObjectMapper (despite its Gson-flavored name) is what
+                // SharedPreferencesUtils.kt's addCall/removeCall use to persist the
+                // "ACTIVE_CALLS" list — the plugin's own source of truth for whether a
+                // given call id is currently tracked at all. Found live: a call's own
+                // JSON payload (Data's `args` map) can legitimately carry a `muted` key
+                // Jackson's default strict bean deserialization doesn't recognize as a
+                // property on `Data` (54 known properties, not this one) — Jackson's
+                // default is to THROW on any such unknown field, which meant addCall()
+                // silently failed on every single incoming call, the call was NEVER
+                // actually added to ACTIVE_CALLS, and endCall() (this app's own call-end
+                // push handler) could never find it afterward — `currentCall` came back
+                // null, so its whole teardown branch (Telecom disconnect, notification
+                // clear, foreground-service stop, and the Activity-closing broadcast that
+                // releases its screen-wake lock) silently no-op'd. This is the actual root
+                // cause behind the screen staying lit / stuck "ongoing call" notification
+                // reports — not the wake-lock timeout itself, which was a real but
+                // secondary bug. Ignoring unknown properties is the standard, robust
+                // Jackson fix for exactly this class of forward/backward-compatibility
+                // mismatch, rather than chasing down every field that might appear.
                 mapper = ObjectMapper()
+                    .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
             }
             return mapper!!
         }
