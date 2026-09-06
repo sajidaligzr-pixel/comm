@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 45,
+  "buildNumber": 46,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-45.apk",
-  "releaseNotes": "Fixed: accepting a call from the notification now connects immediately, instead of sometimes asking you to accept a second time. You can also minimize an active call to keep using the app while still talking, and sent photos now show up correctly on your own side right away."
+  "apkUrl": "/downloads/comm-46.apk",
+  "releaseNotes": "Fixed a real bug affecting multi-device accounts: messages could permanently fail to decrypt on a newly-added device (and on the other person's side too) if a chat was left open for a long time before the new device was added. Also fixed getting notified about your own messages showing up on your other device."
 }
