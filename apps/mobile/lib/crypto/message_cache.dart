@@ -33,7 +33,12 @@ import 'storage/wrap.dart';
 import '../storage/blob_store.dart'
     show getBlob, putBlob, deleteBlob, readAllBlobsWithPrefix;
 import '../storage/message_db.dart'
-    show messageDb, insertMessageSql, loadMessagesSql, trimMessagesSql;
+    show
+        messageDb,
+        insertMessageSql,
+        repairMessageSql,
+        loadMessagesSql,
+        trimMessagesSql;
 
 class CachedMessage {
   final String id;
@@ -268,6 +273,28 @@ Future<void> appendCachedMessages(
     rethrow;
   }
   _trim(db, conversationId);
+}
+
+/// Overwrites an already-cached message's stored content — [appendCachedMessage]/
+/// [appendCachedMessages] deliberately can't do this (INSERT OR IGNORE, a
+/// no-op once a row with that id exists, exactly right for a duplicate
+/// WS/REST delivery of an already-correct message). The one case that
+/// genuinely needs the opposite: `thread_screen.dart`'s `_load()` retrying a
+/// message it previously cached as undecryptable (its own docstring has the
+/// full story) — once that retry actually resolves the real content, this is
+/// what replaces the stale placeholder row rather than silently leaving it in
+/// place forever.
+Future<void> repairCachedMessage(Uint8List kek, CachedMessage message) async {
+  final db = await messageDb();
+  db.execute(
+    repairMessageSql,
+    [
+      message.id,
+      message.conversationId,
+      message.sentAt,
+      await _encodeMessage(kek, message),
+    ],
+  );
 }
 
 /// Rolls back an optimistically-rendered outgoing message (thread_screen.dart's

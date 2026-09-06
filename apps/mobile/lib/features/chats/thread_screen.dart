@@ -51,6 +51,16 @@ import 'message_info_sheet.dart' show showMessageInfoSheet;
 
 const _uuid = Uuid();
 
+/// The exact placeholder `_ingestIncoming` caches when a message can't be
+/// recovered via either the live per-device session or the history-key
+/// fallback — a named constant (not a repeated literal) specifically because
+/// `_load()`'s catch-up loop below now needs to recognize it again, to retry a
+/// message that was cached with this placeholder the first time it arrived
+/// (e.g. before this device was a live target at all) once a fresh fetch might
+/// resolve it differently — see that loop's own docstring for the live bug
+/// this closes.
+const _undecryptablePlaceholderText = '[Could not decrypt this message]';
+
 class _DecodedContent {
   final String text;
   final AttachmentDescriptor? attachment;
@@ -278,14 +288,41 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   /// Every device a direct-conversation send needs its own independently-encrypted
   /// envelope for — the other member's active devices, plus this account's own
   /// other active devices (self-fan-out: a second phone, a desktop client, a web
-  /// tab left open elsewhere). Resolved once when the thread opens, reused for
-  /// every send — mirrors apps/web's `targetDeviceIdsRef` (message-thread.tsx)
-  /// exactly, including WHY: re-resolving this on every single send was a real,
-  /// found regression (each send paid a full network round trip before encryption
-  /// could even start, on top of the actual send request). A device change
-  /// mid-conversation-view is rare enough that "resolved once per thread visit" is
-  /// the right tradeoff, same call the web client already made.
+  /// tab left open elsewhere). Seeded on every `_load()` (thread open/reopen, WS
+  /// reconnect) purely so a send has *something* to check "does the other person
+  /// even have a device" against without a network round trip first — no longer
+  /// what a send actually encrypts against; see `_sendEnvelope`'s own fresh fetch.
+  ///
+  /// This USED to be resolved once per thread-visit and reused for every send in
+  /// that session (mirroring apps/web's `targetDeviceIdsRef`, deliberately, at the
+  /// time) — found live to be a real bug, not an acceptable tradeoff: a thread left
+  /// open for an actively-chatting session can run for many hours without ever
+  /// reopening or losing its WS connection, during which a peer linking a new
+  /// device (or this account's own) was silently never added as a send target.
+  /// Every message sent in that whole window permanently missed that device —
+  /// Double Ratchet forward secrecy means it can never retroactively decrypt them
+  /// — surfacing as "[Could not decrypt this message]" hours or days later, with
+  /// no way to recover short of the history-key fallback (itself dependent on some
+  /// OTHER device of the account having been open recently enough to backfill it).
   List<({String userId, String deviceId})> _targetDevices = [];
+
+  /// The REAL target-device set for a send — see `_targetDevices`' own docstring
+  /// for the live bug this exists to avoid repeating. Called fresh every time a
+  /// message is actually composed (`_sendEnvelope`), never trusted from a value
+  /// resolved earlier in the session; also used by `_load()` to seed
+  /// `_targetDevices` for the cheap "does the other person have a device at all"
+  /// check. Two fast, already-indexed REST calls per send is a real but acceptable
+  /// cost for "every message actually reaches every device that should get it."
+  Future<List<({String userId, String deviceId})>> _resolveTargetDevices() async {
+    final otherMemberDevices = await ref
+        .read(conversationsApiProvider)
+        .recipientDevices(widget.conversationId);
+    final ownDevices = await ref.read(devicesApiProvider).list();
+    final ownOtherDevices = ownDevices
+        .where((d) => !d.isCurrentDevice && d.status == 'active')
+        .map((d) => (userId: _myUserId, deviceId: d.id));
+    return [...otherMemberDevices, ...ownOtherDevices];
+  }
 
   /// Delivered/read status for messages THIS device sent, keyed by message id —
   /// deliberately NOT part of `CachedMessage`/the persistent local cache, mirroring
@@ -790,19 +827,17 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           await groupController.registerGroupMembership(conversation.groupId!);
           await groupController.ensureGroupKeysUpToDate(conversation.groupId!);
         } else if (conversation.type == 'direct') {
-          // Resolved once here, not per-send — see _targetDevices' own docstring.
-          final otherMemberDevices = await ref
-              .read(conversationsApiProvider)
-              .recipientDevices(widget.conversationId);
-          final ownDevices = await ref.read(devicesApiProvider).list();
-          final ownOtherDevices = ownDevices
-              .where((d) => !d.isCurrentDevice && d.status == 'active')
-              .map((d) => (userId: _myUserId, deviceId: d.id));
-          _targetDevices = [...otherMemberDevices, ...ownOtherDevices];
+          // Just a pre-warmed value for the cheap "no reachable device" check —
+          // see _targetDevices' own docstring; _sendEnvelope resolves its own
+          // fresh copy right before every actual send.
+          _targetDevices = await _resolveTargetDevices();
         }
 
         final page = await pageFuture;
-        final cachedIds = cached.map((m) => m.id).toSet();
+        // A Map, not just a Set of ids — the retry logic below needs to inspect
+        // an already-cached entry's own content (see the loop's own docstring),
+        // not just know whether the id exists.
+        final cachedById = {for (final m in cached) m.id: m};
         // Decrypted in order (each message still renders the instant it's ready,
         // via _ingestIncoming's own setState), but NOT persisted to disk one at a
         // time — persist:false defers that to a single batched write below. See
@@ -833,7 +868,24 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
               _persistStatus(dto.id, delivered: next.delivered, read: next.read);
             }
           }
-          if (cachedIds.contains(dto.id)) continue;
+          final existing = cachedById[dto.id];
+          if (existing != null) {
+            // Retry exactly one case: a message this device previously gave up
+            // on and cached as the undecryptable placeholder — see
+            // `_undecryptablePlaceholderText`'s own docstring for why that can
+            // no longer be permanent. Anything else already cached is already
+            // correct; nothing to redo.
+            if (existing.text != _undecryptablePlaceholderText) continue;
+            final retried = await _ingestIncoming(dto, persist: false);
+            // `appendCachedMessages` below is an INSERT OR IGNORE (right for
+            // every genuinely-new message in `newlyIngested`) — it can't
+            // overwrite a row that already exists, so a real repair needs its
+            // own explicit write.
+            if (retried != null && retried.text != _undecryptablePlaceholderText) {
+              await repairCachedMessage(kek, retried);
+            }
+            continue;
+          }
           final result = await _ingestIncoming(dto, persist: false);
           if (result != null) newlyIngested.add(result);
         }
@@ -1208,7 +1260,7 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           senderUserId: dto.senderUserId,
           isOwn: isOwn,
           contentTypeHint: dto.contentTypeHint,
-          text: '[Could not decrypt this message]',
+          text: _undecryptablePlaceholderText,
           sentAt: dto.sentAt,
           replyToMessageId: dto.replyToMessageId,
         );
@@ -1222,7 +1274,17 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
     if (mounted) {
       setState(() {
-        if (!_messages.any((m) => m.id == cached.id)) _messages.add(cached);
+        // REPLACE, not just "add if absent" — the catch-up loop's own retry of
+        // a previously-undecryptable cached message (see its docstring) needs
+        // this update to actually reach the screen; a plain existence check
+        // would leave the stale placeholder bubble on screen even after the
+        // retry genuinely resolved real content.
+        final existingIndex = _messages.indexWhere((m) => m.id == cached.id);
+        if (existingIndex == -1) {
+          _messages.add(cached);
+        } else {
+          _messages[existingIndex] = cached;
+        }
         _messages.sort((a, b) => a.sentAt.compareTo(b.sentAt));
       });
       _scrollToBottom();
@@ -1776,22 +1838,17 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
           attachment: attachmentRef,
         );
       } else {
-        // Falls back to a fresh fetch only if the cached list is somehow missing
-        // (e.g. a send racing the very first _load()) — the normal path reuses what
-        // _load() already resolved, see _targetDevices' own docstring.
-        var targets = _targetDevices;
-        if (targets.isEmpty) {
-          final otherMemberDevices = await ref
-              .read(conversationsApiProvider)
-              .recipientDevices(widget.conversationId);
-          final ownDevices = await ref.read(devicesApiProvider).list();
-          final ownOtherDevices = ownDevices
-              .where((d) => !d.isCurrentDevice && d.status == 'active')
-              .map((d) => (userId: _myUserId, deviceId: d.id));
-          targets = _targetDevices = [
-            ...otherMemberDevices,
-            ...ownOtherDevices,
-          ];
+        // Always fresh — see _targetDevices' own docstring for the live bug this
+        // fixes (a stale, session-lifetime device list silently missing a device
+        // linked mid-conversation). Falls back to whatever _load() last resolved
+        // only on a genuine network failure here, so a transient blip degrades to
+        // the old (still real, but far rarer) staleness window rather than
+        // blocking the send outright.
+        List<({String userId, String deviceId})> targets;
+        try {
+          targets = _targetDevices = await _resolveTargetDevices();
+        } catch (_) {
+          targets = _targetDevices;
         }
         if (targets.isEmpty) {
           throw StateError(

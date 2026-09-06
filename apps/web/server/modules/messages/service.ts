@@ -62,17 +62,45 @@ function toDto(row: {
   // Which specific device is asking — REQUIRED whenever `row.recipients` could
   // contain more than one device's row (i.e. `listMessages`, where multi-device
   // fan-out means a `direct` message now has a genuinely different, mutually
-  // undecryptable ciphertext per recipient device). Without this, picking an
-  // arbitrary `recipients[0]` risks handing back a DIFFERENT device's envelope —
-  // decryptable by nobody who receives it, silently swallowed by the client as
-  // "undecryptable on this device" and looking exactly like a dropped message.
-  // Omitted only by `sendMessage`'s own re-fetch, which already queries exactly one
-  // already-known-correct row (`include: { recipients: { where: { recipientDeviceId } } }`)
-  // and by callers with no specific viewer device to disambiguate by (there are none
-  // today — every caller of this function is device-scoped).
+  // undecryptable ciphertext per recipient device). Omitted only by `sendMessage`'s
+  // own re-fetch, which already queries exactly one already-known-correct row
+  // (`include: { recipients: { where: { recipientDeviceId } } }`) and by callers
+  // with no specific viewer device to disambiguate by (there are none today —
+  // every caller of this function is device-scoped).
   viewerDeviceId?: string,
-): MessageDto {
-  const recipient = (viewerDeviceId && row.recipients.find((r) => r.recipientDeviceId === viewerDeviceId)) || row.recipients[0];
+): MessageDto | null {
+  // A `direct` message fanned out per-device (real per-recipient envelope columns
+  // present on at least one row) is fundamentally different from a `group`
+  // message or a pre-fanout `direct` message (every row's envelope columns null,
+  // content lives on `Message` instead, identically valid for anyone) — only the
+  // former can have a row that's simply THE WRONG DEVICE'S ciphertext.
+  const isPerDeviceFanout = row.recipients.some((r) => r.envelopeHeader !== null);
+  const matched = viewerDeviceId ? row.recipients.find((r) => r.recipientDeviceId === viewerDeviceId) : undefined;
+  const hasHistoryEntry = (row.historyEntries?.length ?? 0) > 0;
+  // The device that actually SENT this message never needed a `MessageRecipient`
+  // row of its own to know its own content — it has the plaintext already (it
+  // wrote it), which is exactly why `sendMessage`'s own `targetDeviceIds` never
+  // includes `ctx.deviceId` itself. Must never be omitted below purely for
+  // lacking a per-device row it was never going to have in the first place.
+  const isViewerTheSender = viewerDeviceId != null && row.senderDeviceId === viewerDeviceId;
+  // Found live: falling back to `row.recipients[0]` here (some OTHER device's row)
+  // whenever this viewer's own device had none used to hand back a DIFFERENT
+  // device's ciphertext as if it were this device's own — decryptable by nobody
+  // who receives it, throwing deep inside the client's crypto code and rendering
+  // as a permanent "[Could not decrypt this message]", not a missing message. The
+  // real, honest state when a per-device-fanout message has no row for THIS
+  // device is "not delivered to this device at all" (this device didn't exist yet,
+  // or wasn't in the resolved target set at send time) — nothing to decrypt live.
+  // BUT only actually hopeless (omit it, `null`, below) when there's also no
+  // history-key entry to fall back on: when one exists, the message must stay
+  // visible — some OTHER device's ciphertext still rides along on the DTO (the
+  // client's live-decrypt attempt on it will fail, same as ever, and correctly
+  // fall through to the history entry, which succeeds) — omitting it here too
+  // would hide a message the client is fully able to recover.
+  if (isPerDeviceFanout && viewerDeviceId && !matched && !hasHistoryEntry && !isViewerTheSender) {
+    return null;
+  }
+  const recipient = matched ?? row.recipients[0];
   if (!recipient) {
     throw new AppError('INTERNAL', 'Message is missing its envelope.');
   }
@@ -284,7 +312,10 @@ export async function sendMessage(
     ),
   );
 
-  return rows.map((row) => toDto(row));
+  // `toDto` only ever returns `null` when a `viewerDeviceId` is given AND doesn't
+  // match — never true here (no `viewerDeviceId` argument below), so this is
+  // always exactly one real `MessageDto` per target device, never a gap.
+  return rows.map((row) => toDto(row)!);
 }
 
 export async function listMessages(
@@ -321,7 +352,12 @@ export async function listMessages(
   const page = hasMore ? rows.slice(0, limit) : rows;
 
   return {
-    items: page.map((row) => toDto(row, callerDeviceId)),
+    // A `null` here means this specific device was never a live target for this
+    // message (see `toDto`'s own docstring) — omitted, not surfaced as a fake
+    // "undecryptable" message; the account's own history-key sync
+    // (`maybeBackfillHistoryEntries`/`syncHistoryEntry`) is that message's only
+    // remaining recovery path, and runs independently of this list.
+    items: page.map((row) => toDto(row, callerDeviceId)).filter((dto): dto is MessageDto => dto !== null),
     nextCursor: hasMore ? page[page.length - 1]!.id : null,
   };
 }

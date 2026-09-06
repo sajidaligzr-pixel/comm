@@ -105,6 +105,32 @@ async function compressImageForSend(file: File): Promise<Uint8Array> {
   }
 }
 
+/**
+ * The REAL target-device set for a send, fetched fresh every single time a
+ * message is composed — never trusted from a cache/ref populated at some
+ * earlier point in the session. See `targetDeviceIdsRef`'s own docstring for
+ * the live bug this replaces: a device linked mid-session (either the peer's or
+ * this account's own) was previously never discovered until the thread was
+ * reopened or the WS reconnected, which a long-lived, continuously-open,
+ * actively-chatting thread may not do for hours — silently and permanently
+ * excluding that device from every message sent in the meantime. Two fast,
+ * already-indexed REST calls per send is a real but acceptable cost for "every
+ * message actually reaches every device that should get it."
+ */
+async function resolveSendTargets(
+  conversationId: string,
+  currentUserId: string,
+): Promise<Array<{ userId: string; deviceId: string }>> {
+  const [otherMemberDevices, ownDevices] = await Promise.all([
+    apiFetch<Array<{ userId: string; deviceId: string }>>(`/api/conversations/${conversationId}/recipient-devices`),
+    apiFetch<DeviceSummary[]>('/api/devices'),
+  ]);
+  const ownOtherDevices = ownDevices
+    .filter((d) => !d.isCurrentDevice && d.status === 'active')
+    .map((d) => ({ userId: currentUserId, deviceId: d.id }));
+  return [...otherMemberDevices, ...ownOtherDevices];
+}
+
 export function MessageThread({
   conversationId,
   currentUserId,
@@ -172,10 +198,22 @@ export function MessageThread({
   // Every device an outgoing message needs its own independently-encrypted envelope
   // for — the other member's active devices, plus the caller's own other active
   // devices (self-fan-out — a second phone, a desktop client, a web tab left open
-  // elsewhere). Refreshed on every load, same timing as the old single-device ref
-  // this replaced; a device that comes online mid-thread is picked up the next time
-  // this effect reruns (conversation reopen), not mid-session — an acceptable,
-  // bounded staleness window, same one the old ref already had.
+  // elsewhere). Seeded on every load (thread mount/reopen, WS reconnect) purely so
+  // `sendEncrypted` always has *something* to show a "no reachable device" error
+  // against without waiting on a network round trip first — the value actually
+  // used to encrypt a send is never trusted from here; see `resolveSendTargets`.
+  //
+  // Previously this WAS the value every send encrypted against, refreshed only on
+  // reopen/reconnect — found live to be a real bug, not an acceptable staleness
+  // window: a long-lived, continuously-open, actively-chatting thread can run for
+  // many hours without ever remounting or losing its WS connection, during which
+  // a peer linking a new device (or this account's own new device) was silently
+  // never added as a send target — every message sent during that whole window
+  // permanently missed that device (Double Ratchet forward secrecy means it can
+  // never retroactively decrypt them), surfacing as "[Could not decrypt this
+  // message]" hours or days later with no way to recover short of the history-key
+  // fallback, which itself depends on some OTHER device of the account having
+  // actually been open recently enough to backfill it.
   const targetDeviceIdsRef = useRef<Array<{ userId: string; deviceId: string }>>([]);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -383,14 +421,7 @@ export function MessageThread({
       // worse off. There's nothing left to show that isn't already showing;
       // just let the next open retry.
       try {
-        const [otherMemberDevices, ownDevices] = await Promise.all([
-          apiFetch<Array<{ userId: string; deviceId: string }>>(`/api/conversations/${conversationId}/recipient-devices`),
-          apiFetch<DeviceSummary[]>('/api/devices'),
-        ]);
-        const ownOtherDevices = ownDevices
-          .filter((d) => !d.isCurrentDevice && d.status === 'active')
-          .map((d) => ({ userId: currentUserId, deviceId: d.id }));
-        targetDeviceIdsRef.current = [...otherMemberDevices, ...ownOtherDevices];
+        targetDeviceIdsRef.current = await resolveSendTargets(conversationId, currentUserId);
 
         // Catch up on anything this device hasn't decrypted yet — Double Ratchet
         // message keys are single-use, so this is a one-shot "first look" at each
@@ -641,7 +672,19 @@ export function MessageThread({
       setError('This device is locked. Please sign in again.');
       return;
     }
-    const targets = targetDeviceIdsRef.current;
+    // Always fresh — see `resolveSendTargets`'s own docstring for the live bug
+    // this fixes (a stale, session-lifetime device list silently missing a
+    // device linked mid-conversation). Falls back to whatever `load()` last
+    // resolved only on a genuine network failure here, so a transient blip
+    // degrades to the old (still real, but far rarer) staleness window rather
+    // than blocking the send outright.
+    let targets: Array<{ userId: string; deviceId: string }>;
+    try {
+      targets = await resolveSendTargets(conversationId, currentUserId);
+      targetDeviceIdsRef.current = targets;
+    } catch {
+      targets = targetDeviceIdsRef.current;
+    }
     if (targets.length === 0) {
       setError('This contact has no active device to message yet.');
       return;

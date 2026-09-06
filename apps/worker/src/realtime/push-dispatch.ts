@@ -200,13 +200,49 @@ async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): 
   const device = await prisma.device.findUnique({ where: { id: event.targetDeviceId }, select: { userId: true } });
   if (!device) return; // device was revoked/deleted between the message being sent and this running
 
+  // Self-fan-out (messages/service.ts's own docstring) means one of THIS push
+  // event's targets can genuinely be the sender's own OTHER device (a second
+  // phone, a desktop client) rather than the other conversation participant at
+  // all — found live: sending a message showed a "new message" banner, from
+  // yourself, on your own second device, exactly like WhatsApp/Signal never do
+  // for their own multi-device sync. The delivery-ack/deliveryToken machinery
+  // below still needs to reach this device (so that device's own local cache
+  // stays in sync and its delivered-tick bookkeeping is consistent), so this
+  // doesn't skip the push outright — only the parts of it that produce a
+  // user-visible alert.
+  const isOwnOtherDevice = device.userId === event.message.senderUserId;
+
   const prefs = await prisma.notificationPreference.findUnique({ where: { userId: device.userId } });
   // 'none' is the only value that suppresses a direct-conversation notification —
   // 'mentions_only' has no meaning for a 1:1 conversation yet (no @mentions exist
   // until Phase 5's groups), so it's treated the same as 'all' here rather than
   // silently dropping every direct message for someone who chose it expecting only
   // group-chat muting.
-  if (prefs?.conversationsDefault === 'none') return;
+  if (!isOwnOtherDevice && prefs?.conversationsDefault === 'none') return;
+
+  const deliveryToken = await createPushDeliveryToken(event.message.id, event.targetDeviceId);
+
+  if (isOwnOtherDevice) {
+    // Silent/data-only, matching sendFcm's own "content-available, no alert"
+    // default — this device still gets woken to sync/ack, just never shown a
+    // banner about a message its own account just sent. `isOwnMessage` also
+    // rides along for the Android local-notification path
+    // (push_notifications.dart's `_showFromData`), which otherwise has no other
+    // way to tell "a message I sent, echoed back to me" apart from "a message
+    // someone else sent me" purely from `fcmData.type: 'message'`. No
+    // `messagePayload` (web push) at all — a self-fan-out target with no live WS
+    // connection open has nothing useful to show anyway.
+    await dispatchTo(event.targetDeviceId, {
+      fcmData: {
+        type: 'message',
+        conversationId: event.message.conversationId,
+        messageId: event.message.id,
+        deliveryToken,
+        isOwnMessage: 'true',
+      },
+    });
+    return;
+  }
 
   const sender = await prisma.user.findUnique({
     where: { id: event.message.senderUserId },
@@ -214,7 +250,6 @@ async function handleNewMessage(event: Extract<MessageEvent, { type: 'new' }>): 
   });
   const senderName = sender?.displayName ?? 'someone';
   const body = bodyFor(event.message.contentTypeHint, senderName);
-  const deliveryToken = await createPushDeliveryToken(event.message.id, event.targetDeviceId);
 
   await dispatchTo(event.targetDeviceId, {
     messagePayload: { title: 'Comm', body, conversationId: event.message.conversationId },

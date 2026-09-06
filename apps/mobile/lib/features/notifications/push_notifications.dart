@@ -113,7 +113,14 @@ Future<void> _showFromData(
   } else if (type == 'message') {
     final conversationId = data['conversationId'] as String?;
     if (conversationId == null) return;
-    if (renderMessageBanner) {
+    // Self-fan-out (push-dispatch.ts's own `isOwnOtherDevice` docstring) — this
+    // push is a message THIS account just sent, echoed to one of its OWN other
+    // devices for sync, not something anyone actually sent to the person using
+    // this device. Never worth a "new message" banner, on top of `renderMessageBanner`
+    // itself, regardless of platform — found live as "I get notified about my own
+    // message on my second phone."
+    final isOwnMessage = data['isOwnMessage'] == 'true';
+    if (renderMessageBanner && !isOwnMessage) {
       await showNewMessageNotification(
         conversationId: conversationId,
         title: data['title'] as String? ?? 'Comm',

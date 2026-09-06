@@ -52,6 +52,16 @@ const messagesTableSchemaSql = [
 const insertMessageSql =
     'INSERT OR IGNORE INTO messages (id, conversation_id, sent_at, ciphertext) VALUES (?, ?, ?, ?)';
 
+/// Sibling of [insertMessageSql] that OVERWRITES an existing row instead of
+/// silently ignoring it — deliberately narrow, used by exactly one caller
+/// (message_cache.dart's `repairCachedMessage`) that needs to replace a
+/// message already cached as undecryptable now that a retry resolved it
+/// differently. `insertMessageSql`'s INSERT OR IGNORE is the right default
+/// everywhere else (a duplicate WS/REST delivery of an already-correct row is
+/// meant to be a no-op) — this is the one deliberate exception.
+const repairMessageSql =
+    'INSERT OR REPLACE INTO messages (id, conversation_id, sent_at, ciphertext) VALUES (?, ?, ?, ?)';
+
 const loadMessagesSql =
     'SELECT ciphertext FROM messages WHERE conversation_id = ? ORDER BY sent_at ASC';
 
