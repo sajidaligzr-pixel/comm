@@ -215,8 +215,18 @@ export async function sendMessage(
     // target set (IDOR guard, docs/35-authorization.md) — never throw for THAT case
     // specifically, since a device that just went inactive/was revoked in the race
     // window between the client resolving targets and sending shouldn't fail the
-    // whole send for every other, still-valid target.
-    const validRecipients = input.recipients.filter((r) => validTargetIds.has(r.deviceId));
+    // whole send for every other, still-valid target. Same treatment for a
+    // structurally empty envelope (found live: a historical client-side bug during a
+    // failed voice-message send persisted `MessageRecipient` rows with a real
+    // `x3dhInit` but no actual header/ciphertext for every recipient — silently
+    // corrupting the SENDER's own locally-saved session for each of them, since
+    // `encryptForDevice`'s session-establishment/save happens before the network
+    // request, not after a delivery confirmation. That client-side race is real and
+    // separate — this is the server-side half of closing it: never let a
+    // no-content "envelope" become a permanent row at all, for anyone.
+    const validRecipients = input.recipients.filter(
+      (r) => validTargetIds.has(r.deviceId) && r.envelope?.header && r.envelope?.ciphertext,
+    );
     if (validRecipients.length === 0) {
       throw new AppError('MESSAGE_FAILED', 'No one in this conversation currently has an active device to receive messages.');
     }
