@@ -37,7 +37,25 @@ final Dio _plainDio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 10
 /// on a check failure (offline, server unreachable, bad JSON) rather than
 /// blocking the app when it can't even confirm whether an update exists — being
 /// mandatory means "no skipping a confirmed update," not "no internet, no app."
+///
+/// Android-only, hard gated — found live: `/app-version.json` is one shared file
+/// with no per-platform variant (see update_models.dart's own docstring on why
+/// it's a single static file), and neither this function nor `AppVersionInfo`
+/// ever looked at its `platform` field before comparing `buildNumber`. Every
+/// Android-only release bump (this app's version has climbed a lot faster on
+/// Android, which ships far more often — see pubspec.yaml's own history) was
+/// therefore treated by any iOS install with a lower raw build number as "a
+/// newer build exists," triggering update_prompt.dart's overlay — mandatory and
+/// deliberately impossible to dismiss short of updating. Its only "Update"
+/// button downloads an `.apk` and fires an Android package-install intent
+/// (`downloadAndInstall`, `android_intent_plus`), which does nothing on iOS,
+/// so an affected phone was left permanently stuck behind that screen. iOS
+/// distribution is TestFlight (see this app's own README on why: not
+/// sideloaded, unlike Android), which already has its own update mechanism —
+/// this feature was only ever meant to exist for Android's sideloaded install,
+/// it just never got the runtime check to say so explicitly.
 Future<UpdateCheckResult?> checkForUpdate() async {
+  if (!Platform.isAndroid) return null;
   try {
     final packageInfo = await PackageInfo.fromPlatform();
     final currentBuild = int.tryParse(packageInfo.buildNumber) ?? 0;
