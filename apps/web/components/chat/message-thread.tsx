@@ -701,12 +701,13 @@ export function MessageThread({
       // "primary." `encryptForDevice` is safe to call any number of times; each call
       // either reuses that device's already-established ratchet session or runs a
       // fresh X3DH handshake against its published bundle first.
-      const recipients = await Promise.all(
+      const encrypted = await Promise.all(
         targets.map(async (t) => {
-          const { envelope, x3dhInit } = await encryptForDevice(t.userId, t.deviceId, opts.plaintext);
-          return { deviceId: t.deviceId, envelope, x3dhInit };
+          const { envelope, x3dhInit, confirmNewSession } = await encryptForDevice(t.userId, t.deviceId, opts.plaintext);
+          return { deviceId: t.deviceId, envelope, x3dhInit, confirmNewSession };
         }),
       );
+      const recipients = encrypted.map(({ deviceId, envelope, x3dhInit }) => ({ deviceId, envelope, x3dhInit }));
       const sentAt = new Date().toISOString();
 
       setPendingIds((prev) => new Set(prev).add(messageId));
@@ -743,6 +744,9 @@ export function MessageThread({
           attachment: opts.attachment,
         },
       });
+      // Only now — see OutgoingCiphertext.confirmNewSession's own docstring for
+      // why this can't happen any earlier.
+      await Promise.all(encrypted.map((e) => e.confirmNewSession?.()));
     } catch (err) {
       const kek2 = getCurrentKek();
       if (kek2) setMessages(await removeCachedMessage(kek2, conversationId, messageId));

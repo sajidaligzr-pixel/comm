@@ -95,4 +95,48 @@ describe('high-level session API', () => {
 
     expect(() => decryptMessage(bobSessionWithWrongKey, envelope)).toThrow();
   });
+
+  /**
+   * Proves the crypto-level property `conversation-crypto.ts`'s `decryptFromDevice`
+   * self-heal fallback relies on — see that function's own docstring for the real
+   * stuck-forever conversation this was found fixing. A sender's local session for
+   * a recipient can end up silently orphaned from what the recipient actually has
+   * (closed at the source by `encryptForDevice`'s `confirmNewSession`); before this
+   * fix, the only recovery on the receiving end was wiping local storage entirely.
+   * Two things a self-heal-on-decrypt-failure strategy depends on: decrypting with
+   * the wrong cached session fails closed (never silently returns garbage as if it
+   * were real plaintext), and bootstrapping a fresh inbound session from that same
+   * message's own `x3dhInit` recovers the real plaintext even though a different,
+   * stale session for the same two parties already existed locally.
+   */
+  it('a stale cached session fails closed, then a fresh bootstrap from the message\'s own x3dhInit recovers the real plaintext', () => {
+    const alice = generateIdentityKeyPair();
+    const bob = generateIdentityKeyPair();
+    const bobSignedPreKey = generateSignedPreKey(bob.signing.privateKey, 1);
+    const [bobOtkA, bobOtkB] = generateOneTimePreKeys(2, 1);
+
+    // Session A: what Bob actually has cached — a genuine, real session both
+    // sides once properly established together.
+    const { session: aliceSessionA, x3dhInit: x3dhInitA } = createOutboundSession(alice, bundleFor(bob, bobSignedPreKey, bobOtkA));
+    const bobSessionA = createInboundSession(bob, bobSignedPreKey, bobOtkA!, x3dhInitA);
+    // Sanity: session A genuinely works before moving on — this isn't the
+    // failure under test, just the "both sides once agreed" starting point.
+    expect(td.decode(decryptMessage(bobSessionA, encryptMessage(aliceSessionA, te.encode('hi'))))).toBe('hi');
+
+    // Session B: Alice independently creates a SECOND, unrelated session with
+    // Bob (a fresh X3DH — a different ephemeral key and one-time pre-key),
+    // mirroring exactly what `encryptForDevice` used to persist immediately
+    // even when the message carrying it never actually reached Bob. Bob's
+    // cache still only has session A; he was never given B.
+    const { session: aliceSessionB, x3dhInit: x3dhInitB } = createOutboundSession(alice, bundleFor(bob, bobSignedPreKey, bobOtkB));
+    const envelopeUnderB = encryptMessage(aliceSessionB, te.encode('real message'));
+
+    // (1) Decrypting under the wrong (stale) cached session must fail closed.
+    expect(() => decryptMessage(bobSessionA, envelopeUnderB)).toThrow();
+
+    // (2) The exact fallback `decryptFromDevice` now performs: bootstrap a
+    // fresh inbound session from this message's own x3dhInit, then retry.
+    const recoveredSession = createInboundSession(bob, bobSignedPreKey, bobOtkB!, x3dhInitB);
+    expect(td.decode(decryptMessage(recoveredSession, envelopeUnderB))).toBe('real message');
+  });
 });

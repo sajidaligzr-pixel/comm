@@ -160,6 +160,7 @@ class _ForwardSheetState extends ConsumerState<_ForwardSheet> {
         sentAt: sentAt,
         attachment: attachmentRef,
       );
+      await ref.read(messagesApiProvider).send(target.id, req);
     } else {
       final otherMemberDevices = await ref
           .read(conversationsApiProvider)
@@ -175,6 +176,9 @@ class _ForwardSheetState extends ConsumerState<_ForwardSheet> {
         );
       }
       final recipients = <RecipientEnvelope>[];
+      // See OutgoingCiphertext.confirmNewSession's own docstring — only invoked
+      // below once the send has actually succeeded.
+      final pendingSessionConfirms = <Future<void> Function()>[];
       for (final t in targets) {
         final outgoing = await convo.encryptForDevice(
           ref.read(keysApiProvider),
@@ -192,6 +196,8 @@ class _ForwardSheetState extends ConsumerState<_ForwardSheet> {
             x3dhInit: outgoing.x3dhInit,
           ),
         );
+        final confirm = outgoing.confirmNewSession;
+        if (confirm != null) pendingSessionConfirms.add(confirm);
       }
       req = SendMessageRequest(
         messageId: messageId,
@@ -202,9 +208,11 @@ class _ForwardSheetState extends ConsumerState<_ForwardSheet> {
         sentAt: sentAt,
         attachment: attachmentRef,
       );
+      await ref.read(messagesApiProvider).send(target.id, req);
+      for (final confirm in pendingSessionConfirms) {
+        await confirm();
+      }
     }
-
-    await ref.read(messagesApiProvider).send(target.id, req);
 
     // Same reasoning as message-thread.tsx's identical cache write: this
     // device's own outgoing plaintext is only ever knowable at the instant it's

@@ -155,7 +155,7 @@ export function GroupSessionProvider({
       const plaintext = utf8ToBytes(JSON.stringify(descriptor));
       for (const target of targets) {
         try {
-          const { envelope, x3dhInit } = await encryptForDevice(target.userId, target.deviceId, plaintext);
+          const { envelope, x3dhInit, confirmNewSession } = await encryptForDevice(target.userId, target.deviceId, plaintext);
           // REST, not `sendRealtimeEvent` — a real bug found via live testing: a
           // fire-and-forget WS send silently drops if the socket isn't open yet
           // (lib/realtime-client.ts's own documented behavior), which reliably
@@ -168,6 +168,8 @@ export function GroupSessionProvider({
           await apiFetch(`/api/groups/${groupId}/key-shares`, {
             body: { groupId, epoch, toDeviceId: target.deviceId, envelope, x3dhInit },
           });
+          // Only now — see OutgoingCiphertext.confirmNewSession's own docstring.
+          await confirmNewSession?.();
         } catch {
           // One member's device being briefly unreachable shouldn't abort sharing
           // with everyone else — swallowed, not thrown, same "best effort per

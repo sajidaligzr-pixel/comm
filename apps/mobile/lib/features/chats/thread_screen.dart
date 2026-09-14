@@ -1815,6 +1815,13 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     final replyToMessageId = _replyingTo?.id;
     if (_replyingTo != null) setState(() => _replyingTo = null);
 
+    // Populated only by the direct-conversation branch below — one entry per
+    // recipient whose envelope required creating a brand-new session. Must only
+    // be invoked once the send below has actually succeeded; see
+    // `OutgoingCiphertext.confirmNewSession`'s own docstring for the stuck-
+    // forever conversation this was found fixing.
+    final pendingSessionConfirms = <Future<void> Function()>[];
+
     try {
       final SendMessageRequest req;
       if (conversation.type == 'group') {
@@ -1877,6 +1884,8 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
               x3dhInit: outgoing.x3dhInit,
             ),
           );
+          final confirm = outgoing.confirmNewSession;
+          if (confirm != null) pendingSessionConfirms.add(confirm);
         }
         req = SendMessageRequest(
           messageId: messageId,
@@ -1917,6 +1926,12 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
       unawaited(syncHistoryEntry(ref.read(historyApiProvider), cached));
 
       await ref.read(messagesApiProvider).send(widget.conversationId, req);
+      // Only now — see pendingSessionConfirms' own declaration comment and
+      // OutgoingCiphertext.confirmNewSession's docstring for why this can't
+      // happen any earlier.
+      for (final confirm in pendingSessionConfirms) {
+        await confirm();
+      }
       if (mounted) setState(() => _pendingIds.remove(messageId));
     } on ApiException catch (e) {
       await _rollbackFailedSend(kek, messageId, restoreDraftOnFailure);

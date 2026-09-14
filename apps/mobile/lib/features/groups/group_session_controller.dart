@@ -99,6 +99,11 @@ class GroupSessionController {
         final outgoing = await convo.encryptForDevice(keysApi, target.userId, target.deviceId, plaintext);
         final envelope = MessageEnvelopeUpload(header: outgoing.envelope.header, ciphertext: outgoing.envelope.ciphertext);
         await groupsApi.sendKeyShare(groupId, epoch, target.deviceId, envelope, outgoing.x3dhInit);
+        // Only now — see OutgoingCiphertext.confirmNewSession's own docstring.
+        // A new per-device session created here but never confirmed (because
+        // sendKeyShare above threw, caught below) is correctly forgotten rather
+        // than persisted as if this member's device actually received the key.
+        await outgoing.confirmNewSession?.call();
       } catch (_) {
         // One member's device being briefly unreachable shouldn't abort sharing with
         // everyone else.

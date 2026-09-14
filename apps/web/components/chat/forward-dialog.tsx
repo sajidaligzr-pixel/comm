@@ -156,12 +156,13 @@ export function ForwardDialog({
         .map((d) => ({ userId: currentUserId, deviceId: d.id }));
       const targets = [...otherMemberDevices, ...ownOtherDevices];
       if (targets.length === 0) throw new Error(`${titleFor(target)} has no reachable device right now.`);
-      const recipients = await Promise.all(
+      const encrypted = await Promise.all(
         targets.map(async (t) => {
-          const { envelope, x3dhInit } = await encryptForDevice(t.userId, t.deviceId, plaintext);
-          return { deviceId: t.deviceId, envelope, x3dhInit };
+          const { envelope, x3dhInit, confirmNewSession } = await encryptForDevice(t.userId, t.deviceId, plaintext);
+          return { deviceId: t.deviceId, envelope, x3dhInit, confirmNewSession };
         }),
       );
+      const recipients = encrypted.map(({ deviceId, envelope, x3dhInit }) => ({ deviceId, envelope, x3dhInit }));
       await apiFetch(`/api/conversations/${target.id}/messages`, {
         method: 'POST',
         body: {
@@ -174,6 +175,8 @@ export function ForwardDialog({
           attachment: attachmentRef,
         },
       });
+      // Only now — see OutgoingCiphertext.confirmNewSession's own docstring.
+      await Promise.all(encrypted.map((e) => e.confirmNewSession?.()));
     }
 
     // Own outgoing messages are only ever knowable to this device at the instant
