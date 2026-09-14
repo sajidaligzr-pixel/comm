@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 46,
+  "buildNumber": 52,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-46.apk",
-  "releaseNotes": "Fixed a real bug affecting multi-device accounts: messages could permanently fail to decrypt on a newly-added device (and on the other person's side too) if a chat was left open for a long time before the new device was added. Also fixed getting notified about your own messages showing up on your other device."
+  "apkUrl": "/downloads/comm-52.apk",
+  "releaseNotes": "Fixed a structural encryption bug that could permanently break decryption in a conversation, requiring an app reinstall to recover. Messages now self-heal automatically instead."
 }
