@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 52,
+  "buildNumber": 53,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-52.apk",
-  "releaseNotes": "Fixed a structural encryption bug that could permanently break decryption in a conversation, requiring an app reinstall to recover. Messages now self-heal automatically instead."
+  "apkUrl": "/downloads/comm-53.apk",
+  "releaseNotes": "Fixed a race condition where several messages arriving close together from the same contact could permanently fail to decrypt. This closes the underlying cause for good, on top of yesterday's fix."
 }
