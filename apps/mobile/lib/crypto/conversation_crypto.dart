@@ -17,6 +17,44 @@ import 'session/session.dart' as session;
 import 'sessions.dart';
 import 'x3dh/x3dh.dart' show PublicKeyBundle, X3dhInitialMessage;
 
+/// A per-remote-device promise-chain mutex — every load-mutate-save cycle for the
+/// same `remoteDeviceId`'s session (whether encrypting TO it or decrypting FROM
+/// it — `sessions.dart` keys both directions' storage by the same remote device
+/// id, since a Double Ratchet session is one shared, bidirectional object) runs
+/// one at a time, in arrival order. Exact same shape as
+/// `group_session_controller.dart`'s own `_withLock` (see that file's own
+/// docstring for the original incident this closes for GROUP ratchets) — this
+/// was never applied to 1:1 sessions until a real live failure showed the
+/// identical race exists there too: several messages from the same sender
+/// arriving close together (a live WS burst, each handled fire-and-forget by
+/// `_onRealtimeNew`) let two `decryptFromDevice` calls both `loadSession` before
+/// either had saved — the one bootstrapping a brand-new session from `x3dhInit`
+/// hadn't persisted it yet when a sibling continuation message (no `x3dhInit` of
+/// its own) checked and found nothing, throwing "no existing session" for a
+/// message that arrived moments after a session-establishing one that WOULD have
+/// covered it, had the two not raced. Without this lock, `encryptForDevice`'s own
+/// deferred-save-until-confirmed logic has the identical exposure in the other
+/// direction (two outgoing sends to the same device racing each other).
+final Map<String, Future<void>> _sessionLocks = {};
+
+Future<T> _withSessionLock<T>(String remoteDeviceId, Future<T> Function() run) async {
+  final prior = _sessionLocks[remoteDeviceId] ?? Future.value();
+  final resultFuture = prior.then((_) => run(), onError: (_) => run());
+  // A rejection must never wedge the queue for later callers — chain a
+  // swallowed-error tracker for scheduling purposes only, never awaited by
+  // callers (same reasoning as group_session_controller.dart's `_withLock`).
+  final queued = resultFuture.then((_) {}, onError: (_) {});
+  _sessionLocks[remoteDeviceId] = queued;
+  unawaited(
+    queued.then((_) {
+      if (identical(_sessionLocks[remoteDeviceId], queued)) {
+        _sessionLocks.remove(remoteDeviceId);
+      }
+    }),
+  );
+  return resultFuture;
+}
+
 class _Unlocked {
   final IdentityKeyPair identity;
   final Uint8List kek;
@@ -96,36 +134,44 @@ Future<OutgoingCiphertext> encryptForDevice(
   String recipientUserId,
   String recipientDeviceId,
   Uint8List plaintext,
-) async {
+) {
   final unlocked = _requireUnlocked();
 
-  var s = await loadSession(unlocked.kek, recipientDeviceId);
-  final isNewSession = s == null;
-  dto.X3dhInitPayload? x3dhInit;
+  return _withSessionLock(recipientDeviceId, () async {
+    var s = await loadSession(unlocked.kek, recipientDeviceId);
+    final isNewSession = s == null;
+    dto.X3dhInitPayload? x3dhInit;
 
-  if (s == null) {
-    final bundle = await _fetchRemoteBundle(keysApi, recipientUserId, recipientDeviceId);
-    final result = await session.createOutboundSession(unlocked.identity, bundle);
-    s = result.session;
-    x3dhInit = dto.X3dhInitPayload(
-      identityAgreementKey: bytesToBase64(result.x3dhInit.identityAgreementKey),
-      ephemeralKey: bytesToBase64(result.x3dhInit.ephemeralKey),
-      usedSignedPreKeyId: result.x3dhInit.usedSignedPreKeyId,
-      usedOneTimePreKeyId: result.x3dhInit.usedOneTimePreKeyId,
-    );
-  }
+    if (s == null) {
+      final bundle = await _fetchRemoteBundle(keysApi, recipientUserId, recipientDeviceId);
+      final result = await session.createOutboundSession(unlocked.identity, bundle);
+      s = result.session;
+      x3dhInit = dto.X3dhInitPayload(
+        identityAgreementKey: bytesToBase64(result.x3dhInit.identityAgreementKey),
+        ephemeralKey: bytesToBase64(result.x3dhInit.ephemeralKey),
+        usedSignedPreKeyId: result.x3dhInit.usedSignedPreKeyId,
+        usedOneTimePreKeyId: result.x3dhInit.usedOneTimePreKeyId,
+      );
+    }
 
-  final envelope = await session.encryptMessage(s, plaintext);
-  final establishedSession = s;
-  if (isNewSession) {
-    return OutgoingCiphertext(
-      envelope: envelope,
-      x3dhInit: x3dhInit,
-      confirmNewSession: () => saveSession(unlocked.kek, recipientDeviceId, establishedSession),
-    );
-  }
-  await saveSession(unlocked.kek, recipientDeviceId, s);
-  return OutgoingCiphertext(envelope: envelope, x3dhInit: x3dhInit);
+    final envelope = await session.encryptMessage(s, plaintext);
+    final establishedSession = s;
+    if (isNewSession) {
+      return OutgoingCiphertext(
+        envelope: envelope,
+        x3dhInit: x3dhInit,
+        // Re-acquires the same lock when actually invoked (later, once the
+        // caller confirms delivery) — see confirmNewSession's own docstring for
+        // why this can't just save synchronously here.
+        confirmNewSession: () => _withSessionLock(
+          recipientDeviceId,
+          () => saveSession(unlocked.kek, recipientDeviceId, establishedSession),
+        ),
+      );
+    }
+    await saveSession(unlocked.kek, recipientDeviceId, s);
+    return OutgoingCiphertext(envelope: envelope, x3dhInit: x3dhInit);
+  });
 }
 
 Future<session.Session> _bootstrapInboundSession(
@@ -174,29 +220,31 @@ Future<Uint8List> decryptFromDevice(
   String senderDeviceId,
   session.MessageEnvelope envelope,
   dto.X3dhInitPayload? x3dhInit,
-) async {
+) {
   final unlocked = _requireUnlocked();
 
-  var s = await loadSession(unlocked.kek, senderDeviceId);
+  return _withSessionLock(senderDeviceId, () async {
+    var s = await loadSession(unlocked.kek, senderDeviceId);
 
-  if (s == null) {
-    if (x3dhInit == null) {
-      throw StateError('No existing session for this sender, and no session-establishment data on this message.');
-    }
-    s = await _bootstrapInboundSession(unlocked.kek, x3dhInit);
-  } else if (x3dhInit != null) {
-    try {
-      final plaintext = await session.decryptMessage(s, envelope);
-      await saveSession(unlocked.kek, senderDeviceId, s);
-      return plaintext;
-    } catch (_) {
+    if (s == null) {
+      if (x3dhInit == null) {
+        throw StateError('No existing session for this sender, and no session-establishment data on this message.');
+      }
       s = await _bootstrapInboundSession(unlocked.kek, x3dhInit);
+    } else if (x3dhInit != null) {
+      try {
+        final plaintext = await session.decryptMessage(s, envelope);
+        await saveSession(unlocked.kek, senderDeviceId, s);
+        return plaintext;
+      } catch (_) {
+        s = await _bootstrapInboundSession(unlocked.kek, x3dhInit);
+      }
     }
-  }
 
-  final plaintext = await session.decryptMessage(s, envelope);
-  await saveSession(unlocked.kek, senderDeviceId, s);
-  return plaintext;
+    final plaintext = await session.decryptMessage(s, envelope);
+    await saveSession(unlocked.kek, senderDeviceId, s);
+    return plaintext;
+  });
 }
 
 /// Memoizes in-flight (and briefly, resolved) decrypts by the message's own id, so no

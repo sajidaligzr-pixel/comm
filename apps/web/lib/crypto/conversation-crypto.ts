@@ -23,6 +23,43 @@ import { getCurrentIdentity, getCurrentKek } from './kek-holder';
 import { loadSession, saveSession } from './sessions';
 import { consumeOneTimePreKey, loadStoredIdentity } from './identity';
 
+/**
+ * A per-remote-device promise-chain mutex — every load-mutate-save cycle for the
+ * same `remoteDeviceId`'s session (whether encrypting TO it or decrypting FROM
+ * it — `sessions.ts` keys both directions' storage by the same remote device id,
+ * since a Double Ratchet session is one shared, bidirectional object) runs one at
+ * a time, in arrival order. Exact same shape as `group-session-provider.tsx`'s
+ * own `withGroupSessionLock` (see that component's own docstring for the
+ * original incident this closes for GROUP ratchets) — this was never applied to
+ * 1:1 sessions until a real live failure showed the identical race exists there
+ * too: several messages from the same sender arriving close together let two
+ * `decryptFromDevice` calls both `loadSession` before either had saved — the one
+ * bootstrapping a brand-new session from `x3dhInit` hadn't persisted it yet when
+ * a sibling continuation message (no `x3dhInit` of its own) checked and found
+ * nothing, throwing "no existing session" for a message that arrived moments
+ * after a session-establishing one that WOULD have covered it, had the two not
+ * raced. Without this lock, `encryptForDevice`'s own deferred-save-until-
+ * confirmed logic has the identical exposure in the other direction (two
+ * outgoing sends to the same device racing each other).
+ */
+const sessionLocks = new Map<string, Promise<unknown>>();
+
+function withSessionLock<T>(remoteDeviceId: string, run: () => Promise<T>): Promise<T> {
+  const prior = sessionLocks.get(remoteDeviceId) ?? Promise.resolve();
+  const result = prior.then(run, run); // run regardless of whether the prior queued op threw
+  // A rejection here must never wedge the queue for later callers.
+  const queued = result.catch(() => undefined);
+  sessionLocks.set(remoteDeviceId, queued);
+  // Evicted the same compare-and-delete way decryptFromDeviceOnce's own decrypt
+  // memo does below, so a genuinely new operation queued behind this one in the
+  // meantime is never evicted out from under it — unbounded growth otherwise,
+  // for the life of the tab, across every device this session ever talks to.
+  void queued.then(() => {
+    if (sessionLocks.get(remoteDeviceId) === queued) sessionLocks.delete(remoteDeviceId);
+  });
+  return result;
+}
+
 function requireUnlocked() {
   const identity = getCurrentIdentity();
   const kek = getCurrentKek();
@@ -87,35 +124,40 @@ export interface OutgoingCiphertext {
  * `OutgoingCiphertext.confirmNewSession`'s own docstring for why, and call it
  * once the caller has confirmed this message actually made it to the server.
  */
-export async function encryptForDevice(
+export function encryptForDevice(
   recipientUserId: string,
   recipientDeviceId: string,
   plaintext: Uint8Array,
 ): Promise<OutgoingCiphertext> {
   const { identity, kek } = requireUnlocked();
 
-  let session = await loadSession(kek, recipientDeviceId);
-  const isNewSession = !session;
-  let x3dhInit: X3dhInitPayload | null = null;
+  return withSessionLock(recipientDeviceId, async () => {
+    let session = await loadSession(kek, recipientDeviceId);
+    const isNewSession = !session;
+    let x3dhInit: X3dhInitPayload | null = null;
 
-  if (!session) {
-    const bundle = await fetchRemoteBundle(recipientUserId, recipientDeviceId);
-    const result = createOutboundSession(identity, bundle);
-    session = result.session;
-    x3dhInit = result.x3dhInit;
-  }
+    if (!session) {
+      const bundle = await fetchRemoteBundle(recipientUserId, recipientDeviceId);
+      const result = createOutboundSession(identity, bundle);
+      session = result.session;
+      x3dhInit = result.x3dhInit;
+    }
 
-  const envelope = encryptMessage(session, plaintext);
-  if (isNewSession) {
-    const establishedSession = session;
-    return {
-      envelope,
-      x3dhInit,
-      confirmNewSession: () => saveSession(kek, recipientDeviceId, establishedSession),
-    };
-  }
-  await saveSession(kek, recipientDeviceId, session);
-  return { envelope, x3dhInit, confirmNewSession: null };
+    const envelope = encryptMessage(session, plaintext);
+    if (isNewSession) {
+      const establishedSession = session;
+      return {
+        envelope,
+        x3dhInit,
+        // Re-acquires the same lock when actually invoked (later, once the
+        // caller confirms delivery) — see confirmNewSession's own docstring
+        // for why this can't just save synchronously here.
+        confirmNewSession: () => withSessionLock(recipientDeviceId, () => saveSession(kek, recipientDeviceId, establishedSession)),
+      };
+    }
+    await saveSession(kek, recipientDeviceId, session);
+    return { envelope, x3dhInit, confirmNewSession: null };
+  });
 }
 
 async function bootstrapInboundSession(kek: Uint8Array, x3dhInit: X3dhInitPayload) {
@@ -156,33 +198,35 @@ async function bootstrapInboundSession(kek: Uint8Array, x3dhInit: X3dhInitPayloa
  * one sender who actually needs it, and it now happens automatically the next time
  * they message us on a genuinely fresh session.
  */
-export async function decryptFromDevice(
+export function decryptFromDevice(
   senderDeviceId: string,
   envelope: MessageEnvelope,
   x3dhInit: X3dhInitPayload | null,
 ): Promise<Uint8Array> {
   const { kek } = requireUnlocked();
 
-  let session = await loadSession(kek, senderDeviceId);
+  return withSessionLock(senderDeviceId, async () => {
+    let session = await loadSession(kek, senderDeviceId);
 
-  if (!session) {
-    if (!x3dhInit) {
-      throw new Error('No existing session for this sender, and no session-establishment data on this message.');
-    }
-    session = await bootstrapInboundSession(kek, x3dhInit);
-  } else if (x3dhInit) {
-    try {
-      const plaintext = decryptMessage(session, envelope);
-      await saveSession(kek, senderDeviceId, session);
-      return plaintext;
-    } catch {
+    if (!session) {
+      if (!x3dhInit) {
+        throw new Error('No existing session for this sender, and no session-establishment data on this message.');
+      }
       session = await bootstrapInboundSession(kek, x3dhInit);
+    } else if (x3dhInit) {
+      try {
+        const plaintext = decryptMessage(session, envelope);
+        await saveSession(kek, senderDeviceId, session);
+        return plaintext;
+      } catch {
+        session = await bootstrapInboundSession(kek, x3dhInit);
+      }
     }
-  }
 
-  const plaintext = decryptMessage(session, envelope);
-  await saveSession(kek, senderDeviceId, session);
-  return plaintext;
+    const plaintext = decryptMessage(session, envelope);
+    await saveSession(kek, senderDeviceId, session);
+    return plaintext;
+  });
 }
 
 /**
