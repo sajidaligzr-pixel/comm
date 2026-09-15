@@ -1971,23 +1971,44 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
     }
   }
 
+  /// Picking + reading a gallery photo used to be un-guarded here: a photo
+  /// that Android/iOS haven't fully downloaded to the device yet (e.g. a
+  /// Google Photos "free up space" placeholder, which the OS has to fetch
+  /// from the cloud the moment something reads its bytes) throws instead of
+  /// returning bytes whenever that fetch fails or is blocked — and on
+  /// cellular that fetch is exactly the kind of thing a "Wi-Fi only" data
+  /// saver setting (Google Photos' own, or Android's system Data Saver)
+  /// blocks. With no try/catch here, that exception had nowhere to go but
+  /// straight out of this fire-and-forget `onSelected` callback — Flutter's
+  /// default zone handler swallows it in a release build, so the user saw
+  /// nothing: no bubble, no error, no sign anything was even attempted.
+  /// Wrapping this (matching `_sendFile`'s own try/catch a few lines below,
+  /// and `_downloadAttachment`'s) turns that silence into a real message.
   Future<void> _pickAndSendPhoto() async {
-    final picked = await ImagePicker().pickImage(
-      source: ImageSource.gallery,
-      imageQuality: 90,
-      // A modern phone photo is easily 4000x3000+; nothing in this app's UI
-      // ever displays one wider than the screen, and this pipeline still
-      // has to encrypt, upload, and later download+decrypt every byte of it.
-      // Capping the longest side at 1600 (well above what any bubble or the
-      // fullscreen viewer needs on a real device) keeps quality genuinely
-      // indistinguishable on-screen while cutting typical payload size
-      // dramatically on top of `imageQuality`'s own re-encode.
-      maxWidth: 1600,
-      maxHeight: 1600,
-    );
-    if (picked == null) return;
-    final bytes = await picked.readAsBytes();
-    await _sendFile(bytes, picked.name, picked.mimeType ?? 'image/jpeg');
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 90,
+        // A modern phone photo is easily 4000x3000+; nothing in this app's UI
+        // ever displays one wider than the screen, and this pipeline still
+        // has to encrypt, upload, and later download+decrypt every byte of it.
+        // Capping the longest side at 1600 (well above what any bubble or the
+        // fullscreen viewer needs on a real device) keeps quality genuinely
+        // indistinguishable on-screen while cutting typical payload size
+        // dramatically on top of `imageQuality`'s own re-encode.
+        maxWidth: 1600,
+        maxHeight: 1600,
+      );
+      if (picked == null) return;
+      final bytes = await picked.readAsBytes();
+      await _sendFile(bytes, picked.name, picked.mimeType ?? 'image/jpeg');
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not load that photo: $e')),
+        );
+      }
+    }
   }
 
   /// A view-once photo (docs/13-roadmap.md) rides the SAME inline-envelope
@@ -2005,44 +2026,62 @@ class _ThreadScreenState extends ConsumerState<ThreadScreen> {
   static const _maxViewOnceBytes = 2621440; // 2.5 MiB, matches web's own cap
 
   Future<void> _pickAndSendViewOncePhoto() async {
-    final picked = await ImagePicker().pickImage(
-      source: ImageSource.gallery,
-      imageQuality: 70,
-      // Same reasoning as `_pickAndSendPhoto`'s own `maxWidth`/`maxHeight`,
-      // more important here: this path's whole point is staying under
-      // `_maxViewOnceBytes`, and downscaling resolution buys far more of
-      // that budget than `imageQuality` alone ever could for a full-res
-      // source photo.
-      maxWidth: 1600,
-      maxHeight: 1600,
-    );
-    if (picked == null) return;
-    final bytes = await picked.readAsBytes();
-    if (bytes.length > _maxViewOnceBytes) {
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 70,
+        // Same reasoning as `_pickAndSendPhoto`'s own `maxWidth`/`maxHeight`,
+        // more important here: this path's whole point is staying under
+        // `_maxViewOnceBytes`, and downscaling resolution buys far more of
+        // that budget than `imageQuality` alone ever could for a full-res
+        // source photo.
+        maxWidth: 1600,
+        maxHeight: 1600,
+      );
+      if (picked == null) return;
+      final bytes = await picked.readAsBytes();
+      if (bytes.length > _maxViewOnceBytes) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'That photo is too large to send as view-once — try a smaller one.',
+              ),
+            ),
+          );
+        }
+        return;
+      }
+      await _sendEnvelope(
+        contentTypeHint: 'view_once',
+        plaintext: bytes,
+        cacheText: '',
+        cacheMediaBase64: bytesToBase64(bytes),
+      );
+    } catch (e) {
+      // See _pickAndSendPhoto's docstring — same silent-failure gap, same fix.
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'That photo is too large to send as view-once — try a smaller one.',
-            ),
-          ),
+          SnackBar(content: Text('Could not load that photo: $e')),
         );
       }
-      return;
     }
-    await _sendEnvelope(
-      contentTypeHint: 'view_once',
-      plaintext: bytes,
-      cacheText: '',
-      cacheMediaBase64: bytesToBase64(bytes),
-    );
   }
 
   Future<void> _pickAndSendFile() async {
-    final result = await FilePicker.platform.pickFiles(withData: true);
-    final picked = result?.files.single;
-    if (picked?.bytes == null) return;
-    await _sendFile(picked!.bytes!, picked.name, 'application/octet-stream');
+    try {
+      final result = await FilePicker.platform.pickFiles(withData: true);
+      final picked = result?.files.single;
+      if (picked?.bytes == null) return;
+      await _sendFile(picked!.bytes!, picked.name, 'application/octet-stream');
+    } catch (e) {
+      // See _pickAndSendPhoto's docstring — same silent-failure gap, same fix.
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not load that file: $e')),
+        );
+      }
+    }
   }
 
   /// Downloads + decrypts a `media` attachment's ciphertext exactly once per

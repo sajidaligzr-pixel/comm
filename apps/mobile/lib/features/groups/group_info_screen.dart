@@ -96,20 +96,29 @@ class _GroupInfoScreenState extends ConsumerState<GroupInfoScreen> {
   /// groups/service.ts's "Group avatar" section — a plain, unencrypted upload,
   /// unlike message media).
   Future<void> _pickAvatar() async {
-    final picked = await ImagePicker().pickImage(
-      source: ImageSource.gallery,
-      imageQuality: 90,
-    );
-    if (picked == null) return;
-    final bytes = await picked.readAsBytes();
-    setState(() => _avatarBusy = true);
+    // pickImage/readAsBytes used to sit outside this try, so a photo Android/
+    // iOS hasn't fully downloaded yet (a cloud-backup placeholder needing a
+    // network fetch the OS blocks on cellular, e.g. a data-saver setting) —
+    // or any other picker failure — threw straight out of this fire-and-
+    // forget button handler with nothing to catch it: no error, no spinner,
+    // just silence. See thread_screen.dart's `_pickAndSendPhoto` docstring
+    // for the same gap found and fixed there.
     try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 90,
+      );
+      if (picked == null) return;
+      final bytes = await picked.readAsBytes();
+      setState(() => _avatarBusy = true);
       final updated = await ref
           .read(groupsApiProvider)
           .uploadAvatar(widget.groupId, bytes);
       if (mounted) setState(() => _group = updated);
     } on ApiException catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not load that photo: $e')));
     } finally {
       if (mounted) setState(() => _avatarBusy = false);
     }
