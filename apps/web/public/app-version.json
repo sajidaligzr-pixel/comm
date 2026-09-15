@@ -1,7 +1,7 @@
 {
   "platform": "android",
-  "buildNumber": 53,
+  "buildNumber": 54,
   "versionName": "1.0.0",
-  "apkUrl": "/downloads/comm-53.apk",
-  "releaseNotes": "Fixed a race condition where several messages arriving close together from the same contact could permanently fail to decrypt. This closes the underlying cause for good, on top of yesterday's fix."
+  "apkUrl": "/downloads/comm-54.apk",
+  "releaseNotes": "Fixed sending photos/files silently failing (especially on mobile data) with no error message — you'll now see what went wrong if it happens again. Also fixed a security issue where a slow page load could briefly cause your password to leak into the URL/logs on the sign-in and unlock screens."
 }
