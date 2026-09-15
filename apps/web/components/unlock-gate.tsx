@@ -51,6 +51,14 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
   const [submitting, setSubmitting] = useState(false);
   const [biometricAvailable, setBiometricAvailable] = useState(false);
   const [biometricBusy, setBiometricBusy] = useState(false);
+  // Same fix, same bug, as login-form.tsx's own `hydrated` flag — see its
+  // docstring. This form is present in the initial server-rendered HTML
+  // (this component starts "locked" unconditionally, see the class docstring
+  // above) and stays that way until the mount effect below has actually run,
+  // so it sits through the exact same pre-hydration window where a click or
+  // an Enter-key press falls through to a native GET submit, serializing the
+  // password into the current URL's query string.
+  const [hydrated, setHydrated] = useState(false);
 
   // Which account's local IndexedDB (identity, sessions, biometric wrap) this tab
   // should be reading/writing — unlike login-form.tsx, this component never has a
@@ -71,6 +79,7 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
   }
 
   useEffect(() => {
+    setHydrated(true);
     if (getCurrentKek()) {
       setUnlocked(true);
       return;
@@ -177,7 +186,14 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
             </div>
           </div>
         )}
-        <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+        {/* method="post" is a second, independent layer under the `hydrated`
+            gate below — see login-form.tsx's identical form for the full
+            reasoning. No `action`: the current URL varies here (this gate
+            can mount on any authenticated page), and the default action
+            (the current URL) is what we want — the point is only to keep
+            the method as POST so a slipped-through native submit can't
+            serialize the password into that URL's query string. */}
+        <form onSubmit={handleSubmit} method="post" className="space-y-4" noValidate>
           <div>
             <Label htmlFor="unlock-password">Password</Label>
             <Input
@@ -192,7 +208,7 @@ export function UnlockGate({ children }: { children: React.ReactNode }): React.J
             />
           </div>
           <FieldError>{error}</FieldError>
-          <Button type="submit" className="w-full" disabled={submitting || !password}>
+          <Button type="submit" className="w-full" disabled={!hydrated || submitting || !password}>
             {submitting ? 'Unlocking…' : 'Unlock'}
           </Button>
         </form>

@@ -37,6 +37,22 @@ export function LoginForm(): React.JSX.Element {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | undefined>();
   const [submitting, setSubmitting] = useState(false);
+  // Tracks whether React has actually attached `handleSubmit` yet. Found live:
+  // on a slow/throttled connection (realistic on mobile — the exact class of
+  // network this app targets, see docs/93-mobile-first.md) there's a real
+  // window between first paint and hydration where this `<form>` renders but
+  // `onSubmit` isn't wired up yet. A click or an Enter-key press in that
+  // window falls through to the BROWSER's own default form submission —
+  // method GET, action = current URL — which serializes every named field,
+  // including the password, into the query string: visible in the address
+  // bar, browser history, this server's own access logs, and the `Referer`
+  // header of every subresource request that follows. Gating the submit
+  // button on this closes the gap for both a click and the implicit-submit
+  // Enter-key path (per the HTML spec, implicit submission requires an
+  // *enabled* submit button, so a disabled one blocks Enter too, not just
+  // clicks). The `action`/`method` below is the second, independent layer —
+  // see its own comment.
+  const [hydrated, setHydrated] = useState(false);
 
   // Reads localStorage in an effect, not a lazy useState initializer — this
   // component is server-rendered for its initial HTML like any Client Component, and
@@ -47,6 +63,7 @@ export function LoginForm(): React.JSX.Element {
   useEffect(() => {
     const remembered = localStorage.getItem(REMEMBERED_USERNAME_KEY);
     if (remembered) setUsername(remembered);
+    setHydrated(true);
   }, []);
 
   async function handleSubmit(e: FormEvent) {
@@ -144,7 +161,16 @@ export function LoginForm(): React.JSX.Element {
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+    // method/action are a second, independent layer under the hydration gate
+    // above: if a native submit ever slips through anyway (this component
+    // failing to mount at all, a browser extension re-dispatching the
+    // event, anything we haven't thought of), the fields go into a POST
+    // body against this same page instead of a GET query string — the page
+    // doesn't handle that POST (there's no server action here), so it isn't
+    // a working fallback login, but it's the difference between "credentials
+    // silently end up in the URL/history/logs" and "the click visibly does
+    // nothing," which is the actual security property worth guaranteeing.
+    <form onSubmit={handleSubmit} method="post" action="/login" className="space-y-4" noValidate>
       <div>
         <Label htmlFor="username">Username</Label>
         <Input
@@ -169,7 +195,7 @@ export function LoginForm(): React.JSX.Element {
         />
       </div>
       <FieldError>{error}</FieldError>
-      <Button type="submit" className="w-full" disabled={submitting}>
+      <Button type="submit" className="w-full" disabled={!hydrated || submitting}>
         {submitting ? 'Signing in…' : 'Sign in'}
       </Button>
     </form>
