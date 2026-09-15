@@ -20,7 +20,24 @@ class MediaApi {
   const MediaApi(this._client);
   final ApiClient _client;
 
-  static final Dio _rawDio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 20), receiveTimeout: const Duration(minutes: 5)));
+  // `sendTimeout` was missing here — confirmed live: a photo upload on bad/
+  // borderline mobile data can establish the connection fine (inside
+  // `connectTimeout`) and then just stop making progress mid-write, with
+  // nothing ever coming back to time it out against `receiveTimeout` either
+  // (that only starts counting once OUR data has finished going out; a
+  // stalled *send* never gets that far). With no `sendTimeout`, dio then
+  // waits on that write forever: no exception, so nothing for any try/catch
+  // to catch — not even the one this same file's docstring/thread_screen.dart
+  // fix just added around the picker step, since this hangs somewhere
+  // completely different. Root-caused live: a real user's upload to a real
+  // recipient produced zero client-side error AND zero server-side trace
+  // (no `.tmp-*` partial object ever appeared under `.data/media-objects/`,
+  // even immediately after they tried) — meaning the PUT never actually
+  // landed at the origin at all, consistent with a send that silently died
+  // somewhere on the way there. Bounding it means that same failure now
+  // surfaces as a real, catchable error after a wait, instead of an
+  // indefinite silent hang.
+  static final Dio _rawDio = Dio(BaseOptions(connectTimeout: const Duration(seconds: 20), sendTimeout: const Duration(minutes: 3), receiveTimeout: const Duration(minutes: 5)));
 
   static String resolve(String url) =>
       url.startsWith('/') ? '${AppConfig.apiBaseUrl}$url' : url;
